@@ -3886,10 +3886,13 @@ mod tests {
                 },
                 metadata: DataTransactionMetadata::new(),
             });
+            // Distinct leaves need distinct paths, just as in a real ledger tree.
+            let (_, proofs) =
+                irys_types::DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&header));
             module
                 .index_transaction_data(
                     &header,
-                    &vec![5, 6, 7, 8],
+                    &proofs[0].proof,
                     LedgerChunkRange(ledger_chunk_offset_ii!(ledger_offset, ledger_offset)),
                     0,
                 )

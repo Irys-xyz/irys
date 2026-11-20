@@ -3463,11 +3463,30 @@ impl StorageModule {
             }
             let relative_offset = u32::try_from(relative_offset)
                 .map_err(|_| eyre::eyre!("partition-relative chunk offset exceeds u32"))?;
-            offsets.push(PartitionChunkOffset::from(relative_offset));
+            let offset = PartitionChunkOffset::from(relative_offset);
+            if self
+                .interval_data_root_at(offset)?
+                .is_none_or(|root| root == data_root)
+            {
+                offsets.push(offset);
+            }
         }
         offsets.sort_unstable();
         offsets.dedup();
         Ok(Some(offsets))
+    }
+
+    /// A missing interval is a placement hole; a foreign interval owns the offset.
+    fn interval_data_root_at(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<DataRoot>> {
+        let (_, submodule) = self.get_submodule_for_offset(offset)?;
+        submodule.db.view(|tx| {
+            tx.tx_interval_at(offset)?
+                .map(|interval| tx.interval_data_root(&interval))
+                .transpose()
+        })
     }
 
     /// True when the offset's live interval is `Data` and no buffered write
@@ -3561,7 +3580,7 @@ impl StorageModule {
         Ok(status.placed)
     }
 
-    /// Classifies all local placements using one index read per submodule.
+    /// Classifies local placements against their live interval ownership.
     /// A candidate with no covering placement belongs to neither set.
     ///
     /// Cached-body reclamation uses this. The live label flips at `pwrite`,
@@ -3599,7 +3618,7 @@ impl StorageModule {
     ) -> eyre::Result<bool> {
         let infos = self.collect_data_root_infos(data_root)?;
         for info in &infos.0 {
-            if info.data_size == data_size && self.is_placement_persisted(info)? {
+            if info.data_size == data_size && self.is_placement_persisted(data_root, info)? {
                 return Ok(true);
             }
         }
@@ -3609,7 +3628,11 @@ impl StorageModule {
     /// True when `info` lies entirely inside this partition and every chunk
     /// of its `data_size` is persisted `Data`. A placement that starts before
     /// the partition or runs past its end is not a full copy here.
-    fn is_placement_persisted(&self, info: &DataRootInfo) -> eyre::Result<bool> {
+    fn is_placement_persisted(
+        &self,
+        data_root: DataRoot,
+        info: &DataRootInfo,
+    ) -> eyre::Result<bool> {
         let chunk_size = self.config.consensus.chunk_size;
         if chunk_size == 0 || info.data_size == 0 {
             return Ok(false);
@@ -3626,10 +3649,35 @@ impl StorageModule {
         let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
             return Ok(false);
         };
-        self.is_data_span_persisted(ii(
+        let span = ii(
             PartitionChunkOffset::from(start),
             PartitionChunkOffset::from(end),
-        ))
+        );
+        // Labels alone cannot prove ownership, and holes still need index heal.
+        let mut covered_until = u64::from(start);
+        for (range, submodule) in self.submodules.overlapping(span) {
+            let owned = submodule.db.view(|tx| {
+                let mut next = covered_until;
+                for row in tx.tx_intervals_in_range(
+                    range.start().max(span.start()),
+                    range.end().min(span.end()),
+                )? {
+                    if u64::from(row.start.0) > next || tx.interval_data_root(&row)? != data_root {
+                        return Ok(None);
+                    }
+                    next = u64::from(row.end.0.min(end)) + 1;
+                }
+                Ok(Some(next))
+            })?;
+            let Some(next) = owned else {
+                return Ok(false);
+            };
+            covered_until = next;
+        }
+        if covered_until != u64::from(end) + 1 {
+            return Ok(false);
+        }
+        self.is_data_span_persisted(span)
     }
 
     /// [`Self::is_data_chunk_persisted_at`] for every offset of `span`, read
@@ -3700,20 +3748,57 @@ impl StorageModule {
         candidates: &BTreeSet<TxChunkOffset>,
         persisted: impl Fn(PartitionChunkOffset) -> bool,
     ) -> eyre::Result<ChunkPlacementStatus> {
-        let infos = self.collect_data_root_infos(data_root)?;
         let mut status = ChunkPlacementStatus::default();
-        if infos.0.is_empty() {
+        if candidates.is_empty() {
             return Ok(status);
         }
-
+        let infos = self.collect_data_root_infos(data_root)?;
         let chunk_size = self.config.consensus.chunk_size;
         let num_chunks_in_partition = self.partition_chunks();
-        for tx_offset in candidates {
-            let raw_offset = u32::from(*tx_offset);
-            let chunk_byte_offset = u64::from(raw_offset)
-                .checked_mul(chunk_size)
-                .ok_or_else(|| eyre::eyre!("chunk byte offset overflow"))?;
-            for info in &infos.0 {
+        // A placement that spans submodules has one info row in each.
+        let mut seen = BTreeSet::new();
+        for info in infos
+            .0
+            .iter()
+            .filter(|info| seen.insert((info.start_offset.0, info.data_size)))
+        {
+            // Read ownership once per placement and submodule, not per candidate:
+            // a prune pass can classify a whole transaction.
+            let mut owners = BTreeMap::new();
+            if info.data_size > 0 && num_chunks_in_partition > 0 {
+                let start = i128::from(info.start_offset.0).max(0);
+                let end = (i128::from(info.start_offset.0)
+                    + i128::from(info.data_size.div_ceil(chunk_size))
+                    - 1)
+                .min(i128::from(num_chunks_in_partition) - 1);
+                if start <= end {
+                    let span = ii(
+                        PartitionChunkOffset(u32::try_from(start)?),
+                        PartitionChunkOffset(u32::try_from(end)?),
+                    );
+                    for (range, submodule) in self.submodules.overlapping(span) {
+                        let start = range.start().max(span.start());
+                        let end = range.end().min(span.end());
+                        submodule.db.view(|tx| {
+                            for row in tx.tx_intervals_in_range(start, end)? {
+                                owners.insert(
+                                    row.start.max(start),
+                                    (row.end.min(end), tx.interval_data_root(&row)?),
+                                );
+                            }
+                            Ok(())
+                        })?;
+                    }
+                }
+            }
+            for tx_offset in candidates {
+                if status.unpersisted.contains(tx_offset) {
+                    continue;
+                }
+                let raw_offset = u32::from(*tx_offset);
+                let chunk_byte_offset = u64::from(raw_offset)
+                    .checked_mul(chunk_size)
+                    .ok_or_else(|| eyre::eyre!("chunk byte offset overflow"))?;
                 if chunk_byte_offset >= info.data_size {
                     continue;
                 }
@@ -3724,10 +3809,18 @@ impl StorageModule {
                 }
                 let relative_offset = u32::try_from(relative_offset)
                     .map_err(|_| eyre::eyre!("partition-relative chunk offset exceeds u32"))?;
+                let offset = PartitionChunkOffset::from(relative_offset);
+                let owner = owners
+                    .range(..=offset)
+                    .next_back()
+                    .filter(|(_, (end, _))| offset <= *end)
+                    .map(|(_, (_, root))| *root);
+                if owner.is_some_and(|root| root != data_root) {
+                    continue;
+                }
                 status.placed.insert(*tx_offset);
-                if !persisted(PartitionChunkOffset::from(relative_offset)) {
+                if owner.is_none() || !persisted(offset) {
                     status.unpersisted.insert(*tx_offset);
-                    break;
                 }
             }
         }
@@ -11954,25 +12047,25 @@ mod tests {
         }
         storage.force_sync_pending_chunks()?;
 
-        assert!(storage.is_placement_persisted(&placement(0, 64))?);
+        assert!(storage.is_placement_persisted(data_root, &placement(0, 64))?);
         assert!(
-            storage.is_placement_persisted(&placement(0, 40))?,
+            storage.is_placement_persisted(data_root, &placement(0, 40))?,
             "a partial last chunk still needs only two chunks"
         );
-        assert!(storage.is_placement_persisted(&placement(1, 32))?);
+        assert!(storage.is_placement_persisted(data_root, &placement(1, 32))?);
         assert!(
-            !storage.is_placement_persisted(&placement(0, 65))?,
+            !storage.is_placement_persisted(data_root, &placement(0, 65))?,
             "a third chunk is needed"
         );
         assert!(
-            !storage.is_placement_persisted(&placement(-1, 96))?,
+            !storage.is_placement_persisted(data_root, &placement(-1, 96))?,
             "starts before the partition"
         );
         assert!(
-            !storage.is_placement_persisted(&placement(6, 96))?,
+            !storage.is_placement_persisted(data_root, &placement(6, 96))?,
             "runs past the partition end"
         );
-        assert!(!storage.is_placement_persisted(&placement(0, 0))?);
+        assert!(!storage.is_placement_persisted(data_root, &placement(0, 0))?);
 
         assert_eq!(storage.collect_data_root_infos(data_root)?.0.len(), 2);
         assert!(
@@ -12101,6 +12194,204 @@ mod tests {
         tx_hash: H256,
         data_root: H256,
         info: DataRootInfo,
+    }
+
+    #[test]
+    fn restart_hole_keeps_placement_until_index_heal() -> eyre::Result<()> {
+        let (_tmp, config, storage) = open_presence_module("restart_placement_hole")?;
+        let root = H256::repeat_byte(31);
+        register_presence_placement(&storage, root, 0, 2, 96)?;
+        for offset in [0, 2] {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset(offset),
+                vec![9; 32],
+                ChunkType::Data
+            ));
+        }
+        storage.force_sync_pending_chunks()?;
+        drop(storage);
+        let storage = reopen_presence(&config)?;
+        assert_eq!(
+            storage.interval_data_root_at(PartitionChunkOffset(1))?,
+            None
+        );
+        assert_eq!(
+            storage.partition_offsets_for_data_root_chunk(root, TxChunkOffset(1))?,
+            Some(vec![PartitionChunkOffset(1)])
+        );
+        let candidates = BTreeSet::from([TxChunkOffset(1)]);
+        let status = storage.chunk_placement_status(root, &candidates)?;
+        assert_eq!(status.placed, candidates);
+        assert_eq!(status.unpersisted, candidates);
+        assert!(!storage.holds_full_persisted_data_root(root, 96)?);
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_root_is_excluded_from_placement_lookups() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = open_presence_module("foreign_placement")?;
+        let root = H256::repeat_byte(31);
+        let foreign = H256::repeat_byte(32);
+        register_presence_placement(&storage, root, 0, 2, 96)?;
+        // Clearing leaves the parent's extent on its surviving fragments.
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset(1))?;
+        submodule.db.update(|tx| {
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset(1),
+                PartitionChunkOffset(1),
+                None,
+            )
+        })?;
+        register_presence_placement(&storage, foreign, 1, 1, 32)?;
+        for offset in 0..=2 {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset(offset),
+                vec![9; 32],
+                ChunkType::Data
+            ));
+        }
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_persisted_at(PartitionChunkOffset(1)));
+        assert_eq!(
+            storage.partition_offsets_for_data_root_chunk(root, TxChunkOffset(1))?,
+            Some(vec![])
+        );
+        let candidates = BTreeSet::from([TxChunkOffset(1)]);
+        let status = storage.chunk_placement_status(root, &candidates)?;
+        assert!(status.placed.is_empty());
+        assert!(status.unpersisted.is_empty());
+        assert!(
+            storage
+                .placed_tx_offsets_for_data_root(root, &candidates)?
+                .is_empty()
+        );
+        assert!(!storage.holds_full_persisted_data_root(root, 96)?);
+        assert!(storage.holds_full_persisted_data_root(foreign, 32)?);
+        // Even persisted bytes in an unowned hole cannot authorize reclamation.
+        submodule.db.update(|tx| {
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset(1),
+                PartitionChunkOffset(1),
+                None,
+            )
+        })?;
+        let status = storage.chunk_placement_status(root, &candidates)?;
+        assert_eq!(status.placed, candidates);
+        assert_eq!(status.unpersisted, candidates);
+        assert!(!storage.holds_full_persisted_data_root(root, 96)?);
+        Ok(())
+    }
+
+    #[test]
+    fn batched_placement_ownership_spans_submodules() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("batched_ownership").build();
+        let config = testing_config_tuned(tmp.path(), 32, 8, |node| {
+            node.database = index_database();
+        });
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                submodules: vec![
+                    (partition_chunk_offset_ii!(0, 3), "left".into()),
+                    (partition_chunk_offset_ii!(4, 7), "right".into()),
+                ],
+                ..presence_info()
+            },
+            &config,
+        )?;
+        let root = H256::repeat_byte(31);
+        let foreign = H256::repeat_byte(32);
+        register_presence_placement(&storage, root, 0, 7, 256)?;
+        // Simulate coverage removed by recovery: one slice is reassigned,
+        // the other remains a hole pending heal, despite its Data label.
+        for (start, end) in [(2, 3), (5, 6)] {
+            let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset(start))?;
+            submodule.db.update(|tx| {
+                tx.clear_tx_coverage_in_ranges(&[(
+                    PartitionChunkOffset(start),
+                    PartitionChunkOffset(end),
+                )])
+            })?;
+        }
+        register_presence_placement(&storage, foreign, 2, 3, 64)?;
+        for offset in 0..8 {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset(offset),
+                vec![9; 32],
+                ChunkType::Data
+            ));
+        }
+        storage.force_sync_pending_chunks()?;
+        let candidates = (0..10).map(TxChunkOffset).collect();
+        let status = storage.chunk_placement_status(root, &candidates)?;
+        assert_eq!(
+            status.placed,
+            [0, 1, 4, 5, 6, 7].into_iter().map(TxChunkOffset).collect()
+        );
+        assert_eq!(
+            status.unpersisted,
+            [5, 6].into_iter().map(TxChunkOffset).collect()
+        );
+        assert_eq!(
+            storage.placed_tx_offsets_for_data_root(root, &candidates)?,
+            status.placed
+        );
+        for candidate in candidates {
+            let single = storage.chunk_placement_status(root, &BTreeSet::from([candidate]))?;
+            assert_eq!(
+                single.placed.contains(&candidate),
+                status.placed.contains(&candidate)
+            );
+            assert_eq!(
+                single.unpersisted.contains(&candidate),
+                status.unpersisted.contains(&candidate)
+            );
+            let forward = storage
+                .partition_offsets_for_data_root_chunk(root, candidate)?
+                .unwrap();
+            assert_eq!(
+                forward,
+                if status.placed.contains(&candidate) {
+                    vec![PartitionChunkOffset(candidate.0)]
+                } else {
+                    vec![]
+                }
+            );
+        }
+        Ok(())
+    }
+
+    fn register_presence_placement(
+        storage: &StorageModule,
+        root: DataRoot,
+        start: u32,
+        end: u32,
+        data_size: u64,
+    ) -> eyre::Result<()> {
+        let span = ii(PartitionChunkOffset(start), PartitionChunkOffset(end));
+        for (range, submodule) in storage.submodules.overlapping(span) {
+            submodule.db.update(|tx| {
+                tx.add_tx_leaf_binding(
+                    root,
+                    &TxLeafBinding {
+                        data_root: root,
+                        prefix_hash: H256::zero(),
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    range.start().max(span.start()),
+                    range.end().min(span.end()),
+                    Some(root),
+                )?;
+                tx.add_data_root_info(
+                    root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(start as i32),
+                        data_size,
+                    },
+                )
+            })?;
+        }
+        Ok(())
     }
 
     fn presence_info() -> StorageModuleInfo {
