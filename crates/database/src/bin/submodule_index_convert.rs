@@ -98,7 +98,8 @@ mdbx-to-rocks writes <submodule>/rocks. The node does the same conversion when
 it starts, so a manual run is optional. The next start sees the complete
 rocks/ and renames db/ to db.migrated/. Read `ledger` and `slot` from
 <submodule>/packing_params.toml.
-Read num_chunks_in_partition and the chunk size from the chain config.
+Pass the active slot width (see --chunks-per-partition) and the chunk size from
+the chain config.
 
   submodule-index-convert mdbx-to-rocks \\
     --consensus-db <node>/.irys/irys_consensus_data \\

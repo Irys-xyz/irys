@@ -22,6 +22,11 @@ pub(super) async fn open_storage_modules(
     partition_chunks: u64,
     #[cfg(test)] open_delay: Duration,
 ) -> eyre::Result<Vec<Arc<StorageModule>>> {
+    // The first RocksDB open in the process fixes the shared cache and write
+    // buffer. A startup conversion opens RocksDB before any module open, and
+    // without this it would fix the production defaults instead of the
+    // configured limits.
+    irys_database::submodule::install_process_rocks_resources(&config.node_config.database)?;
     let labels: Vec<String> = infos.iter().map(module_label).collect();
     let opens = infos.into_iter().map(|info| {
         let config = config.clone();
@@ -81,19 +86,23 @@ fn migrate_submodule_indexes(
             .iter()
             .map(|(_, dir)| {
                 let path = config.node_config.base_directory.join(dir);
+                let label = path.display().to_string();
                 let span = span.clone();
-                scope.spawn(move || {
+                let handle = scope.spawn(move || {
                     let _span = span.enter();
                     migrate_submodule_index(&path, config, consensus, partition_chunks)
-                        .map_err(|err| format!("{}: {err:#}", path.display()))
-                })
+                });
+                (label, handle)
             })
             .collect();
+        // Join every thread before returning, so a panic does not hide the
+        // errors of the submodules joined after it.
         moves
             .into_iter()
-            .filter_map(|handle| match handle.join() {
-                Ok(result) => result.err(),
-                Err(panic) => std::panic::resume_unwind(panic),
+            .filter_map(|(label, handle)| match handle.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(format!("{label}: {err:#}")),
+                Err(panic) => Some(format!("{label}: panicked: {}", panic_message(&*panic))),
             })
             .collect()
     });
@@ -106,6 +115,14 @@ fn migrate_submodule_indexes(
             failures.join("; ")
         ))
     }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 fn module_label(info: &StorageModuleInfo) -> String {

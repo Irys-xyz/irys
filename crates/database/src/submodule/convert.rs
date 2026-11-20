@@ -264,7 +264,8 @@ pub struct ConvertOptions {
     pub ledger_id: u32,
     /// Partition slot from `packing_params.toml`.
     pub slot_index: u64,
-    /// Consensus `num_chunks_in_partition`.
+    /// Active slot width: consensus `num_chunks_in_partition`, or the resized
+    /// width after a partition resize.
     pub chunks_per_partition: u64,
     /// Consensus chunk size in bytes.
     pub chunk_size: u64,
