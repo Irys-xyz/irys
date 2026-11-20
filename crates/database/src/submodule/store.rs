@@ -30,7 +30,6 @@ use super::db::{
     tx_intervals_in_range, tx_intervals_overlap_ranges,
 };
 use super::interval::{IntervalRow, coalesce_inclusive_spans};
-#[cfg(feature = "rocksdb")]
 use super::rocks::{RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning};
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
@@ -611,7 +610,6 @@ impl MdbxSubmoduleStore {
     /// Does not run the v1 migration and does not write [`super::tables::SUBMODULE_SCHEMA`].
     /// That stamp is [`Self::put_schema_bytes`] after the copy. A crash before
     /// the stamp leaves the incomplete marker, which open refuses.
-    #[cfg(feature = "rocksdb")]
     pub(super) fn open_for_convert(
         path: impl AsRef<Path>,
         args: DatabaseArguments,
@@ -628,7 +626,6 @@ impl MdbxSubmoduleStore {
         Ok(store)
     }
 
-    #[cfg(feature = "rocksdb")]
     pub(super) fn env(&self) -> &DatabaseEnv {
         &self.env
     }
@@ -655,12 +652,10 @@ impl MdbxSubmoduleStore {
         }
     }
 
-    #[cfg(feature = "rocksdb")]
     pub(super) fn schema_bytes(&self) -> eyre::Result<Option<Vec<u8>>> {
         self.env.view_eyre(super::db::read_schema_bytes)
     }
 
-    #[cfg(feature = "rocksdb")]
     pub(super) fn put_schema_bytes(&self, bytes: &[u8]) -> eyre::Result<()> {
         self.ensure_mdbx_writable()?;
         let owned = bytes.to_vec();
@@ -671,7 +666,6 @@ impl MdbxSubmoduleStore {
 
     /// Next rows after `after`, in key order. One row is returned even when
     /// it is larger than `limit_bytes`, so the scan always moves forward.
-    #[cfg(feature = "rocksdb")]
     pub(super) fn read_rows<T, F>(
         &self,
         after: Option<T::Key>,
@@ -714,7 +708,6 @@ impl MdbxSubmoduleStore {
     }
 
     /// Next keys after `after`, in key order. Values are not kept.
-    #[cfg(feature = "rocksdb")]
     pub(super) fn read_keys<T>(
         &self,
         after: Option<T::Key>,
@@ -747,7 +740,6 @@ impl MdbxSubmoduleStore {
     }
 
     /// End offset of the last tx interval. `None` when the table is empty.
-    #[cfg(feature = "rocksdb")]
     pub(super) fn highest_interval_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
         use reth_db::cursor::DbCursorRO as _;
         use reth_db::transaction::DbTx as _;
@@ -1036,13 +1028,13 @@ fn note_mdbx_submodule_view() {
 }
 
 /// Read transactions opened by [`MdbxSubmoduleStore::view`] since the reset.
-#[cfg(all(test, feature = "rocksdb"))]
+#[cfg(test)]
 pub(super) fn reset_mdbx_submodule_views() {
     MDBX_SUBMODULE_VIEWS.with(|cell| cell.set(0));
 }
 
 /// Read transactions opened by [`MdbxSubmoduleStore::view`] since the reset.
-#[cfg(all(test, feature = "rocksdb"))]
+#[cfg(test)]
 pub(super) fn mdbx_submodule_views() -> usize {
     MDBX_SUBMODULE_VIEWS.with(std::cell::Cell::get)
 }
@@ -1353,24 +1345,22 @@ pub(super) fn drop_uninitialized_coverage_on(
     store.update(|tx| drop_coverage_rows(tx, &spans, chunk_size))
 }
 
-/// Which engine holds a submodule index. The node opens MDBX.
-/// A RocksDB variant is compiled with the `rocksdb` feature.
+/// Which engine holds a submodule index. The node opens RocksDB. MDBX is
+/// read only by the startup move and the converter.
 #[derive(Clone, Debug)]
 // MDBX-SUBMODULE-INDEX: make RocksSubmoduleStore the only type and delete this enum.
 pub enum SubmoduleIndex {
     // MDBX-SUBMODULE-INDEX: delete this variant and every Self::Mdbx match arm. Callers use RocksSubmoduleStore.
     Mdbx(MdbxSubmoduleStore),
-    #[cfg(feature = "rocksdb")]
     Rocks(RocksSubmoduleStore),
 }
 
-/// Both engines, or only MDBX when the `rocksdb` feature is off.
+/// Runs `$body` on whichever engine store the index holds.
 // MDBX-SUBMODULE-INDEX: delete this macro with the SubmoduleIndex enum.
 macro_rules! dispatch_index {
     ($self:expr, |$store:ident| $body:expr) => {{
         match $self {
             Self::Mdbx($store) => $body,
-            #[cfg(feature = "rocksdb")]
             Self::Rocks($store) => $body,
         }
     }};
@@ -1382,7 +1372,6 @@ impl SubmoduleIndex {
         Ok(Self::Mdbx(MdbxSubmoduleStore::open(path, args)?))
     }
 
-    #[cfg(feature = "rocksdb")]
     pub fn open_rocks(path: impl AsRef<Path>) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open(path)?))
     }
@@ -1396,7 +1385,6 @@ impl SubmoduleIndex {
     pub fn audit_index(&self) -> eyre::Result<Vec<String>> {
         match self {
             Self::Mdbx(_) => Ok(Vec::new()),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.audit_index(),
         }
     }
@@ -1408,7 +1396,6 @@ impl SubmoduleIndex {
         match self {
             // MDBX-SUBMODULE-INDEX: delete this arm. MDBX stores tx paths. RocksDB v1 does not.
             Self::Mdbx(_) => true,
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.stores_tx_paths(),
         }
     }
@@ -1429,13 +1416,11 @@ impl SubmoduleIndex {
                 let _ = (partition, packing);
                 Ok(())
             }
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.bind_packing_identity(partition, packing),
         }
     }
 
     /// Bench entry. Production uses [`Self::open_rocks`] and the shared cache size.
-    #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with_block_cache(
         path: impl AsRef<Path>,
         block_cache_bytes: usize,
@@ -1451,7 +1436,6 @@ impl SubmoduleIndex {
     /// This open skips the table-property scan during `DB::Open`.
     /// Production [`Self::open_rocks`] keeps every SST open and exports tickers.
     /// An empty directory is RocksDB v1.
-    #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open_with_stats(
             path, tuning,
@@ -1462,13 +1446,11 @@ impl SubmoduleIndex {
     ///
     /// Same table cache as [`Self::open_rocks_with`]. A schema file that is
     /// not the RocksDB v1 marker is refused.
-    #[cfg(feature = "rocksdb")]
     pub fn open_rocks_bench(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open_bench(path, tuning)?))
     }
 
     /// SST and blob files per column family. Empty on MDBX.
-    #[cfg(feature = "rocksdb")]
     pub fn column_file_usage(&self) -> eyre::Result<Vec<crate::submodule::ColumnFileUsage>> {
         match self {
             Self::Mdbx(_) => Ok(Vec::new()),
@@ -1479,7 +1461,6 @@ impl SubmoduleIndex {
     /// Replace offset-family values. The bytes are stored as given.
     ///
     /// RocksDB v1 writes `ChunkMetaByOffset`.
-    #[cfg(feature = "rocksdb")]
     pub fn write_raw_data_paths(
         &self,
         rows: impl IntoIterator<Item = (PartitionChunkOffset, Vec<u8>)>,
@@ -1491,7 +1472,6 @@ impl SubmoduleIndex {
     }
 
     /// Flush and compact the offset-row family.
-    #[cfg(feature = "rocksdb")]
     pub fn compact_data_paths(&self) -> eyre::Result<()> {
         match self {
             Self::Mdbx(_) => eyre::bail!("offset-row compact is rocks only"),
@@ -1503,13 +1483,11 @@ impl SubmoduleIndex {
     pub fn report_metrics(&self) {
         match self {
             Self::Mdbx(_) => {}
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.report_metrics(),
         }
     }
 
     /// Compaction and flush state. `None` on MDBX.
-    #[cfg(feature = "rocksdb")]
     pub fn rocks_background(&self) -> eyre::Result<Option<RocksBackground>> {
         match self {
             Self::Mdbx(_) => Ok(None),
@@ -1524,7 +1502,6 @@ impl SubmoduleIndex {
     pub fn settle_files(&self) -> eyre::Result<()> {
         match self {
             Self::Mdbx(_) => Ok(()),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.flush_and_compact(),
         }
     }
@@ -1532,7 +1509,6 @@ impl SubmoduleIndex {
     /// RocksDB write-stall, compaction, and flush counters.
     ///
     /// `None` for MDBX. The counters are property reads on the open database.
-    #[cfg(feature = "rocksdb")]
     pub fn rocks_ingest_stats(&self) -> eyre::Result<Option<RocksIngestStats>> {
         match self {
             Self::Mdbx(_) => Ok(None),
@@ -1556,7 +1532,6 @@ impl SubmoduleIndex {
     pub fn group_commit_enabled(&self) -> bool {
         match self {
             Self::Mdbx(store) => store.group.is_enabled(),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.group_commit_enabled(),
         }
     }
@@ -1610,7 +1585,6 @@ impl SubmoduleIndex {
             Self::Mdbx(_) => {
                 let _ = delay;
             }
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.set_wal_backstop(delay),
         }
     }
@@ -1622,7 +1596,6 @@ impl SubmoduleIndex {
     pub fn published_generation(&self) -> u64 {
         match self {
             Self::Mdbx(store) => store.group.generation(),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.published_generation(),
         }
     }
@@ -1631,7 +1604,6 @@ impl SubmoduleIndex {
     pub fn durable_generation(&self) -> u64 {
         match self {
             Self::Mdbx(store) => store.group.synced_generation(),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.durable_generation(),
         }
     }
@@ -1643,7 +1615,6 @@ impl SubmoduleIndex {
     pub fn wait_until_durable(&self, generation: u64) -> eyre::Result<()> {
         match self {
             Self::Mdbx(store) => store.group.wait_until_synced(generation),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.wait_until_durable(generation),
         }
     }
@@ -1652,7 +1623,6 @@ impl SubmoduleIndex {
     pub fn wal_sync_count(&self) -> u64 {
         match self {
             Self::Mdbx(_) => 0,
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.wal_sync_count(),
         }
     }
@@ -1661,13 +1631,12 @@ impl SubmoduleIndex {
     pub fn wal_backstop_sync_count(&self) -> u64 {
         match self {
             Self::Mdbx(_) => 0,
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.wal_backstop_sync_count(),
         }
     }
 
     /// The next dirty RocksDB WAL sync fails once. Later writes then fail.
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_next_wal_sync(&self) {
         match self {
             Self::Mdbx(_) => panic!("fail_next_wal_sync is rocks only"),
@@ -1677,7 +1646,7 @@ impl SubmoduleIndex {
 
     /// The next synced RocksDB write or compaction WAL flush fails once.
     /// An unsynced group append does not take this.
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_next_synced_write(&self) {
         match self {
             Self::Mdbx(_) => panic!("fail_next_synced_write is rocks only"),
@@ -1686,7 +1655,7 @@ impl SubmoduleIndex {
     }
 
     /// `true` after a RocksDB WAL sync failure until this index is dropped.
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn wal_sync_failed(&self) -> bool {
         match self {
             Self::Mdbx(_) => false,
@@ -1694,7 +1663,7 @@ impl SubmoduleIndex {
         }
     }
 
-    #[cfg(all(test, feature = "rocksdb"))]
+    #[cfg(test)]
     fn wal_backstop_delay(&self) -> Duration {
         match self {
             Self::Mdbx(store) => store.group.delay(),
@@ -1711,7 +1680,6 @@ impl SubmoduleIndex {
     fn group_sync_count(&self) -> u64 {
         match self {
             Self::Mdbx(store) => store.group.sync_count(),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.group_sync_count(),
         }
     }
@@ -1721,7 +1689,6 @@ impl SubmoduleIndex {
     fn mdbx_safe_nosync(&self) -> eyre::Result<bool> {
         match self {
             Self::Mdbx(store) => store.safe_nosync(),
-            #[cfg(feature = "rocksdb")]
             Self::Rocks(_) => eyre::bail!("not an mdbx index"),
         }
     }
@@ -1916,7 +1883,6 @@ mod tests {
         let mdbx =
             SubmoduleIndex::open_mdbx(dir.path().join("db"), DatabaseArguments::irys_testing()?)?;
         f(&mdbx)?;
-        #[cfg(feature = "rocksdb")]
         {
             let rocks = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
             f(&rocks)?;
@@ -3418,7 +3384,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_full_group_does_not_sync_until_a_durable_write() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3667,7 +3632,6 @@ mod tests {
 
     /// A clean `DB` drop is not a power loss: close may sync the WAL, and
     /// shutdown does sync it. This checks the covering write, then reopen.
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_synced_write_makes_an_unsynced_registration_durable() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3705,7 +3669,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_shutdown_syncs_a_quiet_registration() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3725,7 +3688,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_backstop_syncs_a_quiet_registration() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3761,7 +3723,6 @@ mod tests {
     /// flag does not, so `update` and `update_covered` keep failing. The
     /// backstop thread and an explicit sync share that path. Shutdown's last
     /// sync does too.
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_wal_sync_failure_rejects_later_writes() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3823,7 +3784,6 @@ mod tests {
     /// visible. Later `update` and `update_covered` calls fail while the
     /// flag is set. Group commit stays on so `update_covered` is the
     /// unsynced path, which must still stop.
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_synced_batch_wal_failure_rejects_later_writes() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3900,7 +3860,6 @@ mod tests {
     }
 
     /// Metadata uses the same synced batch helper as a reset marker.
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_metadata_synced_batch_wal_failure_rejects_later_writes() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3922,7 +3881,6 @@ mod tests {
     }
 
     /// Compaction's `flush_wal(true)` is a durable point. Its failure sticks.
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_flush_synced_batch_wal_failure_rejects_later_writes() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3947,7 +3905,6 @@ mod tests {
 
     /// Group commit appends the WAL without syncing. That append must leave
     /// the synced-write failure armed for the next `update`.
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_unsynced_write_preserves_synced_batch_wal_failure() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -3981,7 +3938,6 @@ mod tests {
     }
 
     /// The backstop thread uses the same sync as shutdown's last flush.
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_backstop_sync_failure_rejects_later_writes() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
@@ -4017,7 +3973,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocks_backstop_defaults_to_one_second() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()

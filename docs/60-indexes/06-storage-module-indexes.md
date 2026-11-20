@@ -322,7 +322,7 @@ the 4-byte max key plus a trailing `0`, which sorts after every 4-byte
 offset.
 
 The converter is `submodule-index-convert` in the `irys-database` crate.
-Build it with the `rocksdb` feature. Stop the node before you run it.
+Stop the node before you run it.
 The tool takes the index lock and refuses the run when that lock is held.
 The directory name does not need to contain `copy`.
 

@@ -10,7 +10,7 @@ telemetry = ["irys-utils/telemetry"]
 
 [dependencies]
 # Irys
-irys-database = { workspace = true, features = ["rocksdb"] }
+irys-database.workspace = true
 irys-domain.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true

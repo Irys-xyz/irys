@@ -672,12 +672,10 @@ pub fn delete_reset_marker<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "rocksdb")]
 pub(super) fn read_schema_bytes<T: DbTx>(tx: &T) -> eyre::Result<Option<Vec<u8>>> {
     Ok(tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?)
 }
 
-#[cfg(feature = "rocksdb")]
 pub(super) fn write_schema_bytes<T: DbTxMut>(tx: &T, bytes: &[u8]) -> eyre::Result<()> {
     tx.put::<Metadata>(MetadataKey::DBSchemaVersion, bytes.to_vec())?;
     Ok(())

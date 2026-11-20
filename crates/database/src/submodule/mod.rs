@@ -1,4 +1,3 @@
-#[cfg(feature = "rocksdb")]
 // MDBX-SUBMODULE-INDEX: delete this module with the converters once the rollback window is closed.
 mod convert;
 // MDBX-SUBMODULE-INDEX: delete this module with the MDBX submodule engine. The consensus database stays MDBX.
@@ -9,9 +8,7 @@ mod interval;
 mod migrate;
 mod packing;
 mod placement;
-#[cfg(feature = "rocksdb")]
 mod records;
-#[cfg(feature = "rocksdb")]
 pub mod rocks;
 pub mod store;
 pub mod tables;
@@ -20,7 +17,6 @@ mod verify;
 // MDBX-SUBMODULE-INDEX: remove with the MDBX submodule engine. The consensus database stays MDBX.
 mod warmup;
 
-#[cfg(feature = "rocksdb")]
 // MDBX-SUBMODULE-INDEX: drop convert_mdbx_to_rocks, convert_mdbx_to_rocks_at_startup, convert_rocks_to_mdbx, and verify_mdbx_and_rocks from this export. verify_rocks_records can move out.
 pub use convert::{
     ConvertOptions, ConvertStats, EngineEquivalenceReport, convert_mdbx_to_rocks,
@@ -33,9 +29,7 @@ pub use interval::IntervalRow;
 pub use packing::{
     PACKING_RECORD_LEN, PACKING_RECORD_VERSION, PackingRecord, packing_params_valid_for_module,
 };
-#[cfg(feature = "rocksdb")]
 pub use records::{decode_offset_meta, encode_offset_meta};
-#[cfg(feature = "rocksdb")]
 pub use rocks::{
     BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, ColumnFileUsage, DELETE_SUBRANGE_OFFSETS, RocksBackground,
     RocksIngestStats, RocksResourceLimits, RocksResources, RocksSubmoduleStore, RocksTuning,

@@ -1007,7 +1007,6 @@ fn classify_mdbx(row: Option<Vec<u8>>) -> MdbxSchema {
 /// that dies with the handle, so the process-wide cache cannot serve it.
 fn open_index_cold(path: &Path, engine: Engine) -> eyre::Result<SubmoduleIndex> {
     match engine {
-        #[cfg(feature = "rocksdb")]
         Engine::Rocks => SubmoduleIndex::open_rocks_with_block_cache(path, 64 * 1024 * 1024),
         _ => open_index(path, engine, false),
     }
@@ -1070,17 +1069,8 @@ fn open_rocks_index(path: &Path) -> eyre::Result<SubmoduleIndex> {
     open_rocks_checked(path)
 }
 
-#[cfg(feature = "rocksdb")]
 fn open_rocks_checked(path: &Path) -> eyre::Result<SubmoduleIndex> {
     SubmoduleIndex::open_rocks(path)
-}
-
-#[cfg(not(feature = "rocksdb"))]
-fn open_rocks_checked(path: &Path) -> eyre::Result<SubmoduleIndex> {
-    let _ = path;
-    eyre::bail!(
-        "this index is RocksDB. Rebuild with --features rocksdb: cargo build -p irys-database --features rocksdb --release --bin tx-path-derive-bench"
-    )
 }
 
 fn harvest_offsets(
