@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795086477554,
+  "lastUpdate": 1795203110587,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23695,6 +23695,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4da36d5adca52d1f9373da097d5730f82a7eb3d0",
+          "message": "feat(storage): make RocksDB the only submodule index and move MDBX on start (#1833)\n\n* feat(storage)!: make RocksDB the only submodule index and move MDBX on start\n\nRocksDB v1 is now the only submodule index engine the node opens.\n`database.submodule_index` and `SubmoduleIndexEngine` are removed.\n`DatabaseConfig` denies unknown fields, so a config that still sets the\nkey fails to parse instead of silently selecting an engine.\n\nBefore each storage module opens, every submodule that still has\n`db/mdbx.dat` moves to RocksDB in three steps:\n\n1. Convert `db/` into `rocks.migrating/` and verify the copy against\n   `db/` and the consensus database.\n2. Rename `rocks.migrating/` to `rocks/`.\n3. Rename `db/` to `db.migrated/`, kept for a rollback.\n\n`db/` does not change before step 3, so an interrupted start redoes the\ncopy. A complete `rocks/` beside `db/` is the live index (after step 2,\nor after a manual conversion), so only step 3 runs. Storage modules and\nthe submodules inside each module convert in parallel.\n\nThe converter gets the node's open consensus environment, because\nlibmdbx refuses a second open of an environment in one process. Ledger\noffsets use the active slot width from the epoch snapshot, which a\npartition resize makes smaller than the genesis\n`num_chunks_in_partition`. A placement the consensus database does not\ncover, a placement in a module with no ledger, or a verify mismatch fails\nthe start and leaves `db/` unchanged. A schema v1 index left part way\nthrough its in-place v2 migration finishes that migration first.\n\nOpen refuses `db/mdbx.dat` without `rocks/`, and `db.migrated/` without\n`rocks/`, so an empty new index never hides live rows.\n\nTests now run on RocksDB. MDBX cases of dual-engine tests are removed,\nfixtures write complete RocksDB v1 placements (binding, interval, and\ndata-root info in one batch), and tests of MDBX-only behavior (stored\ntx-path bytes, no checksum, in-place migration on open, engine\nselection) are removed.\n\nBREAKING CHANGE: remove `database.submodule_index` from node configs\nbefore starting this release. The first start converts and verifies\nevery MDBX submodule index and needs free space for a second copy.\n\n* docs(storage): document the startup move to RocksDB and its rollback\n\nDescribe the three-step startup move, the states that fail the start,\nthe manual conversion, and the rollback to 4.1.x (set\n`database.submodule_index = \"rocksdb\"` there). Update the MDBX removal\nplan: the config key and the open-path switch are done, the startup move\nis the next removal step, and the marker index is regenerated.\n\n* fix(storage): harden the startup move to RocksDB\n\n- Install the configured RocksDB process resources before any submodule\n  converts. The first RocksDB open in a process fixes the shared cache\n  and write buffer, and a conversion target opened through the default\n  path installed the production defaults, so the configured limits were\n  ignored for the whole start that does the move.\n- Trust a `rocks/` beside a live `db/` only when RocksDB could open it:\n  the v1 marker in `SCHEMA`, a `CURRENT` file, and no `CONVERTING`.\n  Otherwise keep `db/` and fail, instead of retiring `db/` and then\n  failing the open with an error that does not name the moved rows.\n- Join every submodule thread and report a panic as that submodule's\n  error, so a panic no longer hides the errors of its siblings.\n- Converter help and `ConvertOptions` docs name the active slot width,\n  which a partition resize makes smaller than the genesis\n  `num_chunks_in_partition`.\n\n* test(storage): restore EFBIG coverage and prove the leaf-binding rejection\n\n- Restore the EFBIG open test on RocksDB: open refuses before it opens or\n  changes the index, writes packing params, or grows `chunks.dat`. The\n  error now says the index was not opened, because open no longer\n  migrates it.\n- The leaf-binding mining test now derives tx paths from a consensus\n  database, shows the intact chunk wins, then that the overwritten chunk\n  is rejected. Without derivation it passed even with the binding check\n  removed.\n\n* docs(storage): document recovery for a placement past the consensus DB\n\nExplain why a placement can be past the consensus frontier (only when\nthe consensus database is older than the index) and the manual recovery\nwith `mdbx-to-rocks --allow-unresolved`. Say that finishing an\ninterrupted v1 to v2 migration writes `db/`, and list the files a\ncomplete `rocks/` needs.\n\n* fix(storage): retire db/ only beside a rocks/ that RocksDB opens\n\nA `rocks/` with the v1 marker and a `CURRENT` could still fail to open,\nfor example with a missing column family. The move then renamed `db/`\naway and the module open failed after that. The move now opens the\nexisting `rocks/` read-only first (`check_rocks_index_opens`) and keeps\n`db/` in place when that open fails.\n\n* docs(storage): recovery steps for a lost rocks/ and the active slot width\n\nMove a broken `rocks/` aside before restoring it or converting\n`db.migrated/` again, and say that `db.migrated/` does not hold rows\nwritten after the move. The manual convert takes the active slot width,\nwhich `[hardforks.fission]` sets once that resize is active.\n\n* build(database): link RocksDB unconditionally and drop the rocksdb feature\n\nRocksDB is the only submodule index engine, and every node build already\nenabled the feature through irys-domain. The gates and the feature-off\nfallbacks are removed, the converter and bench bins build without a flag,\nand irys-database no longer builds in two feature variants.",
+          "timestamp": "2026-11-20T19:12:28Z",
+          "tree_id": "e0083f888d5852b1ed9dfdca524f54bcbd130ece",
+          "url": "https://github.com/Irys-xyz/irys/commit/4da36d5adca52d1f9373da097d5730f82a7eb3d0"
+        },
+        "date": 1795203109176,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011958,
+            "range": "± 0.00009",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.123481,
+            "range": "± 0.004145",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.212516,
+            "range": "± 0.010644",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.141488,
+            "range": "± 0.192105",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065601,
+            "range": "± 0.000347",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 661.090546,
+            "range": "± 4.080876",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 910.880012,
+            "range": "± 42.293723",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120087,
+            "range": "± 0.001131",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1203.842558,
+            "range": "± 42.788019",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1660.082667,
+            "range": "± 94.352051",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027916,
+            "range": "± 0.001796",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 142.315717,
+            "range": "± 3.829235",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 181.801929,
+            "range": "± 1.901481",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
