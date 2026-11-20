@@ -187,6 +187,10 @@ Guards outside those plays:
 - L44: drop MdbxSubmoduleStore from this export when the MDBX engine is deleted. The other names stay until the trait collapses onto RocksSubmoduleStore.
 - L50: remove this re-export with the migrate CLI.
 
+#### `crates/database/src/submodule/rocks.rs`
+
+- L1031: delete with the startup migration. It decides whether an existing rocks/ is the live index before db/ is retired.
+
 #### `crates/database/src/submodule/store.rs`
 
 - L53: collapse this trait onto RocksSubmoduleStore when MDBX is gone. Do not delete behavior RocksDB v1 implements. The default methods below are the MDBX behavior.

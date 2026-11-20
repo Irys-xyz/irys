@@ -64,9 +64,11 @@ database. The unresolved placements are left out of `rocks/` and counted as
 blocks, and indexes those placements again when it migrates those blocks.
 
 Open also refuses a submodule that has `db.migrated/` but no complete
-`rocks/`. An empty new index would hide the rows in `db.migrated/`.
-Restore `rocks/`, or rename `db.migrated/` back to `db/` so the next start
-converts it again.
+`rocks/`. An empty new index would hide the rows in `db.migrated/`. To
+recover, first move any broken `rocks/` out of the submodule directory.
+Then restore `rocks/` from a backup, or rename `db.migrated/` back to `db/`
+so the next start converts it again. `db.migrated/` is the index as it was
+at the move: rows the node wrote to `rocks/` after the move are not in it.
 
 The converter places each row at `slot * partition_chunks + offset`. The
 start uses the active slot width from the epoch snapshot, which a
@@ -334,7 +336,9 @@ are the fields in `<submodule>/packing_params.toml`.
 That file also records `entropy_packing_iterations` and `chunk_size`.
 A file that omits them is filled from the current consensus when the
 node opens the module, then written back.
-`chunks-per-partition` and `chunk-size` come from the chain config.
+`chunk-size` comes from the chain config. `chunks-per-partition` is the
+active slot width: the consensus `num_chunks_in_partition`, or the
+`partition_chunks` of `[hardforks.fission]` once that resize is active.
 Mainnet chunk size is 262144. The tool derives the tx path at that ledger
 offset and requires the stored bytes to be identical. A mismatch aborts
 and names the partition offset.
