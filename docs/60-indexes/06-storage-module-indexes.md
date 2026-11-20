@@ -4,58 +4,77 @@
 
 The removal list is [mdbx-submodule-index-removal.md](mdbx-submodule-index-removal.md).
 
-Each submodule keeps its index in `db/` (MDBX) or `rocks/` (RocksDB).
-`database.submodule_index` selects the engine. The value is `mdbx` or
-`rocksdb`. The node opens only that directory. It refuses a layout that
-does not match the config. The node refuses to open MDBX when
-`rocks/SCHEMA` or `rocks/CURRENT` exists, because after a conversion
-`rocks/` is the live index and `db/` stays beside it unread. A `rocks/`
-directory that contains only `CONVERTING` does not count. A rollback to
-MDBX moves `rocks/` out of the module directory (for example, rename it
-to `rocks.retired`) before the node starts.
+Each submodule keeps its index in `rocks/` (RocksDB v1). The node opens
+only RocksDB. Releases up to 4.1.x could also keep it in `db/` (MDBX),
+selected by `database.submodule_index`. That key is removed. A config that
+still sets it fails to parse, so delete the key before you start this
+release.
 
-MDBX schema v1 is the on-disk format of release 4.0.8. The node migrates
-that `db/` to MDBX schema v2 in place the first time this release opens
-it. After that drop commits, 4.0.x starts, but it returns no data-path
-proof for a migrated offset whose proof lived in the dropped table. A
-later 4.1.x start still serves the copied offset rows and does not import
-rows 4.0.x wrote into the dropped table. Data sync does not refetch those
-chunks while the interval is `Data`. Open blocks on that migration: it
-copies every data path into a per-offset table in batches, then drops the
-old hash-keyed table,
-so the module is not served until it finishes and free space must hold
-both copies until the drop. A v1 data-path hash with no stored blob
-refuses open, and each later start retries it, until the file is
-repaired or the module is reset. Both a finished schema v1 `db/` and a
-schema v2 `db/` convert to RocksDB, so the conversion can run before or
-after the first start. A schema row that still starts with
-`irys-submodule-index migrate-v1 ` is neither. The converter refuses it
-and does not modify the directory. Start the node so the in-place
-migration finishes, then convert. There is no separate v1 copy.
+## Startup move from MDBX to RocksDB
 
-An omitted `database.submodule_index` stays `mdbx`. That first open is
-also when these storage defaults take effect. Before the index
-migration, open sets the logical size of `chunks.dat` and does not
-allocate blocks. ext4 returns `EFBIG` when the file is larger than
-16 TiB - 4 KiB. A mainnet partition is 18.01 TiB, so that file does
-not fit. The built-in testnet consensus (`consensus = "Testnet"`)
-opens that same 18.01 TiB file. 12.37 TiB is only the Custom scaffold
-in `testnet_config.toml` (`num_chunks_in_partition = 51872000`). A
-live testnet node does not load that scaffold. Open
-refuses, and the index is not migrated. `EFBIG` is not a free-space
-error. Format the drive with XFS, or use another filesystem whose
-maximum file size is at least 18.01 TiB. That limit applies to mainnet
-and to the built-in testnet. When the file fits, the open
-migrates the index, then reserves a short or holey `chunks.dat` to the
-full partition (`fallocate` mode 0). A v1 index keeps its rows until
-the v2 copy commits and the old table is dropped. Dropped pages stay in `mdbx.dat`
-until a compact. The reserve can take the free space that copy still
-occupies. The first open needs filesystem free space for the grown
-index and for the hole reserve at the same time. Both sit on the
-submodule disk. A 4.0.8 file is sparse, so the reserve runs,
-and on a large file that reserve can dominate the first open.
-`EOPNOTSUPP` leaves the file sparse.
-Any other `fallocate` error fails the open.
+When the node starts, it moves each submodule that still has
+`db/mdbx.dat` to RocksDB before the module opens
+(`crates/chain/src/submodule_index_migration.rs`):
+
+1. Convert `db/` into `rocks.migrating/`, then verify the copy against
+   `db/` and the consensus database.
+2. Rename `rocks.migrating/` to `rocks/`.
+3. Rename `db/` to `db.migrated/`. The node does not read it again. Keep
+   it while you can still need a rollback, then delete it.
+
+Each step leaves a state that the next start finishes. `db/` does not
+change before step 3, so an interrupted start deletes `rocks.migrating/`
+and converts again. A complete `rocks/` beside `db/` is the live index
+(after step 2, or after a manual conversion), so only step 3 runs.
+
+The start fails, names the module, and leaves `db/` unchanged when:
+
+- `db.migrated/` already exists.
+- `rocks/` beside `db/` is not complete: it has no `SCHEMA`, or it has
+  `CONVERTING`.
+- The consensus database does not cover a placement in `db/`. The node
+  writes the block index before the chunk placements, so this occurs only
+  when the consensus database is older than the index: a power loss with
+  a non-durable `database.sync_mode`, or a restored or copied directory.
+- `packing_params.toml` names no ledger, but `db/` has a placement.
+- Verify finds a mismatch.
+
+Open also refuses a submodule that has `db.migrated/` but no complete
+`rocks/`. An empty new index would hide the rows in `db.migrated/`.
+Restore `rocks/`, or rename `db.migrated/` back to `db/` so the next start
+converts it again.
+
+The converter places each row at `slot * partition_chunks + offset`. The
+start uses the active slot width from the epoch snapshot, which a
+partition resize makes smaller than the genesis `num_chunks_in_partition`.
+
+A schema v1 `db/` (release 4.0.8) converts directly. The converter reads
+it and does not change it. A schema row that still starts with
+`irys-submodule-index migrate-v1 ` is a v1 to v2 in-place migration that
+an earlier release did not finish. The start finishes that migration,
+then converts.
+
+Every storage module, and every submodule inside it, converts on its own
+thread, so the disks work in parallel. Memory pinned to warm the MDBX
+sources shares one process memlock budget. The submodule disk needs free space for a second copy of the
+index. Measure `db/` with `du` before the upgrade.
+
+## First open
+
+Open sets the logical size of `chunks.dat` and does not allocate blocks.
+ext4 returns `EFBIG` when the file is larger than 16 TiB - 4 KiB. A
+mainnet partition is 18.01 TiB, so that file does not fit. The built-in
+testnet consensus (`consensus = "Testnet"`) opens that same 18.01 TiB
+file. 12.37 TiB is only the Custom scaffold in `testnet_config.toml`
+(`num_chunks_in_partition = 51872000`). A live testnet node does not load
+that scaffold. Open refuses. `EFBIG` is not a free-space error. Format the
+drive with XFS, or use another filesystem whose maximum file size is at
+least 18.01 TiB. That limit applies to mainnet and to the built-in
+testnet. When the file fits, the open reserves a short or holey
+`chunks.dat` to the full partition (`fallocate` mode 0). A 4.0.8 file is
+sparse, so the reserve runs, and on a large file that reserve can
+dominate the first open. `EOPNOTSUPP` leaves the file sparse. Any other
+`fallocate` error fails the open.
 
 When the partition hash in `packing_params.toml` matches the assignment
 and the ledger or the slot does not, open keeps or clears the stored
@@ -84,8 +103,7 @@ serving share it with the recall preads.
 A write-ahead `Interrupted` mark is still written before the `pwrite`.
 `NodeConfig::testing()` sets `recall_direct_io`
 false and both of those intervals to 0. A config that sets only
-`num_writes_before_sync` still takes the other defaults. The RocksDB
-cache and write-buffer keys are ignored while the engine stays MDBX.
+`num_writes_before_sync` still takes the other defaults.
 
 A fresh RocksDB index is RocksDB v1. The marker, in `rocks/SCHEMA` and
 in the metadata schema row, is `irys-submodule-index rocksdb 1`. Any
@@ -318,30 +336,39 @@ Open does not rewrite it.
 copies the proof bytes from the offset record. It does not copy the
 trailer.
 
-## Move MDBX to RocksDB v1
+## Move MDBX to RocksDB v1 by hand
 
-Stop the node. Do this for each submodule directory.
+The node does this when it starts. To do it before the upgrade, stop the
+node and run, for each submodule directory. `--chunks-per-partition` is the
+active slot width: after a partition resize it is the resized width, not
+the genesis `num_chunks_in_partition`.
 
 ```sh
-submodule-index-convert mdbx-to-rocks \
-  --consensus-db <node>/.irys/irys_consensus_data \
-  --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
-  <submodule>/db <submodule>/rocks
-submodule-index-convert verify \
+submodule-index-convert mdbx-to-rocks --verify \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <submodule>/db <submodule>/rocks
 ```
 
-Set `database.submodule_index` to `rocksdb`. Start the node. Keep `db/`.
+The next start sees the complete `rocks/` and renames `db/` to
+`db.migrated/`.
+
+## Rollback to 4.1.x
+
+A 4.1.x node reads `rocks/` when its config sets
+`database.submodule_index = "rocksdb"`. Add that key and start the 4.1.x
+node. Leave `db.migrated/` in place: 4.1.x does not read it.
+
+To roll back to the MDBX engine of 4.1.x instead, build a new MDBX index
+from `rocks/` as below.
 
 ## Rollback to MDBX schema v2
 
-This rolls a 4.1.0 node back to the MDBX engine of the same release. The
-output is MDBX schema v2, which release 4.0.x cannot read. Stop the node.
-`rocks-to-mdbx` rebuilds the tx paths by derivation.
+This rolls a node back to the MDBX engine of a 4.1.x release.
+Release 4.0.x cannot read it. Stop the node. `rocks-to-mdbx` rebuilds the
+tx paths by derivation. `db.migrated/` does not have the writes made
+after the move, so do not use it as the rollback index.
 
 ```sh
 submodule-index-convert rocks-to-mdbx \
@@ -358,11 +385,12 @@ submodule-index-convert verify --rollback \
 
 `--rollback` is required here: MDBX has no checksum column, so the
 checksums the node wrote on RocksDB are reported as `dropped_checksums`,
-not as mismatches. Replace `db/` with `<new-db-dir>` only after verify passes. Move
-`rocks/` out of the submodule directory (for example, rename it to
-`rocks.retired`). Open refuses MDBX when `rocks/SCHEMA` or `rocks/CURRENT`
-is a file. A `rocks/` directory that contains only `CONVERTING` does not.
-Set `database.submodule_index` to `mdbx`. Start the node.
+not as mismatches. After verify passes, put `<new-db-dir>` at `db/`. Move
+`rocks/` and `db.migrated/` out of the submodule directory (for example,
+rename `rocks/` to `rocks.retired`). The 4.1.x open refuses MDBX when
+`rocks/SCHEMA` or `rocks/CURRENT` is a file. Set
+`database.submodule_index` to `mdbx` or delete the key, then start the
+4.1.x node.
 
 ## Corrupt intervals.json
 
