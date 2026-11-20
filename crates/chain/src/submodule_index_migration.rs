@@ -21,7 +21,9 @@ use std::path::Path;
 use eyre::WrapErr as _;
 use irys_database::reth_db::DatabaseEnv;
 use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
-use irys_database::submodule::{ConvertOptions, convert_mdbx_to_rocks_at_startup};
+use irys_database::submodule::{
+    ConvertOptions, check_rocks_index_opens, convert_mdbx_to_rocks_at_startup,
+};
 use irys_database::submodule_db_args;
 use irys_domain::{PACKING_PARAMS_FILE_NAME, PackingParams};
 use irys_types::Config;
@@ -37,8 +39,6 @@ const MIGRATED_MDBX_DIR: &str = "db.migrated";
 const ROCKS_SCHEMA_FILE: &str = "SCHEMA";
 /// Present while a conversion has not finished. See `convert.rs`.
 const CONVERTING_FILE: &str = "CONVERTING";
-/// RocksDB names its live manifest here. An open without it fails.
-const ROCKS_CURRENT_FILE: &str = "CURRENT";
 
 /// Makes `rocks/` the live index of the submodule at `submodule_dir`.
 ///
@@ -69,9 +69,9 @@ pub(crate) fn migrate_submodule_index(
         );
     }
     if rocks.exists() {
-        if !rocks_index_complete(&rocks) {
+        if let Err(reason) = check_live_rocks_index(&rocks) {
             eyre::bail!(
-                "{} is not a complete RocksDB v1 index (that needs the v1 marker in SCHEMA, a CURRENT file, and no CONVERTING), and it is beside the MDBX index {}. The MDBX index was not changed. Remove {} and start again. The node then converts {}.",
+                "{} is not a complete RocksDB v1 index ({reason:#}), and it is beside the MDBX index {}. The MDBX index was not changed. Move {} out of the submodule directory and start again. The node then converts {}.",
                 rocks.display(),
                 mdbx.display(),
                 rocks.display(),
@@ -104,14 +104,19 @@ pub(crate) fn migrate_submodule_index(
     Ok(())
 }
 
-/// The files a RocksDB v1 open requires: the v1 marker in `SCHEMA` and a
-/// `CURRENT`, with no `CONVERTING` left by an unfinished conversion. Anything
-/// less keeps `db/` as the live index.
-fn rocks_index_complete(rocks: &Path) -> bool {
-    let marker = fs::read(rocks.join(ROCKS_SCHEMA_FILE));
-    marker.is_ok_and(|bytes| bytes == SUBMODULE_SCHEMA_ROCKS_V1.as_bytes())
-        && rocks.join(ROCKS_CURRENT_FILE).is_file()
-        && !rocks.join(CONVERTING_FILE).exists()
+/// `rocks/` is the live index only when no conversion is unfinished in it
+/// (`CONVERTING`), `SCHEMA` holds the v1 marker, and RocksDB opens it
+/// read-only (`CURRENT`, manifest, column families). Anything less keeps
+/// `db/` as the live index.
+fn check_live_rocks_index(rocks: &Path) -> eyre::Result<()> {
+    if rocks.join(CONVERTING_FILE).exists() {
+        eyre::bail!("{CONVERTING_FILE} is present");
+    }
+    let marker = fs::read(rocks.join(ROCKS_SCHEMA_FILE)).unwrap_or_default();
+    if marker != SUBMODULE_SCHEMA_ROCKS_V1.as_bytes() {
+        eyre::bail!("{ROCKS_SCHEMA_FILE} does not hold the RocksDB v1 marker");
+    }
+    check_rocks_index_opens(rocks)
 }
 
 fn convert_into(
@@ -422,11 +427,15 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// `rocks/` beside `db/` is trusted only when RocksDB could open it: the
-    /// v1 marker, `CURRENT`, and no `CONVERTING`. Otherwise `db/` stays.
+    /// `rocks/` beside `db/` is trusted only when RocksDB opens it. A marker,
+    /// or a marker plus `CURRENT`, is not enough. Otherwise `db/` stays.
     #[rstest::rstest]
     #[case::marker_without_current(b"irys-submodule-index rocksdb 1\n".as_slice(), false)]
     #[case::foreign_marker_with_current(b"something else\n".as_slice(), true)]
+    #[case::marker_with_a_current_naming_no_manifest(
+        b"irys-submodule-index rocksdb 1\n".as_slice(),
+        true
+    )]
     fn a_rocks_index_that_cannot_open_keeps_db(
         #[case] marker: &[u8],
         #[case] with_current: bool,

@@ -1026,6 +1026,14 @@ impl std::fmt::Debug for RocksSubmoduleStore {
     }
 }
 
+/// Opens the completed index at `path` read-only, then closes it. Returns the
+/// open error for a directory RocksDB v1 cannot open. Writes nothing.
+// MDBX-SUBMODULE-INDEX: delete with the startup migration. It decides whether an existing rocks/ is the live index before db/ is retired.
+pub fn check_rocks_index_opens(path: &Path) -> eyre::Result<()> {
+    drop(RocksSubmoduleStore::open_read_only(path)?);
+    Ok(())
+}
+
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
         Self::open_inner(path, RocksTuning::baseline(), true, false, None, true, None)

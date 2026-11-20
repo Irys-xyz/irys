@@ -39,7 +39,7 @@ pub use records::{decode_offset_meta, encode_offset_meta};
 pub use rocks::{
     BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, ColumnFileUsage, DELETE_SUBRANGE_OFFSETS, RocksBackground,
     RocksIngestStats, RocksResourceLimits, RocksResources, RocksSubmoduleStore, RocksTuning,
-    install_process_rocks_resources,
+    check_rocks_index_opens, install_process_rocks_resources,
 };
 // MDBX-SUBMODULE-INDEX: drop MdbxSubmoduleStore from this export when the MDBX engine is deleted. The other names stay until the trait collapses onto RocksSubmoduleStore.
 pub use store::{
