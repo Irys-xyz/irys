@@ -2595,7 +2595,15 @@ mod tests {
 
     #[test]
     fn winning_data_chunk_whose_leaf_does_not_bind_submits_nothing() {
-        let (_tmp, storage, mut inner, _header) = open_data_miner(U256::zero(), true);
+        let (tmp, storage, _inner, header) = open_data_miner(U256::zero(), true);
+        let header = header.expect("indexed header");
+        // Derivation works, so only the leaf binding can reject the win.
+        let (mut inner, runtime) = miner_with_tx_path_derivation(tmp.path(), &storage, &header);
+        let _enter = runtime.enter();
+        assert!(
+            mine_once(&mut inner).is_some(),
+            "the intact chunk binds its leaf and wins"
+        );
         let end = PartitionChunkOffset::from(DATA_CHUNKS - 1);
         let mut before = Vec::new();
         for offset in 0..=*end {
@@ -2705,15 +2713,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_stored_tx_path_derives_the_merkle_proof() {
-        let (tmp, storage, _inner, header) = open_data_miner(U256::zero(), true);
-        let header = header.expect("indexed header");
-        let (_, paths) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&header));
-        let expected = paths[0].proof.clone();
-        let db_dir = tmp.path().join("consensus");
+    /// A miner over `storage` that derives tx paths from a consensus database
+    /// holding `header` in a Submit block. Keep the runtime entered until
+    /// `resolve`: dropping it first drops a blocking task that has not started.
+    fn miner_with_tx_path_derivation(
+        tmp: &std::path::Path,
+        storage: &Arc<StorageModule>,
+        header: &irys_types::DataTransactionHeader,
+    ) -> (PartitionMiningServiceInner, tokio::runtime::Runtime) {
+        let db_dir = tmp.join("consensus");
         std::fs::create_dir_all(&db_dir).expect("consensus dir");
-        let db = write_submit_chain(&db_dir, &header, storage.config.consensus.chunk_size);
+        let db = write_submit_chain(&db_dir, header, storage.config.consensus.chunk_size);
         let pool =
             Arc::new(irys_database::tx_path_derive::tx_path_derive_pool(2).expect("tx path pool"));
         let vdf_state = Arc::new(RwLock::new(VdfState::new(
@@ -2722,21 +2732,29 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         )));
         let (service_senders, _receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
+        let inner = PartitionMiningServiceInner::new(
             &storage.config,
             service_senders,
-            Arc::clone(&storage),
+            Arc::clone(storage),
             false,
             VdfStateReadonly::new(vdf_state),
             U256::zero(),
             Some(db),
             Some(pool),
         );
-        // Keep the runtime alive until `resolve`. Dropping it first drops a
-        // blocking task that has not started.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime");
+        (inner, runtime)
+    }
+
+    #[test]
+    fn missing_stored_tx_path_derives_the_merkle_proof() {
+        let (tmp, storage, _inner, header) = open_data_miner(U256::zero(), true);
+        let header = header.expect("indexed header");
+        let (_, paths) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&header));
+        let expected = paths[0].proof.clone();
+        let (mut inner, runtime) = miner_with_tx_path_derivation(tmp.path(), &storage, &header);
         let _enter = runtime.enter();
         let solution = mine_once(&mut inner).expect("difficulty 0 finds the first chunk");
         let derived = solution

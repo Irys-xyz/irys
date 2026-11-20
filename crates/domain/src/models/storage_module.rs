@@ -1962,7 +1962,7 @@ fn fallocate_chunks(file: &File, path: &Path, full_len: u64) -> eyre::Result<()>
 /// `EFBIG` from the logical-size check. The index has not been opened.
 fn chunks_file_too_big(path: &Path, full_len: u64) -> eyre::Report {
     eyre!(
-        "EFBIG: chunks file {} cannot be {full_len} bytes on this filesystem. ext4's maximum file size is 16 TiB - 4 KiB. The submodule index was not migrated. Format the drive with XFS, or move the storage module to a filesystem that can hold the file",
+        "EFBIG: chunks file {} cannot be {full_len} bytes on this filesystem. ext4's maximum file size is 16 TiB - 4 KiB. The submodule index was not opened. Format the drive with XFS, or move the storage module to a filesystem that can hold the file",
         path.display()
     )
 }
@@ -10961,6 +10961,64 @@ mod tests {
         eyre::ensure!(
             index_at < file_at,
             "chunks file was reserved before the index opened: {order:?}"
+        );
+        Ok(())
+    }
+
+    /// Arms the logical-size check to return `EFBIG` and clears it on drop.
+    struct ChunksLenEfbig;
+
+    impl ChunksLenEfbig {
+        fn arm() -> Self {
+            CHUNKS_LEN_EFBIG.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for ChunksLenEfbig {
+        fn drop(&mut self) {
+            CHUNKS_LEN_EFBIG.with(|flag| flag.set(false));
+        }
+    }
+
+    /// ext4 cannot name a mainnet partition. Open must refuse before it opens
+    /// or changes the index, writes `packing_params.toml`, or grows
+    /// `chunks.dat`.
+    #[test]
+    fn efbig_refuses_open_before_the_index_opens() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("chunks_efbig").build();
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let config = testing_config(tmp.path(), 32, 4);
+        drop(open_submodule_index(&sub, &config.node_config.database)?);
+        let rocks = sub.join("rocks");
+        let before = directory_fingerprint(&rocks)?;
+        clear_submodule_open_order();
+        let _efbig = ChunksLenEfbig::arm();
+        let err = StorageModule::new(&one_span(3, "sub", None), &config)
+            .expect_err("a file the filesystem cannot name must not open");
+        let message = err.to_string();
+        assert!(message.contains("EFBIG"), "{message}");
+        assert!(message.contains("16 TiB - 4 KiB"), "{message}");
+        assert!(message.contains("index was not opened"), "{message}");
+        assert!(!message.contains("not enough free space"), "{message}");
+        assert!(!message.contains("ENOSPC"), "{message}");
+        assert_eq!(
+            directory_fingerprint(&rocks)?,
+            before,
+            "EFBIG must not rewrite the index"
+        );
+        let len = fs::metadata(sub.join("chunks.dat"))?.len();
+        assert_eq!(len, 0, "EFBIG must not extend chunks.dat, len {len}");
+        assert!(
+            !sub.join(PACKING_PARAMS_FILE_NAME).exists(),
+            "open continued past the length check"
+        );
+        let order = submodule_open_order();
+        let index_opens = order.iter().filter(|step| **step == "index").count();
+        assert_eq!(
+            index_opens, 0,
+            "the index must not open after EFBIG: {order:?}"
         );
         Ok(())
     }
