@@ -418,9 +418,9 @@ fn plan_index_repair(ctx: &IndexHealCtx<'_>, sm: &Arc<StorageModule>) -> IndexRe
     };
 
     let Ok(ledger_range) = sm.get_storage_module_ledger_offsets() else {
-        warn!(
+        debug!(
             storage_module.id = sm.id,
-            "storage module not assigned to a ledger during index plan; soft-skip"
+            "storage module ledger mapping unavailable during index plan; soft-skip"
         );
         return IndexRepairPlan::SoftSkipped;
     };
@@ -698,9 +698,9 @@ fn get_max_partition_offset(
     let max_ledger_offset = ctx.block_tree.get_total_chunks(migration_height, ledger_id);
 
     let Ok(range) = storage_module.get_storage_module_ledger_offsets() else {
-        warn!(
+        debug!(
             storage_module.id = storage_module.id,
-            "storage module not assigned to a ledger; cannot determine max offset"
+            "storage module ledger mapping unavailable; cannot determine max offset"
         );
         return None;
     };

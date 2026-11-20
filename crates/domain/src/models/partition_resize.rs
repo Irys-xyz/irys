@@ -69,12 +69,14 @@ impl StorageModule {
     /// Logical geometry may roll back before finality; physical geometry may
     /// not, so after finality the physical bound clamps the logical one: a
     /// chain view that predates the finalized activation must still be able
-    /// to start and resync.
+    /// to start and resync. Ledger mapping waits for matching widths.
     pub fn set_partition_chunks(&self, chunks: u64) -> Result<()> {
         ensure!(
             chunks > 0 && chunks <= self.config.consensus.num_chunks_in_partition,
             "invalid logical partition size"
         );
+        self.canonical_partition_chunks
+            .store(chunks, Ordering::Release);
         let retained = self.retained_chunks.load(Ordering::Acquire);
         let bound = chunks.min(retained);
         let previous = self.partition_chunks.swap(bound, Ordering::AcqRel);
@@ -190,7 +192,10 @@ impl StorageModule {
     /// activation; recovery uses the same record committed before truncation.
     /// Returns whether this call completed a migration rather than finding it done.
     pub fn finalize_partition_resize(&self, state: &PartitionResizeState) -> Result<bool> {
-        self.resume_partition_resize(ResizeJournal::new(state, self.config.consensus.chain_id))
+        let changed = self
+            .resume_partition_resize(ResizeJournal::new(state, self.config.consensus.chain_id))?;
+        self.set_partition_chunks(state.params.partition_chunks)?;
+        Ok(changed)
     }
 
     pub(super) fn resume_partition_resize(&self, journal: ResizeJournal) -> Result<bool> {
@@ -244,6 +249,8 @@ impl StorageModule {
             self.index_write_generation.fetch_add(1, Ordering::SeqCst);
             self.retained_chunks.store(chunks, Ordering::Release);
             self.partition_chunks.store(chunks, Ordering::Release);
+            self.canonical_partition_chunks
+                .store(chunks, Ordering::Release);
             pending.chunks.retain(|offset, _| *offset < bound);
             pending.occupancy.retain(|offset, _| *offset < bound);
             pending.priorities.retain(|offset, _| *offset < bound);
@@ -436,6 +443,33 @@ mod tests {
             );
             assert!(reopened.contains_offset(LedgerChunkOffset::from(4)));
             assert!(!reopened.contains_offset(LedgerChunkOffset::from(8)));
+            reopened.set_partition_chunks(10)?;
+            assert!(reopened.get_storage_module_ledger_offsets().is_err());
+            assert!(
+                reopened
+                    .make_range_partition_relative(LedgerChunkRange(ledger_chunk_offset_ie!(4, 8)))
+                    .is_err()
+            );
+            assert!(
+                reopened
+                    .make_offset_partition_relative(LedgerChunkOffset::from(4))
+                    .is_err()
+            );
+            assert!(!reopened.contains_offset(LedgerChunkOffset::from(4)));
+            assert!(!reopened.contains_offset(LedgerChunkOffset::from(10)));
+            assert!(reopened.offset_in_partition(PartitionChunkOffset(3)));
+            assert!(!reopened.offset_in_partition(PartitionChunkOffset(4)));
+            reopened.set_partition_chunks(4)?;
+            assert_eq!(
+                reopened.get_storage_module_ledger_offsets()?.0,
+                ledger_chunk_offset_ie!(4, 8)
+            );
+            reopened.set_partition_chunks(10)?;
+            assert!(!reopened.finalize_partition_resize(&state)?);
+            assert_eq!(
+                reopened.get_storage_module_ledger_offsets()?.0,
+                ledger_chunk_offset_ie!(4, 8)
+            );
         }
         Ok(())
     }
