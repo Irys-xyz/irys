@@ -22,22 +22,46 @@ When the node starts, it moves each submodule that still has
 3. Rename `db/` to `db.migrated/`. The node does not read it again. Keep
    it while you can still need a rollback, then delete it.
 
-Each step leaves a state that the next start finishes. `db/` does not
-change before step 3, so an interrupted start deletes `rocks.migrating/`
-and converts again. A complete `rocks/` beside `db/` is the live index
+Each step leaves a state that the next start finishes. The copy reads
+`db/` and does not write it, so an interrupted start deletes
+`rocks.migrating/` and converts again. The one exception is an unfinished
+v1 to v2 migration (see below), which the start finishes in `db/` first. A complete `rocks/` beside `db/` is the live index
 (after step 2, or after a manual conversion), so only step 3 runs.
 
-The start fails, names the module, and leaves `db/` unchanged when:
+The start fails, names the module, and leaves `db/` in place when:
 
 - `db.migrated/` already exists.
-- `rocks/` beside `db/` is not complete: it has no `SCHEMA`, or it has
-  `CONVERTING`.
-- The consensus database does not cover a placement in `db/`. The node
-  writes the block index before the chunk placements, so this occurs only
-  when the consensus database is older than the index: a power loss with
-  a non-durable `database.sync_mode`, or a restored or copied directory.
+- `rocks/` beside `db/` is not a complete RocksDB v1 index: `SCHEMA` does
+  not hold the v1 marker, `CURRENT` is missing, or `CONVERTING` is present.
+- The consensus database does not cover a placement in `db/`. See below.
 - `packing_params.toml` names no ledger, but `db/` has a placement.
 - Verify finds a mismatch.
+
+### Placement past the consensus database
+
+The node commits the block index (`database.sync_mode = Durable` by
+default) before chunk migration writes the placements, and a rollback
+clears placements before it truncates the block index. So a placement can
+be past the consensus frontier only when the consensus database is older
+than the index: a power loss with a non-durable `database.sync_mode`, a
+restored consensus database, or a module directory copied from another
+node. RocksDB derives each tx path from the consensus database, so such a
+placement cannot be converted, and the node cannot start to sync the
+missing blocks. Recover by hand, for the submodule the error names:
+
+```sh
+submodule-index-convert mdbx-to-rocks --allow-unresolved \
+  --consensus-db <node>/.irys/irys_consensus_data \
+  --ledger <id> --slot <slot> \
+  --chunks-per-partition <active slot width> --chunk-size <bytes> \
+  <submodule>/db <submodule>/rocks
+```
+
+Do not add `--verify`: it exits 1 on every skipped placement. The copy
+still compares each stored tx path it can derive with the consensus
+database. The unresolved placements are left out of `rocks/` and counted as
+`skipped_frontier`. Start the node. It retires `db/`, syncs the missing
+blocks, and indexes those placements again when it migrates those blocks.
 
 Open also refuses a submodule that has `db.migrated/` but no complete
 `rocks/`. An empty new index would hide the rows in `db.migrated/`.
@@ -51,8 +75,9 @@ partition resize makes smaller than the genesis `num_chunks_in_partition`.
 A schema v1 `db/` (release 4.0.8) converts directly. The converter reads
 it and does not change it. A schema row that still starts with
 `irys-submodule-index migrate-v1 ` is a v1 to v2 in-place migration that
-an earlier release did not finish. The start finishes that migration,
-then converts.
+an earlier release did not finish. The start finishes that migration in
+`db/` (the same step that release runs on open), then converts. Copy `db/`
+before the upgrade if you want to keep it as it is.
 
 Every storage module, and every submodule inside it, converts on its own
 thread, so the disks work in parallel. Memory pinned to warm the MDBX

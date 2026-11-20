@@ -108,10 +108,10 @@ Guards outside those plays:
 #### `crates/database/src/bin/submodule_index_convert.rs`
 
 - L1: remove this binary once the rollback window is closed. The verify-rocks command compares two RocksDB v1 directories and can be split out if that compare is still wanted.
-- L268: delete this command.
-- L270: delete this command once the rollback window is closed.
-- L272: delete this command. It compares an MDBX index with RocksDB v1. Keep verify-rocks if a Rocks-only compare is still wanted.
-- L316: delete this flag with verify of a rocks-to-mdbx copy.
+- L270: delete this command.
+- L272: delete this command once the rollback window is closed.
+- L274: delete this command. It compares an MDBX index with RocksDB v1. Keep verify-rocks if a Rocks-only compare is still wanted.
+- L318: delete this flag with verify of a rocks-to-mdbx copy.
 
 #### `crates/database/src/bin/submodule_index_migrate.rs`
 
@@ -152,14 +152,14 @@ Guards outside those plays:
 #### `crates/database/src/submodule/convert.rs`
 
 - L1: delete the MDBX conversion and the MDBX verify in this file once every node is on RocksDB v1 and the rollback window is closed. verify_rocks_records compares two RocksDB v1 directories and is not an MDBX path.
-- L280: delete this flag with --rollback. It accepts a rocks-to-mdbx copy that dropped checksums.
-- L565: delete this function with the mdbx-to-rocks command.
-- L590: delete this function with the mdbx-to-rocks command.
-- L627: delete this function with the startup migration.
-- L672: delete this helper with the startup migration.
-- L932: delete this function with the rocks-to-mdbx command once the rollback window is closed.
-- L989: delete this function with verify of an MDBX source. verify_rocks_records is the Rocks-only compare.
-- L2835: delete this helper with the MDBX source reader.
+- L281: delete this flag with --rollback. It accepts a rocks-to-mdbx copy that dropped checksums.
+- L566: delete this function with the mdbx-to-rocks command.
+- L591: delete this function with the mdbx-to-rocks command.
+- L628: delete this function with the startup migration.
+- L673: delete this helper with the startup migration.
+- L933: delete this function with the rocks-to-mdbx command once the rollback window is closed.
+- L990: delete this function with verify of an MDBX source. verify_rocks_records is the Rocks-only compare.
+- L2836: delete this helper with the MDBX source reader.
 
 #### `crates/database/src/submodule/db.rs`
 
@@ -287,7 +287,7 @@ Guards outside those plays:
 - L7211: delete this continue. An MDBX index stores no checksum.
 - L7328: delete this continue. An MDBX index stores no checksum.
 - L8076: delete this loop with the MDBX engine. Production opens RocksDB, which returns above.
-- L14302: delete this MDBX bench open.
+- L14360: delete this MDBX bench open.
 
 ### irys-actors
 
@@ -309,8 +309,8 @@ Guards outside those plays:
 
 #### `crates/chain/src/storage_module_init.rs`
 
-- L38: delete this call with submodule_index_migration.
-- L70: delete this function with submodule_index_migration.
+- L43: delete this call with submodule_index_migration.
+- L75: delete this function with submodule_index_migration.
 
 #### `crates/chain/src/submodule_index_migration.rs`
 
