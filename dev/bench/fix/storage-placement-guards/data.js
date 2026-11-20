@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795086477554,
+  "lastUpdate": 1795185985236,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23694,6 +23694,110 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "915d03d25e8022517b41421df63bf39b14157105",
+          "message": "fix(storage): guard placement ownership and ledger mapping width",
+          "timestamp": "2026-11-13T07:54:48Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1836/commits/915d03d25e8022517b41421df63bf39b14157105"
+        },
+        "date": 1795185983454,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011991,
+            "range": "± 0.000127",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119419,
+            "range": "± 0.00039",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.197023,
+            "range": "± 0.001644",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.876355,
+            "range": "± 0.041372",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065518,
+            "range": "± 0.000558",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 651.337827,
+            "range": "± 0.94121",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 847.016945,
+            "range": "± 0.654509",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117319,
+            "range": "± 0.000272",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1171.445176,
+            "range": "± 0.40182",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1522.640226,
+            "range": "± 0.824143",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027167,
+            "range": "± 0.000469",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 136.601347,
+            "range": "± 0.300894",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 177.526422,
+            "range": "± 0.486229",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0",
             "unit": "ms/iter"
           }
