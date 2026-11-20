@@ -13,7 +13,7 @@ use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 use irys_database::submodule::RocksTuning;
 use irys_database::submodule::db::placement_overlaps_inclusive_span;
 #[cfg(test)]
-use irys_database::submodule::tables::{SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_ROCKS_V1};
+use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
 use irys_database::submodule::{
     DELETE_SUBRANGE_OFFSETS, PackingRecord, SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
     install_process_rocks_resources, packing_params_valid_for_module,
@@ -27,8 +27,8 @@ use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
     DataTransactionHeader, DataTransactionLedger, DatabaseConfig, H256, IrysAddress,
     LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
-    ProofDeserialize as _, RelativeChunkOffset, SubmoduleIndexEngine, TxChunkOffset, TxPath,
-    UnpackedChunk, get_leaf_proof, ledger_chunk_offset_ie, max_chunk_offset,
+    ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath, UnpackedChunk,
+    get_leaf_proof, ledger_chunk_offset_ie, max_chunk_offset,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii,
 };
@@ -1602,79 +1602,43 @@ fn rocks_index_present(rocks_dir: &Path) -> bool {
     rocks_dir.join("SCHEMA").is_file() || rocks_dir.join("CURRENT").is_file()
 }
 
-// MDBX-SUBMODULE-INDEX: delete the Mdbx arm. Open rocks/ only.
+/// Opens `rocks/`. RocksDB v1 is the only submodule index engine.
 fn open_submodule_index(
     module_dir: &Path,
     database: &DatabaseConfig,
 ) -> eyre::Result<SubmoduleIndex> {
-    let path = match database.submodule_index {
-        // MDBX-SUBMODULE-INDEX: delete this arm.
-        SubmoduleIndexEngine::Mdbx => module_dir.join("db"),
-        SubmoduleIndexEngine::Rocksdb => module_dir.join("rocks"),
-    };
+    let path = module_dir.join("rocks");
     debug!("submodule_db_path: {:?}", path);
-
-    let opened = match database.submodule_index {
-        // MDBX-SUBMODULE-INDEX: delete this arm. It opens db/ and migrates schema v1 in place.
-        SubmoduleIndexEngine::Mdbx => {
-            let rocks_dir = module_dir.join("rocks");
-            let mdbx_dat = path.join("mdbx.dat");
-            // Check before open. Open migrates a schema v1 db/ in place, and a
-            // stale db/ would hide placements written to rocks/ after conversion.
-            if rocks_index_present(&rocks_dir) && mdbx_dat.is_file() {
-                Err(eyre!(
-                    "refusing to open {}: both indexes exist in {}. {} is present and {} is present. The config selects MDBX, which is also the default when database.submodule_index is unset. After a conversion, rocks/ is the live index, so set database.submodule_index = \"rocksdb\". If MDBX is really intended (a verified `rocks-to-mdbx` rollback), move {} out of the module directory (for example, rename it to rocks.retired) and start again.",
-                    path.display(),
-                    module_dir.display(),
-                    mdbx_dat.display(),
-                    rocks_dir.display(),
-                    rocks_dir.display()
-                ))
-            } else if rocks_index_present(&rocks_dir) {
-                // An empty MDBX index would hide the live Rocks rows.
-                Err(eyre!(
-                    "refusing to open {}: {} exists and the Rocks index was not copied. Stop the node and run `submodule-index-convert rocks-to-mdbx` (see --help for --consensus-db and the partition geometry) from {} to {}, then verify. Set database.submodule_index to mdbx only after verify passes.",
-                    path.display(),
-                    rocks_dir.display(),
-                    rocks_dir.display(),
-                    path.display()
-                ))
-            } else {
-                // Args (incl. the test geometry cap) derived from the DatabaseConfig.
-                let args = irys_database::submodule_db_args(database)?;
-                SubmoduleIndex::open_mdbx(&path, args)
-            }
-        }
-        SubmoduleIndexEngine::Rocksdb => {
-            let mdbx_dir = module_dir.join("db");
-            let mdbx_dat = mdbx_dir.join("mdbx.dat");
-            // An empty Rocks index would hide the live MDBX rows.
-            // MDBX-SUBMODULE-INDEX: delete this refusal once db/ is no longer a live index and the rollback window is closed.
-            if mdbx_dat.is_file() && !rocks_index_present(&path) {
-                Err(eyre!(
-                    "refusing to open {}: {} exists and the MDBX index was not copied. Stop the node and run `submodule-index-convert mdbx-to-rocks` (see --help for --consensus-db and the partition geometry) from {} to {}, then verify. Set database.submodule_index to rocksdb only after verify passes. Keep db/ until rollback is proven.",
-                    path.display(),
-                    mdbx_dat.display(),
-                    mdbx_dir.display(),
-                    path.display()
-                ))
-            } else {
-                // The first submodule installs the process cache. The rest share it.
-                let opened = install_process_rocks_resources(database)
-                    .and_then(|_| SubmoduleIndex::open_rocks(&path));
-                // One line per module. db/ stays for rollback and is not read.
-                if opened.is_ok() && mdbx_dat.is_file() {
-                    info!(
-                        module = %module_dir.display(),
-                        db = %mdbx_dir.display(),
-                        rocks = %path.display(),
-                        // MDBX-SUBMODULE-INDEX: delete this log with the kept db/ once rollback is retired.
-                        "db/ is kept beside rocks/ and is not read"
-                    );
-                }
-                opened
-            }
-        }
+    let mdbx_dir = module_dir.join("db");
+    let mdbx_dat = mdbx_dir.join("mdbx.dat");
+    // An empty Rocks index would hide the live MDBX rows. Node start moves
+    // db/ to RocksDB before a module opens, so only an open that skipped that
+    // step gets here.
+    // MDBX-SUBMODULE-INDEX: keep this refusal after the startup migration is deleted. A node that skips that release must not open an empty rocks/.
+    // db.migrated/ holds the rows from before the move. Without rocks/, an
+    // empty new index would hide them.
+    // MDBX-SUBMODULE-INDEX: delete this refusal with db.migrated/ once the rollback window is closed.
+    let migrated_dat = module_dir.join("db.migrated").join("mdbx.dat");
+    let opened = if mdbx_dat.is_file() && !rocks_index_present(&path) {
+        Err(eyre!(
+            "refusing to open {}: {} exists and was not moved to RocksDB. The node moves it when it starts. To move it by hand, stop the node and run `submodule-index-convert mdbx-to-rocks --verify` (see --help for --consensus-db and the partition geometry) from {} to {}.",
+            path.display(),
+            mdbx_dat.display(),
+            mdbx_dir.display(),
+            path.display()
+        ))
+    } else if migrated_dat.is_file() && !rocks_index_present(&path) {
+        Err(eyre!(
+            "refusing to open {}: the live RocksDB index is missing, and {} holds this submodule's index from before the move to RocksDB. Restore {}, or rename the {} directory back to db and start again to convert it again. To start this submodule from empty, move {} out of the submodule directory.",
+            path.display(),
+            migrated_dat.display(),
+            path.display(),
+            module_dir.join("db.migrated").display(),
+            module_dir.join("db.migrated").display()
+        ))
+    } else {
+        // The first submodule installs the process cache. The rest share it.
+        install_process_rocks_resources(database).and_then(|_| SubmoduleIndex::open_rocks(&path))
     };
 
     opened.map_err(|error| {
@@ -2219,8 +2183,7 @@ fn recover_read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 }
 
 impl StorageModule {
-    /// Initializes a new StorageModule. The index engine comes from
-    /// `config.node_config.database.submodule_index`.
+    /// Initializes a new StorageModule. The submodule index is RocksDB v1.
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
         Self::open(
             storage_module_info,
@@ -2579,16 +2542,14 @@ impl StorageModule {
                 config.node_config.storage.index_wal_backstop_ms,
             ));
         }
-        // A bench split picks its own engine. The bench turns group commit
-        // on for that open; this path must not arm MDBX from a Rocks config.
+        // A bench split picks its own engine and turns group commit on for
+        // that open. It must not arm MDBX, whose SAFE_NOSYNC path aborts
+        // inside libmdbx. Every other open is RocksDB.
         #[cfg(feature = "bench")]
-        let use_config_engine = split.is_none();
+        let production_open = split.is_none();
         #[cfg(not(feature = "bench"))]
-        let use_config_engine = true;
-        if use_config_engine
-            // MDBX-SUBMODULE-INDEX: delete this engine check and always enable group commit. MDBX is left off because its SAFE_NOSYNC path aborts inside libmdbx.
-            && config.node_config.database.submodule_index == SubmoduleIndexEngine::Rocksdb
-        {
+        let production_open = true;
+        if production_open {
             for (_, submodule) in submodule_map.iter() {
                 submodule
                     .db
@@ -2732,9 +2693,8 @@ impl StorageModule {
             };
         }
         // Production open, including `new` compiled with the bench feature.
-        // The free function selects the engine from config. It refuses MDBX
-        // when rocks/ is also present, and it refuses an empty index beside
-        // a live index of the other engine.
+        // The free function opens RocksDB. It refuses an empty index beside
+        // a live MDBX index.
         open_submodule_index(sub_base_path, &config.node_config.database)
     }
 
@@ -8113,6 +8073,7 @@ impl StorageModule {
                 if tx.intervals_own_data_root_rows() {
                     return Ok(());
                 }
+                // MDBX-SUBMODULE-INDEX: delete this loop with the MDBX engine. Production opens RocksDB, which returns above.
                 for data_root in data_roots {
                     let Some(infos) = tx.get_data_root_infos_for_data_root(*data_root)? else {
                         continue;
@@ -10631,12 +10592,11 @@ mod tests {
         Ok(())
     }
 
-    fn index_database(engine: SubmoduleIndexEngine) -> DatabaseConfig {
+    fn index_database() -> DatabaseConfig {
         DatabaseConfig {
             sync_mode: DbSyncMode::UtterlyNoSync,
             cache_sync_mode: DbSyncMode::UtterlyNoSync,
             geometry_max_size: Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE),
-            submodule_index: engine,
             ..DatabaseConfig::default()
         }
     }
@@ -10813,7 +10773,6 @@ mod tests {
 
     #[cfg(feature = "bench")]
     #[test]
-    // MDBX-SUBMODULE-INDEX: retarget this bench test at BenchIndex::Rocks. It opens MDBX.
     fn split_write_region_is_reserved_and_recall_is_unchanged() -> eyre::Result<()> {
         use std::os::unix::fs::MetadataExt as _;
         let tmp = TempDirBuilder::new().prefix("split_reserve").build();
@@ -10851,8 +10810,12 @@ mod tests {
             "sub",
             None,
         );
-        // MDBX-SUBMODULE-INDEX: delete this MDBX bench open.
-        let storage = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)?;
+        let storage = StorageModule::open_split(
+            &info,
+            &config,
+            split,
+            BenchIndex::Rocks(RocksTuning::baseline()),
+        )?;
         drop(storage);
 
         assert!(!sub.join("chunks.dat").exists());
@@ -10876,7 +10839,6 @@ mod tests {
     /// Recall bytes differ from the write file. A checksum confirm must read
     /// the write file: that is the image the checksum was computed from.
     #[cfg(feature = "bench")]
-    // MDBX-SUBMODULE-INDEX: retarget this helper at BenchIndex::Rocks, or delete it with the MDBX bench open.
     fn open_labeled_split(
         prefix: &str,
     ) -> eyre::Result<(
@@ -10915,8 +10877,12 @@ mod tests {
         let split = Arc::new(SplitBacking::open(recall, write, 0, chunks)?);
         let config = testing_config(tmp.path(), chunk, chunks);
         let info = one_span(3, "sub", Some(submit_assignment(0)));
-        // MDBX-SUBMODULE-INDEX: delete this MDBX bench open.
-        let storage = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)?;
+        let storage = StorageModule::open_split(
+            &info,
+            &config,
+            split,
+            BenchIndex::Rocks(RocksTuning::baseline()),
+        )?;
         Ok((tmp, storage, recall_path, write_path))
     }
 
@@ -10999,122 +10965,6 @@ mod tests {
         Ok(())
     }
 
-    /// Arms the logical-size check to return `EFBIG` and clears it on drop.
-    struct ChunksLenEfbig;
-
-    impl ChunksLenEfbig {
-        fn arm() -> Self {
-            CHUNKS_LEN_EFBIG.with(|flag| flag.set(true));
-            Self
-        }
-    }
-
-    impl Drop for ChunksLenEfbig {
-        fn drop(&mut self) {
-            CHUNKS_LEN_EFBIG.with(|flag| flag.set(false));
-        }
-    }
-
-    /// ext4 cannot name a mainnet partition. Open must refuse before the
-    /// schema row changes. A length the filesystem can name still migrates,
-    /// then reserves the file.
-    #[test]
-    fn efbig_refuses_open_before_the_index_is_migrated() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new().prefix("chunks_efbig").build();
-        let sub = tmp.path().join("sub");
-        fs::create_dir_all(&sub)?;
-        let db_dir = write_unstamped_mdbx(&sub)?;
-        assert_eq!(mdbx_schema_row(&db_dir)?, None, "fixture has no schema row");
-        let before = directory_fingerprint(&db_dir)?;
-        clear_submodule_open_order();
-        let _efbig = ChunksLenEfbig::arm();
-        let config = testing_config(tmp.path(), 32, 4);
-        let err = StorageModule::new(&one_span(3, "sub", None), &config)
-            .expect_err("a file the filesystem cannot name must not open");
-        let message = err.to_string();
-        assert!(message.contains("EFBIG"), "{message}");
-        assert!(message.contains("16 TiB - 4 KiB"), "{message}");
-        assert!(message.contains("index was not migrated"), "{message}");
-        assert!(!message.contains("not enough free space"), "{message}");
-        assert!(!message.contains("ENOSPC"), "{message}");
-        assert_eq!(
-            mdbx_schema_row(&db_dir)?,
-            None,
-            "EFBIG must not migrate the index"
-        );
-        assert_eq!(
-            directory_fingerprint(&db_dir)?,
-            before,
-            "EFBIG must not rewrite the index"
-        );
-        let chunks = sub.join("chunks.dat");
-        let len = fs::metadata(&chunks)?.len();
-        assert_eq!(len, 0, "EFBIG must not extend chunks.dat, len {len}");
-        assert!(
-            !sub.join(PACKING_PARAMS_FILE_NAME).exists(),
-            "open continued past the length check"
-        );
-        let order = submodule_open_order();
-        let index_opens = order.iter().filter(|step| **step == "index").count();
-        assert_eq!(
-            index_opens, 0,
-            "the index must not open after EFBIG: {order:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn fitting_chunks_len_still_migrates_the_index_then_reserves() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new().prefix("chunks_len_fits").build();
-        let sub = tmp.path().join("sub");
-        fs::create_dir_all(&sub)?;
-        let db_dir = write_unstamped_mdbx(&sub)?;
-        assert_eq!(mdbx_schema_row(&db_dir)?, None);
-        clear_submodule_open_order();
-        let config = testing_config(tmp.path(), RESERVE_CHUNK, RESERVE_CHUNKS);
-        let last = u32::try_from(RESERVE_CHUNKS - 1).expect("chunk count");
-        let storage = StorageModule::new(&one_span(last, "sub", None), &config)?;
-        drop(storage);
-        assert_eq!(
-            mdbx_schema_row(&db_dir)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes()),
-            "a length the filesystem can name still migrates"
-        );
-        let order = submodule_open_order();
-        let index_at = order
-            .iter()
-            .position(|step| *step == "index")
-            .ok_or_else(|| eyre::eyre!("index open was not recorded: {order:?}"))?;
-        let file_at = order
-            .iter()
-            .position(|step| *step == "file")
-            .ok_or_else(|| eyre::eyre!("chunks file open was not recorded: {order:?}"))?;
-        assert!(
-            index_at < file_at,
-            "the chunks file opened before the index: {order:?}"
-        );
-        let reserve_at = order
-            .iter()
-            .position(|step| *step == "reserve")
-            .ok_or_else(|| eyre::eyre!("chunks reserve was not recorded: {order:?}"))?;
-        assert!(
-            index_at < reserve_at,
-            "the hole reserve must follow the index migration: {order:?}"
-        );
-        assert!(
-            !order[..index_at].contains(&"reserve"),
-            "reserve ran before the index returned: {order:?}"
-        );
-        assert_eq!(
-            order.iter().filter(|step| **step == "index").count(),
-            1,
-            "{order:?}"
-        );
-        #[cfg(target_os = "linux")]
-        assert_reserved(&sub.join("chunks.dat"), reserve_bytes())?;
-        Ok(())
-    }
-
     /// Why an existing `packing_params.toml` must refuse this open.
     #[derive(Clone, Copy, Debug)]
     enum ForeignModule {
@@ -11126,39 +10976,17 @@ mod tests {
         Iterations,
     }
 
-    fn engine_config(dir: &Path, engine: SubmoduleIndexEngine) -> Config {
-        testing_config_tuned(dir, 32, 4, |node| {
-            node.database = index_database(engine);
-        })
-    }
-
-    fn index_dir_name(engine: SubmoduleIndexEngine) -> &'static str {
-        match engine {
-            // MDBX-SUBMODULE-INDEX: delete this arm with the MDBX open path.
-            SubmoduleIndexEngine::Mdbx => "db",
-            SubmoduleIndexEngine::Rocksdb => "rocks",
-        }
+    fn engine_config(dir: &Path) -> Config {
+        testing_config(dir, 32, 4)
     }
 
     /// An index open would migrate or create. The refusal test compares this
     /// directory to itself after `StorageModule::new` returns.
-    fn seed_existing_index(sub: &Path, engine: SubmoduleIndexEngine) -> eyre::Result<()> {
-        match engine {
-            // MDBX-SUBMODULE-INDEX: delete this arm with the MDBX open path.
-            SubmoduleIndexEngine::Mdbx => {
-                let db = write_unstamped_mdbx(sub)?;
-                eyre::ensure!(
-                    mdbx_schema_row(&db)?.is_none(),
-                    "the fixture must have no schema row"
-                );
-            }
-            SubmoduleIndexEngine::Rocksdb => {
-                let index = open_submodule_index(sub, &index_database(engine))?;
-                drop(index);
-                let schema = fs::read_to_string(sub.join("rocks").join("SCHEMA"))?;
-                eyre::ensure!(schema == SUBMODULE_SCHEMA_ROCKS_V1, "{schema}");
-            }
-        }
+    fn seed_existing_index(sub: &Path) -> eyre::Result<()> {
+        let index = open_submodule_index(sub, &index_database())?;
+        drop(index);
+        let schema = fs::read_to_string(sub.join("rocks").join("SCHEMA"))?;
+        eyre::ensure!(schema == SUBMODULE_SCHEMA_ROCKS_V1, "{schema}");
         Ok(())
     }
 
@@ -11180,26 +11008,25 @@ mod tests {
         }
     }
 
-    fn read_module_on_disk(sub: &Path, engine: SubmoduleIndexEngine) -> eyre::Result<ModuleOnDisk> {
+    fn read_module_on_disk(sub: &Path) -> eyre::Result<ModuleOnDisk> {
         let chunks = sub.join("chunks.dat");
         Ok(ModuleOnDisk {
             chunks_len: fs::metadata(&chunks)?.len(),
             chunks_prefix: read_prefix(&chunks, 8)?,
             params: read_optional_file(&sub.join(PACKING_PARAMS_FILE_NAME))?,
             crc: read_optional_file(&sub.join("chunks.crc"))?,
-            index_files: directory_fingerprint(&sub.join(index_dir_name(engine)))?,
+            index_files: directory_fingerprint(&sub.join("rocks"))?,
         })
     }
 
     /// `set_len`, index open, and the packing-params rewrite must not run.
     fn assert_module_unchanged(
-        engine: SubmoduleIndexEngine,
         kind: impl std::fmt::Debug,
         sub: &Path,
         before: &ModuleOnDisk,
         open_error: &str,
     ) -> eyre::Result<()> {
-        let after = read_module_on_disk(sub, engine)?;
+        let after = read_module_on_disk(sub)?;
         let mut changes = Vec::new();
         if after.chunks_len != before.chunks_len {
             changes.push(format!(
@@ -11219,13 +11046,6 @@ mod tests {
         if after.index_files != before.index_files {
             changes.push("index directory".to_string());
         }
-        // MDBX-SUBMODULE-INDEX: delete this schema read with the MDBX open path.
-        if engine == SubmoduleIndexEngine::Mdbx {
-            let schema = mdbx_schema_row(&sub.join("db"))?;
-            if schema.is_some() {
-                changes.push("mdbx schema row".to_string());
-            }
-        }
         let order = submodule_open_order();
         if order
             .iter()
@@ -11235,22 +11055,19 @@ mod tests {
         }
         assert!(
             changes.is_empty(),
-            "{engine:?} {kind:?} changed the module before returning {open_error}: {changes:?}"
+            "{kind:?} changed the module before returning {open_error}: {changes:?}"
         );
         Ok(())
     }
 
-    fn foreign_module_is_refused(
-        engine: SubmoduleIndexEngine,
-        kind: ForeignModule,
-    ) -> eyre::Result<()> {
+    fn foreign_module_is_refused(kind: ForeignModule) -> eyre::Result<()> {
         let tmp = TempDirBuilder::new()
             .prefix("open_foreign_identity")
             .build();
-        let config = engine_config(tmp.path(), engine);
+        let config = engine_config(tmp.path());
         let sub = tmp.path().join("sub");
         fs::create_dir_all(&sub)?;
-        seed_existing_index(&sub, engine)?;
+        seed_existing_index(&sub)?;
         // Shorter than the partition. `set_len` would make this 128 bytes.
         fs::write(sub.join("chunks.dat"), [0xAB; 8])?;
         // A leftover sidecar. Open removes it only after the identity checks.
@@ -11300,23 +11117,23 @@ mod tests {
             ledger_id: None,
             slot_index: None,
         };
-        let before = read_module_on_disk(&sub, engine)?;
+        let before = read_module_on_disk(&sub)?;
         clear_submodule_open_order();
         let err = StorageModule::new(&one_span(3, "sub", Some(assignment)), &config)
             .expect_err("a foreign module must not open");
         let message = err.to_string();
-        assert!(message.contains(needle), "{engine:?} {kind:?}: {message}");
-        assert_module_unchanged(engine, kind, &sub, &before, &message)
+        assert!(message.contains(needle), "{kind:?}: {message}");
+        assert_module_unchanged(kind, &sub, &before, &message)
     }
 
-    fn labelled_module_without_params_is_refused(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+    fn labelled_module_without_params_is_refused() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new()
             .prefix("open_labels_without_params")
             .build();
-        let config = engine_config(tmp.path(), engine);
+        let config = engine_config(tmp.path());
         let sub = tmp.path().join("sub");
         fs::create_dir_all(&sub)?;
-        seed_existing_index(&sub, engine)?;
+        seed_existing_index(&sub)?;
         fs::write(sub.join("chunks.dat"), [0xAB; 8])?;
         fs::write(sub.join("chunks.crc"), b"leftover-crc")?;
         let mut labels = StorageIntervals::new();
@@ -11329,32 +11146,23 @@ mod tests {
         let intervals = serde_json::to_vec(&labels)?;
         fs::write(sub.join("intervals.json"), &intervals)?;
 
-        let before = read_module_on_disk(&sub, engine)?;
+        let before = read_module_on_disk(&sub)?;
         clear_submodule_open_order();
         let err = StorageModule::new(&one_span(3, "sub", None), &config)
             .expect_err("labels with no packing identity must not open");
         let message = err.to_string();
-        assert!(
-            message.contains("labels stored chunks"),
-            "{engine:?}: {message}"
-        );
+        assert!(message.contains("labels stored chunks"), "{message}");
         assert_eq!(fs::read(sub.join("intervals.json"))?, intervals);
-        assert_module_unchanged(
-            engine,
-            "labels without packing params",
-            &sub,
-            &before,
-            &message,
-        )
+        assert_module_unchanged("labels without packing params", &sub, &before, &message)
     }
 
     /// Only `Uninitialized` labels hold no packed bytes, so a missing
     /// params file is a fresh module.
-    fn unlabelled_module_without_params_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+    fn unlabelled_module_without_params_opens() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new()
             .prefix("open_unlabelled_without_params")
             .build();
-        let config = engine_config(tmp.path(), engine);
+        let config = engine_config(tmp.path());
         let sub = tmp.path().join("sub");
         fs::create_dir_all(&sub)?;
         let mut labels = StorageIntervals::new();
@@ -11373,12 +11181,12 @@ mod tests {
         Ok(())
     }
 
-    fn matching_module_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+    fn matching_module_opens() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("open_match_identity").build();
-        let config = engine_config(tmp.path(), engine);
+        let config = engine_config(tmp.path());
         let sub = tmp.path().join("sub");
         fs::create_dir_all(&sub)?;
-        seed_existing_index(&sub, engine)?;
+        seed_existing_index(&sub)?;
         fs::write(sub.join("chunks.dat"), [0xAB; 8])?;
         let hash = H256::repeat_byte(0x44);
         let params = PackingParams {
@@ -11405,9 +11213,9 @@ mod tests {
         Ok(())
     }
 
-    fn fresh_module_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+    fn fresh_module_opens() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("open_fresh_identity").build();
-        let config = engine_config(tmp.path(), engine);
+        let config = engine_config(tmp.path());
         let storage = StorageModule::new(&one_span(3, "sub", None), &config)?;
         drop(storage);
         let loaded =
@@ -11424,9 +11232,9 @@ mod tests {
 
     /// A 4.0.8 file has no iterations or chunk size. Open fills both from
     /// consensus and writes the file. It does not refuse the module.
-    fn legacy_params_are_filled_on_open(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+    fn legacy_params_are_filled_on_open() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("open_legacy_identity").build();
-        let config = engine_config(tmp.path(), engine);
+        let config = engine_config(tmp.path());
         let sub = tmp.path().join("sub");
         fs::create_dir_all(&sub)?;
         let legacy = PackingParams {
@@ -11453,29 +11261,14 @@ mod tests {
     /// A matching module, a fresh module, and a 4.0.8 params file still open.
     #[test]
     fn open_refuses_a_foreign_module_before_mutating_files() -> eyre::Result<()> {
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
-            foreign_module_is_refused(engine, ForeignModule::Address)?;
-            foreign_module_is_refused(engine, ForeignModule::Partition)?;
-            foreign_module_is_refused(engine, ForeignModule::Iterations)?;
-            labelled_module_without_params_is_refused(engine)?;
-            unlabelled_module_without_params_opens(engine)?;
-            matching_module_opens(engine)?;
-            fresh_module_opens(engine)?;
-            legacy_params_are_filled_on_open(engine)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX open path.
-    fn submodule_index_engine_mdbx_fresh_does_not_create_rocks() -> eyre::Result<()> {
-        let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_mdbx")?;
-
-        let index = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))?;
-        drop(index);
-
-        assert!(module_dir.join("db").join("mdbx.dat").is_file());
-        assert!(!module_dir.join("rocks").exists());
+        foreign_module_is_refused(ForeignModule::Address)?;
+        foreign_module_is_refused(ForeignModule::Partition)?;
+        foreign_module_is_refused(ForeignModule::Iterations)?;
+        labelled_module_without_params_is_refused()?;
+        unlabelled_module_without_params_opens()?;
+        matching_module_opens()?;
+        fresh_module_opens()?;
+        legacy_params_are_filled_on_open()?;
         Ok(())
     }
 
@@ -11483,8 +11276,7 @@ mod tests {
     fn submodule_index_engine_rocksdb_fresh_reads_back_a_row() -> eyre::Result<()> {
         let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_rocks")?;
 
-        let index =
-            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
+        let index = open_submodule_index(&module_dir, &index_database())?;
         let schema = fs::read_to_string(module_dir.join("rocks").join("SCHEMA"))?;
         assert_eq!(schema, SUBMODULE_SCHEMA_ROCKS_V1);
         assert!(!module_dir.join("db").join("mdbx.dat").exists());
@@ -11538,9 +11330,8 @@ mod tests {
         fs::create_dir_all(mdbx_dat.parent().expect("db parent"))?;
         fs::write(&mdbx_dat, b"live")?;
 
-        let error =
-            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))
-                .expect_err("live MDBX data must not open an empty Rocks index");
+        let error = open_submodule_index(&module_dir, &index_database())
+            .expect_err("live MDBX data must not open an empty Rocks index");
         let message = error.to_string();
         assert!(
             message.contains(&rocks_dir.display().to_string()),
@@ -11551,7 +11342,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("the MDBX index was not copied"),
+            message.contains("exists and was not moved to RocksDB"),
             "{message}"
         );
         assert!(!rocks_dir.join("SCHEMA").exists());
@@ -11572,9 +11363,8 @@ mod tests {
         fs::create_dir_all(&rocks_dir)?;
         fs::write(rocks_dir.join("CURRENT"), b"MANIFEST-000001\n")?;
 
-        let error =
-            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))
-                .expect_err("crashed first open must not open");
+        let error = open_submodule_index(&module_dir, &index_database())
+            .expect_err("crashed first open must not open");
         let message = format!("{error:#}");
         // CURRENT and no CONVERTING is a crashed first open. The converter
         // flag does not delete that directory.
@@ -11586,53 +11376,19 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX open path.
-    fn submodule_index_engine_mdbx_refuses_uncopied_rocks() -> eyre::Result<()> {
-        let tmp_dir = TempDirBuilder::new()
-            .prefix("submodule_index_engine_refuse_rocks")
-            .build();
-        let module_dir = tmp_dir.path().join("module");
-        let mdbx_dat = module_dir.join("db").join("mdbx.dat");
-        let rocks_dir = module_dir.join("rocks");
-        fs::create_dir_all(&rocks_dir)?;
-        fs::write(rocks_dir.join("CURRENT"), b"live")?;
-
-        let error = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))
-            .expect_err("live Rocks data must not open an empty MDBX index");
-        let message = error.to_string();
-        assert!(
-            message.contains(&module_dir.join("db").display().to_string()),
-            "{message}"
-        );
-        assert!(
-            message.contains(&rocks_dir.display().to_string()),
-            "{message}"
-        );
-        assert!(
-            message.contains("the Rocks index was not copied"),
-            "{message}"
-        );
-        assert!(!mdbx_dat.exists());
-        assert!(rocks_dir.join("CURRENT").is_file());
-        Ok(())
-    }
-
     /// `db/` with no schema row. Node open of this directory stamps the schema,
     /// so a later byte compare shows whether open ran.
-    // MDBX-SUBMODULE-INDEX: delete this helper with the MDBX open tests.
     fn write_unstamped_mdbx(module_dir: &Path) -> eyre::Result<PathBuf> {
         use irys_database::open_or_create_db;
         use irys_database::submodule::tables::SubmoduleTables;
 
         let db_dir = module_dir.join("db");
-        let args = irys_database::submodule_db_args(&index_database(SubmoduleIndexEngine::Mdbx))?;
+        let args = irys_database::submodule_db_args(&index_database())?;
         let env = open_or_create_db(&db_dir, SubmoduleTables::ALL, args)?;
         drop(env);
         Ok(db_dir)
     }
 
-    // MDBX-SUBMODULE-INDEX: delete this helper with the MDBX open tests.
     fn mdbx_schema_row(db_dir: &Path) -> eyre::Result<Option<Vec<u8>>> {
         use irys_database::metadata::MetadataKey;
         use irys_database::open_or_create_db;
@@ -11640,7 +11396,7 @@ mod tests {
         use reth_db::Database as _;
         use reth_db::transaction::DbTx as _;
 
-        let args = irys_database::submodule_db_args(&index_database(SubmoduleIndexEngine::Mdbx))?;
+        let args = irys_database::submodule_db_args(&index_database())?;
         let env = open_or_create_db(db_dir, SubmoduleTables::ALL, args)?;
         let tx = env.tx()?;
         Ok(tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?)
@@ -11676,58 +11432,11 @@ mod tests {
     }
 
     #[test]
-    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX open path.
-    fn submodule_index_engine_mdbx_refuses_when_both_indexes_exist() -> eyre::Result<()> {
-        let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_both")?;
-        let db_dir = write_unstamped_mdbx(&module_dir)?;
-        let before = directory_fingerprint(&db_dir)?;
-        assert!(before.contains_key("mdbx.dat"), "{before:?}");
-
-        let rocks_dir = module_dir.join("rocks");
-        let rocks_current = rocks_dir.join("CURRENT");
-        fs::create_dir_all(&rocks_dir)?;
-        fs::write(&rocks_current, b"live")?;
-
-        let error = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))
-            .expect_err("MDBX must not open when rocks/ is also present");
-        let message = error.to_string();
-        assert!(
-            message.contains(&module_dir.display().to_string()),
-            "{message}"
-        );
-        assert!(
-            message.contains(&db_dir.join("mdbx.dat").display().to_string()),
-            "{message}"
-        );
-        assert!(
-            message.contains(&rocks_dir.display().to_string()),
-            "{message}"
-        );
-        assert!(message.contains("both indexes exist"), "{message}");
-        assert!(
-            message.contains("database.submodule_index is unset"),
-            "{message}"
-        );
-        assert!(
-            message.contains("database.submodule_index = \"rocksdb\""),
-            "{message}"
-        );
-        assert!(message.contains("rocks-to-mdbx"), "{message}");
-        assert!(message.contains("rocks.retired"), "{message}");
-
-        assert_eq!(directory_fingerprint(&db_dir)?, before);
-        assert_eq!(mdbx_schema_row(&db_dir)?, None);
-        assert_eq!(fs::read(&rocks_current)?, b"live");
-        Ok(())
-    }
-
-    #[test]
     fn submodule_index_engine_rocksdb_reads_rocks_row_when_both_indexes_exist() -> eyre::Result<()>
     {
         let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_rocks_keeps_db")?;
 
-        let index =
-            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
+        let index = open_submodule_index(&module_dir, &index_database())?;
         let offset = PartitionChunkOffset::from(7);
         let root = H256::repeat_byte(1);
         index.update(|tx| {
@@ -11756,8 +11465,7 @@ mod tests {
         let db_dir = write_unstamped_mdbx(&module_dir)?;
         let before = directory_fingerprint(&db_dir)?;
 
-        let again =
-            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
+        let again = open_submodule_index(&module_dir, &index_database())?;
         let got = again
             .view(|tx| tx.get_data_path_by_offset(offset))?
             .expect("the row exists only in rocks/");
@@ -11774,26 +11482,19 @@ mod tests {
     }
 
     #[test]
-    fn rocks_module_enables_group_commit_and_mdbx_does_not() -> eyre::Result<()> {
+    fn rocks_module_enables_group_commit() -> eyre::Result<()> {
         fn open(
             prefix: &str,
-            engine: SubmoduleIndexEngine,
         ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
             let tmp = TempDirBuilder::new().prefix(prefix).build();
-            let config = testing_config_tuned(tmp.path(), 32, 5, |node| {
-                node.database = index_database(engine);
-            });
+            let config = testing_config(tmp.path(), 32, 5);
             let storage = StorageModule::new(&one_span(4, "hdd0", None), &config)?;
             Ok((tmp, storage))
         }
 
-        let (_rocks_tmp, rocks) = open("rocks_group_commit", SubmoduleIndexEngine::Rocksdb)?;
-        // MDBX-SUBMODULE-INDEX: delete the MDBX half of this test. The RocksDB group-commit assertion stays.
-        let (_mdbx_tmp, mdbx) = open("mdbx_group_commit", SubmoduleIndexEngine::Mdbx)?;
+        let (_rocks_tmp, rocks) = open("rocks_group_commit")?;
         let (_, rocks_sub) = rocks.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         assert!(rocks_sub.db.group_commit_enabled());
-        let (_, mdbx_sub) = mdbx.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        assert!(!mdbx_sub.db.group_commit_enabled());
         Ok(())
     }
 
@@ -11804,8 +11505,7 @@ mod tests {
     /// earlier registration.
     #[test]
     fn unsynced_data_root_does_not_satisfy_the_prune_gate() -> eyre::Result<()> {
-        let (_tmp, _config, storage) =
-            open_presence_module("prune_gate", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, storage) = open_presence_module("prune_gate")?;
         let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         submodule.db.set_wal_backstop(Duration::from_secs(60));
         let data_root = H256::repeat_byte(4);
@@ -11883,8 +11583,7 @@ mod tests {
     /// stays closed until the completion rewrite.
     #[test]
     fn prune_gate_waits_for_the_persisted_completion() -> eyre::Result<()> {
-        let (_tmp, config, storage) =
-            open_presence_module_with("prune_gate_persisted", SubmoduleIndexEngine::Rocksdb, 3600)?;
+        let (_tmp, config, storage) = open_presence_module_with("prune_gate_persisted", 3600)?;
         let data_root = H256::repeat_byte(5);
         let offset = PartitionChunkOffset::from(0);
         let candidates = BTreeSet::from([TxChunkOffset::from(0)]);
@@ -11954,8 +11653,7 @@ mod tests {
     /// `Uninitialized`.
     #[test]
     fn uncovered_proof_stays_queued_after_interval_rollback() -> eyre::Result<()> {
-        let (_tmp, _config, storage) =
-            open_presence_module("uncovered_proof", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, storage) = open_presence_module("uncovered_proof")?;
         let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         let data_root = H256::repeat_byte(4);
         submodule.db.update(|tx| {
@@ -12064,8 +11762,7 @@ mod tests {
     /// missing presence row takes it back out.
     #[test]
     fn data_span_persisted_follows_the_per_offset_gate() -> eyre::Result<()> {
-        let (_tmp, _config, storage) =
-            open_presence_module_with("span_persisted", SubmoduleIndexEngine::Rocksdb, 3600)?;
+        let (_tmp, _config, storage) = open_presence_module_with("span_persisted", 3600)?;
         let span = partition_chunk_offset_ii!(1, 2);
         let per_offset = |storage: &StorageModule| {
             (1_u32..=2).all(|o| storage.is_data_chunk_persisted_at(PartitionChunkOffset::from(o)))
@@ -12121,7 +11818,6 @@ mod tests {
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
         });
         let info = StorageModuleInfo {
             id: 0,
@@ -12163,8 +11859,7 @@ mod tests {
     #[test]
     fn placement_persisted_needs_the_whole_placement_inside_the_partition() -> eyre::Result<()> {
         // 8 chunks of 32 bytes. Offsets 0 and 1 are persisted `Data`.
-        let (_tmp, _config, storage) =
-            open_presence_module_with("placement_persisted", SubmoduleIndexEngine::Rocksdb, 0)?;
+        let (_tmp, _config, storage) = open_presence_module_with("placement_persisted", 0)?;
         let placement = |start: i32, data_size: u64| DataRootInfo {
             start_offset: RelativeChunkOffset(start),
             data_size,
@@ -12240,8 +11935,7 @@ mod tests {
     /// [`StorageModule::is_data_chunk_persisted_at`].
     #[test]
     fn data_span_persisted_counts_a_proof_only_row() -> eyre::Result<()> {
-        let (_tmp, _config, storage) =
-            open_presence_module_with("span_proof_only", SubmoduleIndexEngine::Rocksdb, 0)?;
+        let (_tmp, _config, storage) = open_presence_module_with("span_proof_only", 0)?;
         let data_root = H256::repeat_byte(7);
         let tx_path_hash = H256::repeat_byte(0x11);
         let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
@@ -12349,8 +12043,6 @@ mod tests {
     struct SeededIndex {
         tx_hash: H256,
         data_root: H256,
-        tx_path: Vec<u8>,
-        leaf: TxLeafBinding,
         info: DataRootInfo,
     }
 
@@ -12364,18 +12056,16 @@ mod tests {
 
     fn open_presence_module(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
         Config,
         StorageModule,
     )> {
-        open_presence_module_with(prefix, engine, 0)
+        open_presence_module_with(prefix, 0)
     }
 
     fn open_presence_module_with(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
         intervals_persist_secs: u64,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
@@ -12390,7 +12080,6 @@ mod tests {
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(engine);
         });
         let storage = StorageModule::new(&presence_info(), &config)?;
         Ok((tmp, config, storage))
@@ -12404,13 +12093,9 @@ mod tests {
         prefix: &str,
         mut f: impl FnMut(&Config, StorageModule) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
-            let (tmp, config, storage) =
-                open_presence_module(&format!("{prefix}_{engine:?}"), engine)?;
-            f(&config, storage).map_err(|err| eyre!("{engine:?}: {err}"))?;
-            drop(tmp);
-        }
+        let (tmp, config, storage) = open_presence_module(prefix)?;
+        f(&config, storage)?;
+        drop(tmp);
         Ok(())
     }
 
@@ -12459,8 +12144,6 @@ mod tests {
         Ok(SeededIndex {
             tx_hash,
             data_root,
-            tx_path,
-            leaf,
             info,
         })
     }
@@ -12504,9 +12187,7 @@ mod tests {
             .with_tracing()
             .build();
         let chunk_size = 32_u64;
-        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 20, |node| {
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
-        });
+        let config = testing_config(tmp_dir.path(), chunk_size, 20);
         let storage_module =
             StorageModule::new(&one_span(19, "hdd0", Some(submit_assignment(0))), &config)?;
         let data_root = H256::repeat_byte(4);
@@ -12542,37 +12223,20 @@ mod tests {
 
     /// Uninitialized `[3, 5]` drops pending and splits the tx interval.
     /// Entropy `[6, 7]` keeps the tx remnant. The data-root extent is `[1, 2]`.
-    // MDBX-SUBMODULE-INDEX: delete the stored_paths arms in this helper. They check the tx path only MDBX keeps.
     fn assert_entropy_hole_kept(module: &StorageModule, seeded: &SeededIndex) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        let stored_paths = submodule.db.stores_tx_paths();
-        if stored_paths {
-            assert_eq!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?,
-                Some(seeded.tx_path.clone())
-            );
-            assert_eq!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?,
-                Some(seeded.leaf.clone())
-            );
-        } else {
-            assert!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?
-                    .is_none()
-            );
-            assert!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?
-                    .is_none()
-            );
-        }
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?
+                .is_none()
+        );
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?
+                .is_none()
+        );
         assert_eq!(
             submodule
                 .db
@@ -12591,48 +12255,28 @@ mod tests {
                 .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?
                 .is_none()
         );
-        if stored_paths {
-            assert_eq!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?,
-                Some(seeded.tx_path.clone())
-            );
-            assert_eq!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(6)))?,
-                Some(seeded.tx_path.clone())
-            );
-        } else {
-            assert!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?
-                    .is_none()
-            );
-            assert!(
-                submodule
-                    .db
-                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(6)))?
-                    .is_none()
-            );
-        }
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?
+                .is_none()
+        );
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(6)))?
+                .is_none()
+        );
         let at_two = submodule
             .db
             .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(2)))?
             .expect("data span keeps the row");
-        if stored_paths {
-            assert_eq!(at_two.tx_path_hash, Some(seeded.tx_hash));
-            assert!(at_two.data_path_hash.is_some());
-        } else {
-            // The interval stores the data root. The data-path hash is the bytes.
-            assert_eq!(at_two.tx_path_hash, Some(seeded.data_root));
-            assert_eq!(
-                at_two.data_path_hash,
-                Some(H256(irys_types::hash_sha256(&[2])))
-            );
-        }
+        // The interval stores the data root. The data-path hash is the bytes.
+        assert_eq!(at_two.tx_path_hash, Some(seeded.data_root));
+        assert_eq!(
+            at_two.data_path_hash,
+            Some(H256(irys_types::hash_sha256(&[2])))
+        );
         assert!(
             submodule
                 .db
@@ -12643,11 +12287,7 @@ mod tests {
             .db
             .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?
             .expect("entropy keeps tx coverage");
-        if stored_paths {
-            assert_eq!(at_six.tx_path_hash, Some(seeded.tx_hash));
-        } else {
-            assert_eq!(at_six.tx_path_hash, Some(seeded.data_root));
-        }
+        assert_eq!(at_six.tx_path_hash, Some(seeded.data_root));
         assert!(at_six.data_path_hash.is_none());
         assert!(module.is_data_root_index_ready_at(PartitionChunkOffset::from(2)));
         assert!(!module.is_data_root_index_ready_at(PartitionChunkOffset::from(3)));
@@ -12969,11 +12609,11 @@ mod tests {
     #[test]
     fn reset_during_presence_copy_leaves_no_data_path() -> eyre::Result<()> {
         let mut errors = Vec::new();
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let prefix = format!("reset_during_presence_copy_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
-                let (_tmp, _config, storage) = open_presence_module(&prefix, engine)?;
+                let (_tmp, _config, storage) = open_presence_module(&prefix)?;
                 let offset = PartitionChunkOffset::from(2);
                 let tx_hash = H256::repeat_byte(9);
                 let data_root = H256::repeat_byte(4);
@@ -13136,7 +12776,6 @@ mod tests {
     /// relative name misses this temp dir, so the submodule path is absolute.
     fn open_assigned_presence(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
         Config,
@@ -13151,7 +12790,6 @@ mod tests {
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(engine);
         });
         let hash = H256::repeat_byte(0x11);
         let info = StorageModuleInfo {
@@ -13391,11 +13029,11 @@ mod tests {
     #[test]
     fn entropy_write_during_interrupted_data_pwrite_drops_the_proof() -> eyre::Result<()> {
         let mut errors = Vec::new();
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let prefix = format!("entropy_during_data_pwrite_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
-                let (_tmp, _config, storage, hash) = open_assigned_presence(&prefix, engine)?;
+                let (_tmp, _config, storage, hash) = open_assigned_presence(&prefix)?;
                 seed_proof_coverage(&storage)?;
                 let offset = PartitionChunkOffset::from(2);
                 let other = PartitionChunkOffset::from(3);
@@ -13472,11 +13110,11 @@ mod tests {
     #[test]
     fn replaced_data_bytes_without_a_proof_do_not_publish_data() -> eyre::Result<()> {
         let mut errors = Vec::new();
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let prefix = format!("replaced_data_snapshot_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
-                let (_tmp, _config, storage) = open_presence_module_with(&prefix, engine, 0)?;
+                let (_tmp, _config, storage) = open_presence_module_with(&prefix, 0)?;
                 seed_proof_coverage(&storage)?;
                 let offset = PartitionChunkOffset::from(2);
                 queue_proved_data(&storage, offset, 0xD4);
@@ -13553,8 +13191,8 @@ mod tests {
     #[test]
     fn registration_commit_follows_the_assignment() -> eyre::Result<()> {
         let mut errors = Vec::new();
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let prefix = format!("registration_assignment_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
                 let tmp = TempDirBuilder::new().prefix(&prefix).build();
@@ -13571,7 +13209,7 @@ mod tests {
                         ..StorageSyncConfig::default()
                     },
                     base_directory: tmp.path().to_path_buf(),
-                    database: index_database(engine),
+                    database: index_database(),
                     ..NodeConfig::testing()
                 };
                 let config = Config::new_with_random_peer_id(node_config);
@@ -13682,11 +13320,11 @@ mod tests {
     #[test]
     fn registration_after_rollback_does_not_restore_rows() -> eyre::Result<()> {
         let mut errors = Vec::new();
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let prefix = format!("registration_rollback_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
-                let (tmp, storage, original) = open_publish_module(&prefix, engine)?;
+                let (tmp, storage, original) = open_publish_module(&prefix)?;
                 let _tmp = tmp;
                 index_one(&storage, 2)?;
                 eyre::ensure!(
@@ -13777,11 +13415,11 @@ mod tests {
     #[test]
     fn rollback_waits_for_the_registration_commit_then_clears() -> eyre::Result<()> {
         let mut errors = Vec::new();
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let prefix = format!("registration_rollback_held_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
-                let (tmp, storage, original) = open_publish_module(&prefix, engine)?;
+                let (tmp, storage, original) = open_publish_module(&prefix)?;
                 let _tmp = tmp;
                 let storage = Arc::new(storage);
                 storage.pause_next_registration_at(RegistrationPausePoint::DuringCommit);
@@ -13870,7 +13508,6 @@ mod tests {
 
     fn open_publish_module(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
         StorageModule,
@@ -13890,7 +13527,6 @@ mod tests {
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp.path().to_path_buf(),
-            database: index_database(engine),
             ..NodeConfig::testing()
         };
         let config = Config::new_with_random_peer_id(node_config);
@@ -13971,10 +13607,9 @@ mod tests {
         Ok(())
     }
 
-    /// Assigned module, four chunks, the chosen index engine.
+    /// Assigned module, four chunks.
     fn open_assigned_module(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
         persist_secs: u64,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
@@ -13999,7 +13634,6 @@ mod tests {
                 intervals_persist_secs: persist_secs,
                 ..StorageSyncConfig::default()
             },
-            database: index_database(engine),
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
@@ -14048,15 +13682,11 @@ mod tests {
     /// The interval replace fails before it commits. The proof index, the
     /// placement, and the file label stay as they were. Reopen does not see
     /// `Data` with an empty proof.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn rollback_crash_before_interval_image_keeps_the_proof(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
+    #[test]
+    fn rollback_crash_before_interval_image_keeps_the_proof() -> eyre::Result<()> {
+        let engine = "RocksDB";
         let prefix = format!("rollback_image_crash_{engine:?}");
-        let (tmp, config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (tmp, config, storage) = open_assigned_module(&prefix, 30)?;
         let (bytes, data_root) = settle_proved_prefix(&storage)?;
         let offset = PartitionChunkOffset::from(0);
         let publish_before = storage.publish_generation.load(Ordering::SeqCst);
@@ -14111,15 +13741,11 @@ mod tests {
     /// The interval image is durable and the proof clear has not started.
     /// Reopen loads `Uninitialized` and drops the proof. It does not reload
     /// `Data` with an empty proof index.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn rollback_crash_between_image_and_proof_clear_reloads_uninitialized(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
+    #[test]
+    fn rollback_crash_between_image_and_proof_clear_reloads_uninitialized() -> eyre::Result<()> {
+        let engine = "RocksDB";
         let prefix = format!("rollback_between_clear_{engine:?}");
-        let (tmp, config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (tmp, config, storage) = open_assigned_module(&prefix, 30)?;
         let (_bytes, data_root) = settle_proved_prefix(&storage)?;
         let offset = PartitionChunkOffset::from(0);
         storage.fail_next_sync_at(SyncFailurePoint::AfterRollbackIntervalImage);
@@ -14176,15 +13802,11 @@ mod tests {
     /// A finished rollback stores `Uninitialized` and then drops the proof.
     /// One span is still one cut and one insert. The publish generation is
     /// the counter that moves. Reset's epoch and the checksum-cut epoch stay.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn rollback_publishes_uninitialized_then_clears_the_proof(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
+    #[test]
+    fn rollback_publishes_uninitialized_then_clears_the_proof() -> eyre::Result<()> {
+        let engine = "RocksDB";
         let prefix = format!("rollback_image_ok_{engine:?}");
-        let (tmp, _config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (tmp, _config, storage) = open_assigned_module(&prefix, 30)?;
         let (_bytes, data_root) = settle_proved_prefix(&storage)?;
         let edits_before = storage.rollback_interval_edits.load(Ordering::SeqCst);
         let image_epoch = storage.interval_image_epoch.load(Ordering::SeqCst);
@@ -14233,15 +13855,11 @@ mod tests {
 
     /// A completion that copied the map before rollback must not write that
     /// `Data` image back over the `Uninitialized` file.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn stale_interval_snapshot_cannot_restore_data_after_rollback(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
+    #[test]
+    fn stale_interval_snapshot_cannot_restore_data_after_rollback() -> eyre::Result<()> {
+        let engine = "RocksDB";
         let prefix = format!("rollback_stale_image_{engine:?}");
-        let (tmp, _config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (tmp, _config, storage) = open_assigned_module(&prefix, 30)?;
         let (_bytes, data_root) = settle_proved_prefix(&storage)?;
         let storage = Arc::new(storage);
         storage.pause_next_interval_image();
@@ -14295,9 +13913,8 @@ mod tests {
     /// the number of `cut` and `insert` calls. A loop that cuts once per
     /// offset counts more than two.
     #[test]
-    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB. The interval edit is not MDBX-specific.
     fn rollback_marks_a_span_in_one_interval_edit() -> eyre::Result<()> {
-        let (tmp, storage, _) = open_publish_module("rollback_span", SubmoduleIndexEngine::Mdbx)?;
+        let (tmp, storage, _) = open_publish_module("rollback_span")?;
         let _tmp = tmp;
         let mut errors = Vec::new();
         let cases: Vec<(
@@ -14413,7 +14030,6 @@ mod tests {
                     ..StorageSyncConfig::default()
                 },
                 base_directory: split_tmp.path().to_path_buf(),
-                database: index_database(SubmoduleIndexEngine::Mdbx),
                 ..NodeConfig::testing()
             };
             let config = Config::new_with_random_peer_id(node_config);
@@ -15319,21 +14935,13 @@ mod tests {
 
     #[test]
     fn busy_placement_blocks_the_free_one() -> eyre::Result<()> {
-        use irys_database::submodule::tables::DataRootInfo;
-        use irys_types::RelativeChunkOffset;
-
         let (_tmp, storage_module, chunk) = packed_submit_fixture("busy_placement_blocks_free")?;
-        let (_, submodule) =
-            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        submodule.db.update(|tx| {
-            tx.add_data_root_info(
-                chunk.data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(1),
-                    data_size: 5,
-                },
-            )
-        })?;
+        storage_module.index_transaction_data(
+            &data_header(chunk.data_root, chunk.data_size),
+            &vec![8, 7, 6, 5],
+            LedgerChunkRange(ledger_chunk_offset_ii!(1, 1)),
+            0,
+        )?;
 
         let busy = PartitionChunkOffset::from(0);
         let free = PartitionChunkOffset::from(1);
@@ -15359,21 +14967,13 @@ mod tests {
 
     #[test]
     fn entropy_read_failure_releases_all_reserved_offsets() -> eyre::Result<()> {
-        use irys_database::submodule::tables::DataRootInfo;
-        use irys_types::RelativeChunkOffset;
-
         let (_tmp, storage_module, chunk) = packed_submit_fixture("entropy_read_releases")?;
-        let (_, submodule) =
-            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        submodule.db.update(|tx| {
-            tx.add_data_root_info(
-                chunk.data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(1),
-                    data_size: 5,
-                },
-            )
-        })?;
+        storage_module.index_transaction_data(
+            &data_header(chunk.data_root, chunk.data_size),
+            &vec![8, 7, 6, 5],
+            LedgerChunkRange(ledger_chunk_offset_ii!(1, 1)),
+            0,
+        )?;
 
         storage_module.fail_entropy_read_at(2);
         assert!(storage_module.write_data_chunk(&chunk).is_err());
@@ -15545,7 +15145,6 @@ mod tests {
                 intervals_persist_secs: 0,
                 ..StorageSyncConfig::default()
             },
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
@@ -15626,7 +15225,6 @@ mod tests {
                 intervals_persist_secs: 0,
                 ..StorageSyncConfig::default()
             },
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
@@ -15972,7 +15570,7 @@ mod tests {
         assert!(
             paths
                 .values()
-                .all(|(tx_path, data_path)| tx_path.is_some() && data_path.is_some())
+                .all(|(tx_path, data_path)| tx_path.is_none() && data_path.is_some())
         );
         assert_eq!(storage.index_views.load(Ordering::SeqCst), 1);
         Ok(())
@@ -16121,8 +15719,7 @@ mod tests {
     /// later commit. The mutex payload is `()`.
     #[test]
     fn poisoned_sync_lock_still_resets_and_commits_a_write() -> eyre::Result<()> {
-        let (_tmp, _config, module) =
-            open_presence_module("sync_poison_recover", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, module) = open_presence_module("sync_poison_recover")?;
         let poisoned = quiet_panics(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _guard = module.sync_in_progress.lock().unwrap();
@@ -16156,8 +15753,7 @@ mod tests {
     /// hold is not poison. That commit still stores the row.
     #[test]
     fn lane_pwrite_panic_returns_and_keeps_the_sync_lock() -> eyre::Result<()> {
-        let (_tmp, _config, module) =
-            open_presence_module("lane_pwrite_panic", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, module) = open_presence_module("lane_pwrite_panic")?;
         let module = std::sync::Arc::new(module);
         let lane = LaneGuard::start(std::sync::Arc::clone(&module))?;
         let offset = PartitionChunkOffset::from(1);
@@ -16590,87 +16186,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn clear_data_root_infos_in_range_drops_placements_overlapping_by_extent() -> eyre::Result<()> {
-        use irys_database::submodule::tables::DataRootInfo;
-        use irys_types::RelativeChunkOffset;
-
-        let infos = [one_span(
-            9,
-            "hdd0-test",
-            Some(PartitionAssignment::default()),
-        )];
-        let tmp_dir = TempDirBuilder::new()
-            .prefix("clear_dri_extent_test")
-            .build();
-        let config = testing_config(tmp_dir.path(), 32, 10);
-        let storage_module = StorageModule::new(&infos[0], &config)?;
-
-        // Three placements of the same (orphaned) data_root; orphaned range is [3, 5].
-        let data_root = H256::random();
-        let (_, submodule) =
-            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        submodule.db.update(|tx| {
-            // Canonical: extent [0, 0], entirely below the orphaned range.
-            tx.add_data_root_info(
-                data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(0),
-                    data_size: 32,
-                },
-            )?;
-            // Orphaned: starts at offset 2 (below range_start 3) but spans 3
-            // chunks → extent [2, 4], reaching into the range. `start_offset`
-            // alone (2 < 3) would wrongly keep it; extent overlap drops it.
-            tx.add_data_root_info(
-                data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(2),
-                    data_size: 96,
-                },
-            )?;
-            // Orphaned: extent [4, 4], fully inside the range.
-            tx.add_data_root_info(
-                data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(4),
-                    data_size: 32,
-                },
-            )?;
-            // Orphaned cross-partition placement anchored in a lower module:
-            // negative start_offset whose extent [-2, 3] (ceil(192 / 32) = 6
-            // chunks) reaches into the range. start_offset alone (-2 < 3) would
-            // wrongly keep it; this exercises the negative-i32 extent path.
-            tx.add_data_root_info(
-                data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(-2),
-                    data_size: 192,
-                },
-            )
-        })?;
-
-        storage_module.clear_data_root_infos_in_range(
-            PartitionChunkOffset::from(3),
-            PartitionChunkOffset::from(5),
-            &[data_root],
-        )?;
-
-        let remaining = storage_module.collect_data_root_infos(data_root)?;
-        assert_eq!(
-            remaining.0,
-            vec![DataRootInfo {
-                start_offset: RelativeChunkOffset(0),
-                data_size: 32,
-            }],
-            "only the canonical placement whose extent lies entirely outside [3, 5] \
-             survives; the placement starting at offset 2 but extending into the \
-             range is dropped by extent overlap"
-        );
-
-        Ok(())
-    }
-
     /// Residual Entropy hole: tx migration wrote `tx_path` + `DataRootInfos` but
     /// no chunk body / `data_path_hash`. `data_root_and_tx_offset_at` must still
     /// resolve addressing for data_root-based fetch (proof-signer path).
@@ -16771,8 +16286,6 @@ mod tests {
     /// (and thus index heal) can see the range — not present-with-None tombstones.
     #[test]
     fn clear_offset_index_in_range_leaves_the_range_as_a_gap() -> eyre::Result<()> {
-        use irys_database::submodule::tables::ChunkPathHashes;
-
         let infos = [one_span(
             9,
             "hdd0-test",
@@ -16785,20 +16298,30 @@ mod tests {
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
         // Index a dense range [0, 9].
-        let path_hashes = ChunkPathHashes {
-            data_path_hash: Some(H256::random()),
-            tx_path_hash: Some(H256::random()),
-        };
+        let data_root = H256::random();
+        let tx_path_hash = H256::random();
         let (_, submodule) =
             storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         submodule.db.update(|tx| {
-            for offset in 0..10_u32 {
-                tx.set_path_hashes_by_offset(
-                    PartitionChunkOffset::from(offset),
-                    path_hashes.clone(),
-                )?;
-            }
-            Ok(())
+            tx.add_tx_leaf_binding(
+                tx_path_hash,
+                &TxLeafBinding {
+                    data_root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(9),
+                Some(tx_path_hash),
+            )?;
+            tx.add_data_root_info(
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset::from(0),
+                    data_size: 320,
+                },
+            )
         })?;
 
         assert!(
@@ -16840,7 +16363,6 @@ mod tests {
             .prefix("clear_offset_subrange")
             .build();
         let config = testing_config_tuned(tmp.path(), 32, chunks, |node| {
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
             node.storage.index_wal_backstop_ms = 60_000;
         });
         let storage = StorageModule::new(&one_span(last, "sub", None), &config)?;
@@ -17104,29 +16626,24 @@ mod tests {
         let storage_module_info = &infos[0];
         let storage_module = StorageModule::new(storage_module_info, &config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
-        let data_path = vec![4, 3, 2, 1];
-        let tx_path = vec![5, 6, 7, 8];
-        let data_root = H256::zero();
-        let data_size = chunk_data.len() as u64;
 
         storage_module.pack_with_zeros();
 
-        let data_tx = data_header(data_root, data_size);
-
-        let _ = storage_module.index_transaction_data(
-            &data_tx,
-            &tx_path,
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer.sign_transaction(signer.create_transaction(chunk_data, H256::zero())?)?;
+        let (_, tx_paths) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        storage_module.index_transaction_data(
+            &tx.header,
+            &tx_paths[0].proof,
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             0,
-        );
-
-        let chunk = UnpackedChunk {
-            data_root: H256::zero(),
-            data_size,
-            data_path: data_path.clone().into(),
-            bytes: chunk_data.into(),
-            tx_offset: TxChunkOffset::from(0),
-        };
+        )?;
+        let chunk = tx
+            .data_chunks()?
+            .pop()
+            .ok_or_else(|| eyre::eyre!("fixture transaction has no chunk"))?;
+        let data_path = chunk.data_path.0.clone();
 
         storage_module.write_data_chunk(&chunk)?;
 
@@ -17632,7 +17149,6 @@ mod tests {
                 min_durable_interval_ms: 60_000,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
         });
         let storage = StorageModule::new(&parked_interval_info(), &config)?;
         Ok((tmp_dir, config, storage))
@@ -18186,8 +17702,7 @@ mod tests {
     /// Open does not rewrite either file.
     #[test]
     fn open_applies_the_mid_write_log_over_intervals() -> eyre::Result<()> {
-        let (tmp, config, storage, data_root) =
-            indexed_entropy_module("mid_write_open", SubmoduleIndexEngine::Rocksdb)?;
+        let (tmp, config, storage, data_root) = indexed_entropy_module("mid_write_open")?;
         assert!(storage.write_chunk(
             PartitionChunkOffset::from(0),
             vec![7_u8; 32],
@@ -18343,7 +17858,6 @@ mod tests {
     /// test is offset 0, so a crash fence on that run must not overlap the tx.
     fn indexed_entropy_module(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
         Config,
@@ -18358,7 +17872,6 @@ mod tests {
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(engine);
         });
         let storage = StorageModule::new(&indexed_entropy_info(&config), &config)?;
         {
@@ -18404,15 +17917,11 @@ mod tests {
     /// After fdatasync and the presence commit, a kill must keep entropy the
     /// run did not write. The run itself stays `Interrupted` until the
     /// completion period, so reopen still treats that offset as unpacked.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn crash_reload_of_write_ahead_keeps_indexed_entropy(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
+    #[test]
+    fn crash_reload_of_write_ahead_keeps_indexed_entropy() -> eyre::Result<()> {
+        let engine = "RocksDB";
         let prefix = format!("ahead_entropy_done_{engine:?}");
-        let (tmp, config, storage, data_root) = indexed_entropy_module(&prefix, engine)?;
+        let (tmp, config, storage, data_root) = indexed_entropy_module(&prefix)?;
         let written = PartitionChunkOffset::from(0);
         assert!(storage.write_chunk(written, vec![7_u8; 32], ChunkType::Data));
         storage.sync_pending_chunks()?;
@@ -18449,15 +17958,11 @@ mod tests {
 
     /// A crash after the write-ahead and before fdatasync still reloads the
     /// run as `Uninitialized`. Entropy after the run keeps its label and rows.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn crash_during_the_run_keeps_the_write_fence(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
+    #[test]
+    fn crash_during_the_run_keeps_the_write_fence() -> eyre::Result<()> {
+        let engine = "RocksDB";
         let prefix = format!("ahead_entropy_inflight_{engine:?}");
-        let (tmp, config, storage, data_root) = indexed_entropy_module(&prefix, engine)?;
+        let (tmp, config, storage, data_root) = indexed_entropy_module(&prefix)?;
         storage.fail_next_sync_at(SyncFailurePoint::BeforeDataFsync);
         assert!(storage.write_chunk(
             PartitionChunkOffset::from(0),
@@ -18505,8 +18010,7 @@ mod tests {
     /// hole still sets `crc_complete`. An empty durable point does not scan.
     #[test]
     fn checksum_gap_scan_resumes_at_the_first_hole() -> eyre::Result<()> {
-        let (_tmp, _config, module) =
-            open_presence_module("crc_gap_resume", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, module) = open_presence_module("crc_gap_resume")?;
         for offset in 0..8_u32 {
             assert!(module.write_chunk(
                 PartitionChunkOffset::from(offset),
@@ -18972,7 +18476,6 @@ mod tests {
                 min_durable_interval_ms: 60_000,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
         });
         let storage = StorageModule::new(
             &one_span(3, "chunks", Some(PartitionAssignment::default())),
@@ -19079,7 +18582,6 @@ mod tests {
                 min_durable_interval_ms: 60_000,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
         });
         let storage = StorageModule::new(
             &one_span(3, "chunks", Some(PartitionAssignment::default())),
@@ -19204,7 +18706,6 @@ mod tests {
                 min_durable_interval_ms: 60_000,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
         });
         let info = StorageModuleInfo {
             id: 0,
@@ -19354,7 +18855,6 @@ mod tests {
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             };
-            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
         });
         let assignment = PartitionAssignment {
             ledger_id: Some(DataLedger::Submit.into()),
@@ -19735,7 +19235,6 @@ mod tests {
 
     fn open_recall_io_module(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
         direct: bool,
         chunk_size: u64,
         min_durable_interval_ms: u64,
@@ -19758,7 +19257,6 @@ mod tests {
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp.path().to_path_buf(),
-            database: index_database(engine),
             ..NodeConfig::testing()
         };
         let config = Config::new_with_random_peer_id(node_config);
@@ -19780,19 +19278,11 @@ mod tests {
         min_durable_interval_ms: u64,
         mut f: impl FnMut(&StorageModule) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
-            let (tmp, storage) = open_recall_io_module(
-                &format!("{prefix}_{engine:?}"),
-                engine,
-                direct,
-                chunk_size,
-                min_durable_interval_ms,
-            )?;
-            f(&storage).map_err(|err| eyre!("{engine:?}: {err}"))?;
-            drop(storage);
-            drop(tmp);
-        }
+        let (tmp, storage) =
+            open_recall_io_module(prefix, direct, chunk_size, min_durable_interval_ms)?;
+        f(&storage)?;
+        drop(storage);
+        drop(tmp);
         Ok(())
     }
 
@@ -21243,7 +20733,6 @@ mod tests {
     /// One entropy chunk and one tx row. `sub` is the submodule directory.
     fn seed_assigned_entropy(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
         hash: H256,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
@@ -21251,9 +20740,7 @@ mod tests {
         PathBuf,
     )> {
         let tmp = TempDirBuilder::new().prefix(prefix).build();
-        let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
-            node.database = index_database(engine);
-        });
+        let config = testing_config(tmp.path(), 32, 4);
         let sub = tmp.path().join("sub");
         let storage = StorageModule::new(
             &module_info(&sub, Some(submit_slot(&config, hash, 0))),
@@ -21316,11 +20803,11 @@ mod tests {
     /// later unassign whose packing matches still wipes.
     #[test]
     fn refused_unassign_open_does_not_leave_a_reset_marker() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let hash = H256::repeat_byte(0x61);
             let prefix = format!("refuse_unassign_{engine:?}");
-            let (_tmp, config, sub) = seed_assigned_entropy(&prefix, engine, hash)?;
+            let (_tmp, config, sub) = seed_assigned_entropy(&prefix, hash)?;
             let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
             let mut params = PackingParams::from_toml(&params_path)?;
             let recorded = params
@@ -21420,8 +20907,7 @@ mod tests {
     #[test]
     fn rocks_unassign_with_a_different_chain_id_does_not_wipe() -> eyre::Result<()> {
         let hash = H256::repeat_byte(0x62);
-        let (_tmp, config, sub) =
-            seed_assigned_entropy("refuse_chain", SubmoduleIndexEngine::Rocksdb, hash)?;
+        let (_tmp, config, sub) = seed_assigned_entropy("refuse_chain", hash)?;
         let other = config_with_chain_id(&config, config.consensus.chain_id + 1);
         let err = StorageModule::new(&module_info(&sub, None), &other)
             .expect_err("stored chain id does not match this open");
@@ -21496,8 +20982,7 @@ mod tests {
     #[test]
     fn crash_after_open_reset_marker_keeps_crc_complete() -> eyre::Result<()> {
         let hash = H256::repeat_byte(0x63);
-        let (_tmp, config, sub) =
-            seed_assigned_entropy("open_marker_crc", SubmoduleIndexEngine::Rocksdb, hash)?;
+        let (_tmp, config, sub) = seed_assigned_entropy("open_marker_crc", hash)?;
         {
             let _fail = OpenResetMarkerFail::arm();
             let err = StorageModule::new(&module_info(&sub, None), &config)
@@ -21549,8 +21034,7 @@ mod tests {
         assert_eq!(live_tx_rows(&recovered)?, 0);
         drop(recovered);
 
-        let (_kept, config, sub) =
-            seed_assigned_entropy("open_marker_done", SubmoduleIndexEngine::Rocksdb, hash)?;
+        let (_kept, config, sub) = seed_assigned_entropy("open_marker_done", hash)?;
         let unassigned = StorageModule::new(&module_info(&sub, None), &config)?;
         assert_eq!(
             unassigned.get_chunk_type(&PartitionChunkOffset::from(0)),
@@ -21823,14 +21307,12 @@ mod tests {
     /// another slot, or capacity. A wiped expiry still accepts a repack.
     #[test]
     fn same_hash_ledger_drift_wipes_only_when_leaving_a_ledger() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("ledger_drift_{engine:?}"))
                 .build();
-            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
-                node.database = index_database(engine);
-            });
+            let config = testing_config(tmp.path(), 32, 4);
             let hash = H256::repeat_byte(0x71);
             let submit = Some(u32::from(DataLedger::Submit));
             let publish = Some(u32::from(DataLedger::Publish));
@@ -21908,14 +21390,12 @@ mod tests {
     /// leaves the old file and the old label. The next open finishes the wipe.
     #[test]
     fn crash_during_slot_change_wipe_finishes_on_the_next_open() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_marker_{engine:?}"))
                 .build();
-            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
-                node.database = index_database(engine);
-            });
+            let config = testing_config(tmp.path(), 32, 4);
             let hash = H256::repeat_byte(0x72);
             let sub = tmp.path().join("sub");
             let submit = Some(u32::from(DataLedger::Submit));
@@ -21983,14 +21463,12 @@ mod tests {
     /// that slot is not already stored, so its body can be written.
     #[test]
     fn restart_across_same_hash_slot_change_writes_the_new_root() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_restart_{engine:?}"))
                 .build();
-            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
-                node.database = index_database(engine);
-            });
+            let config = testing_config(tmp.path(), 32, 4);
             let hash = H256::repeat_byte(0x73);
             let submit = Some(u32::from(DataLedger::Submit));
             let offset = PartitionChunkOffset::from(0);
@@ -22085,14 +21563,12 @@ mod tests {
     /// still keeps them.
     #[test]
     fn refused_slot_change_open_writes_no_reset_marker() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_refuse_marker_{engine:?}"))
                 .build();
-            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
-                node.database = index_database(engine);
-            });
+            let config = testing_config(tmp.path(), 32, 4);
             let hash = H256::repeat_byte(0x74);
             let submit = Some(u32::from(DataLedger::Submit));
             let sub = tmp.path().join("sub");
@@ -22147,14 +21623,12 @@ mod tests {
     /// accepted open does.
     #[test]
     fn refused_open_does_not_finish_a_slot_change_marker() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_marker_refuse_{engine:?}"))
                 .build();
-            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
-                node.database = index_database(engine);
-            });
+            let config = testing_config(tmp.path(), 32, 4);
             let hash = H256::repeat_byte(0x75);
             let submit = Some(u32::from(DataLedger::Submit));
             let sub = tmp.path().join("sub");
@@ -22350,8 +21824,7 @@ mod tests {
     /// out of this map. A later cut still replaces the stored label.
     #[test]
     fn label_runs_stops_at_the_visited_prefix() -> eyre::Result<()> {
-        let (_tmp, _config, storage) =
-            open_presence_module("label_runs_prefix", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, storage) = open_presence_module("label_runs_prefix")?;
         let spans: Vec<(u32, u32, ChunkType)> = (0..8)
             .map(|offset| {
                 let kind = if offset % 2 == 0 {
@@ -22431,8 +21904,7 @@ mod tests {
 
     #[test]
     fn get_intervals_matches_the_pending_overlay() -> eyre::Result<()> {
-        let (_tmp, _config, storage) =
-            open_presence_module("interval_overlay", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, storage) = open_presence_module("interval_overlay")?;
         let cases: &[(&[(u32, u32, ChunkType)], &[(u32, ChunkType)])] = &[
             (
                 &[(0, 4, ChunkType::Entropy), (5, 7, ChunkType::Uninitialized)],
@@ -22565,8 +22037,7 @@ mod tests {
             NoditMap::from_iter_strict(cut.into_iter()).expect("cut intervals do not overlap");
         assert_eq!(slice, rebuilt);
 
-        let (_tmp, _config, storage) =
-            open_presence_module("fragmented_query", SubmoduleIndexEngine::Rocksdb)?;
+        let (_tmp, _config, storage) = open_presence_module("fragmented_query")?;
         *storage.intervals.write().unwrap() = map;
         let started = std::time::Instant::now();
         let entropy = storage.get_intervals(ChunkType::Entropy);
@@ -22593,8 +22064,7 @@ mod tests {
         let _cloned = map.clone();
         let clone_cost = started.elapsed();
 
-        let (_tmp, _config, storage) =
-            open_presence_module_with("covered_ahead", SubmoduleIndexEngine::Rocksdb, 30)?;
+        let (_tmp, _config, storage) = open_presence_module_with("covered_ahead", 30)?;
         *storage.intervals.write().unwrap() = map;
         {
             let mut disk = storage.lock_interval_disk();
@@ -22628,8 +22098,8 @@ mod tests {
     /// The old labels must not survive either open. Both index engines.
     #[test]
     fn unassign_then_rebind_drops_old_labels() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+        {
+            let engine = "RocksDB";
             let prefix = format!("unassign_rebind_{engine:?}");
             let tmp = TempDirBuilder::new().prefix(&prefix).build();
             let node_config = NodeConfig {
@@ -22645,7 +22115,6 @@ mod tests {
                     ..StorageSyncConfig::default()
                 },
                 base_directory: tmp.path().to_path_buf(),
-                database: index_database(engine),
                 ..NodeConfig::testing()
             };
             let config = Config::new_with_random_peer_id(node_config);
@@ -22722,10 +22191,8 @@ mod tests {
     /// An idle completion flush must not clone the interval map. The caller
     /// holds the write lock, so a clone blocks until that lock drops.
     #[test]
-    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn idle_interval_flush_does_not_lock_the_map() -> eyre::Result<()> {
-        let (_tmp, _config, storage) =
-            open_presence_module_with("idle_flush", SubmoduleIndexEngine::Mdbx, 30)?;
+        let (_tmp, _config, storage) = open_presence_module_with("idle_flush", 30)?;
         let intervals = Arc::clone(&storage.intervals);
         let guard = intervals.write().unwrap();
         let returned = std::thread::scope(|scope| {
@@ -22905,7 +22372,6 @@ mod tests {
                 intervals_persist_secs: persist_secs,
                 ..StorageSyncConfig::default()
             },
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
@@ -23137,10 +22603,9 @@ mod tests {
         Ok(())
     }
 
-    /// Assigned module with one-iteration packing. `engine` selects the index.
+    /// Assigned module with one-iteration packing.
     fn pair_module(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
     ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
         let tmp = TempDirBuilder::new().prefix(prefix).build();
         let chunk_size = 32_u64;
@@ -23160,7 +22625,6 @@ mod tests {
                 intervals_persist_secs: 0,
                 ..StorageSyncConfig::default()
             },
-            database: index_database(engine),
             base_directory: tmp.path().to_path_buf(),
             ..NodeConfig::testing()
         };
@@ -23290,15 +22754,11 @@ mod tests {
     /// commit. A placement update does not bring that path back. A body that
     /// is durable only through pwrite is not paired with it either. After the
     /// new body commits, the serve is that body's path and bytes.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn entropy_overwrite_is_not_served_under_the_previous_path(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
+    #[test]
+    fn entropy_overwrite_is_not_served_under_the_previous_path() -> eyre::Result<()> {
+        let engine = "RocksDB";
         let prefix = format!("entropy_path_{engine:?}");
-        let (tmp, storage) = pair_module(&prefix, engine)?;
+        let (tmp, storage) = pair_module(&prefix)?;
         let _tmp = tmp;
         let storage = Arc::new(storage);
         storage.pack_with_zeros();
@@ -23391,70 +22851,12 @@ mod tests {
         Ok(())
     }
 
-    /// The path loaded before `yield_to_writes` is not the path committed
-    /// with the new body. The live label is `Entropy` so the write is legal,
-    /// and the previous path is still stored because no entropy commit ran.
-    #[test]
-    // MDBX-SUBMODULE-INDEX: delete this test. It checks the tx path MDBX commits with the bytes.
-    fn mdbx_serve_after_pwrite_uses_the_path_committed_with_the_bytes() -> eyre::Result<()> {
-        let (tmp, storage) = pair_module("mdbx_pwrite_path", SubmoduleIndexEngine::Mdbx)?;
-        let _tmp = tmp;
-        let storage = Arc::new(storage);
-        storage.pack_with_zeros();
-        let offset = PartitionChunkOffset::from(0);
-        let (first, _) = index_pattern(&storage, &[0x11], 0)?;
-        storage.write_data_chunk(&first[0])?;
-        storage.force_sync_pending_chunks()?;
-        let path_a = data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("path A missing"))?;
-        {
-            let mut intervals = storage.intervals.write().unwrap();
-            let span = ii(offset, offset);
-            let _ = intervals.cut(span);
-            let _ = intervals.insert_merge_touching_if_values_equal(span, ChunkType::Entropy);
-        }
-        eyre::ensure!(
-            live_label(&storage, 0) == Some(ChunkType::Entropy),
-            "offset 0 is not a data-write target"
-        );
-        eyre::ensure!(
-            data_path_at(&storage, 0)?.as_ref() == Some(&path_a),
-            "painting the live label dropped the stored path"
-        );
-        let (second, root2) = index_pattern(&storage, &[0x22], 1)?;
-        let during = serve_during_paused_pwrite(&storage, offset, &second[0])?;
-        let served = during.ok_or_else(|| eyre::eyre!("serve omitted the committed body"))?;
-        let path_now =
-            data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("committed path missing"))?;
-        eyre::ensure!(path_now != path_a, "the body commit kept path A");
-        eyre::ensure!(
-            served.data_path.0 == path_now,
-            "served a data path from before the body commit"
-        );
-        eyre::ensure!(
-            served.data_root == root2,
-            "served proof is not the committed data root"
-        );
-        let disk = packed_prefix(&storage, offset)?;
-        eyre::ensure!(
-            served.bytes.0 == disk,
-            "served bytes are not the bytes committed with the path"
-        );
-        let again = storage
-            .generate_full_chunk(offset)?
-            .ok_or_else(|| eyre::eyre!("later serve omitted the offset"))?;
-        eyre::ensure!(
-            again.data_path.0 == served.data_path.0 && again.bytes.0 == served.bytes.0,
-            "a later serve does not match the overlapped serve"
-        );
-        Ok(())
-    }
-
     /// Two transactions share chunk 0's unpacked bytes and differ in chunk 1.
     /// The packed checksum stays. The data path does not. A serve that copied
     /// the first body must return the path committed with that checksum.
     #[test]
     fn serve_after_body_read_reloads_when_the_path_changes_and_the_crc_stays() -> eyre::Result<()> {
-        let (tmp, storage) = pair_module("serve_same_crc", SubmoduleIndexEngine::Rocksdb)?;
+        let (tmp, storage) = pair_module("serve_same_crc")?;
         let _tmp = tmp;
         let storage = Arc::new(storage);
         storage.pack_with_zeros();

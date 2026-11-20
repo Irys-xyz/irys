@@ -35,7 +35,8 @@ required flags:
   --ledger <id>                  data ledger id.
                                  Publish is 0, Submit is 1, OneYear is 10, ThirtyDay is 20.
   --slot <n>                     partition slot from packing_params.toml (`slot`)
-  --chunks-per-partition <n>     consensus num_chunks_in_partition
+  --chunks-per-partition <n>     active slot width: consensus num_chunks_in_partition,
+                                 or the resized width after a partition resize
   --chunk-size <bytes>           consensus chunk size (mainnet is 262144)
 
 optional:
@@ -93,8 +94,10 @@ A crash before that marker leaves CONVERTING and no completion marker.
 Rerun the same command with --replace-incomplete. A finished run removes
 CONVERTING. Do not start the node on an incomplete directory.
 
-mdbx-to-rocks writes <submodule>/rocks. Set database.submodule_index to rocksdb
-before the next start. Read `ledger` and `slot` from <submodule>/packing_params.toml.
+mdbx-to-rocks writes <submodule>/rocks. The node does the same conversion when
+it starts, so a manual run is optional. The next start sees the complete
+rocks/ and renames db/ to db.migrated/. Read `ledger` and `slot` from
+<submodule>/packing_params.toml.
 Read num_chunks_in_partition and the chunk size from the chain config.
 
   submodule-index-convert mdbx-to-rocks \\
@@ -111,10 +114,9 @@ Read num_chunks_in_partition and the chunk size from the chain config.
 
   submodule-index-convert verify-rocks <submodule>/rocks <other>/rocks
 
-rocks-to-mdbx writes an MDBX schema v2 index for this build. It reads
-RocksDB v1 only. The node migrates a schema v1 db/ (release 4.0.x) to
-MDBX schema v2 in place. Release 4.0.x cannot read the result.
-There is no rollback from 4.1.0 to 4.0.x.
+rocks-to-mdbx writes an MDBX schema v2 index for a 4.1.x node, which
+reads MDBX. This build opens RocksDB only. rocks-to-mdbx reads RocksDB v1
+only. Release 4.0.x cannot read the result. There is no rollback to 4.0.x.
 
 verify, verify-rocks, and mdbx-to-rocks --verify exit 1 when a compared value
 differs or when a placement was skipped because the consensus database does not

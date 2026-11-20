@@ -153,7 +153,7 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         ConsensusConfig, DatabaseConfig, DbSyncMode, NodeConfig, PartitionChunkOffset,
-        StorageSyncConfig, SubmoduleIndexEngine, partition_chunk_offset_ii,
+        StorageSyncConfig, partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
 
@@ -161,12 +161,11 @@ mod tests {
     const N: u64 = 8;
     const CRC_FILE: &str = "chunks.crc";
 
-    fn index_database(engine: SubmoduleIndexEngine) -> DatabaseConfig {
+    fn index_database() -> DatabaseConfig {
         DatabaseConfig {
             sync_mode: DbSyncMode::UtterlyNoSync,
             cache_sync_mode: DbSyncMode::UtterlyNoSync,
             geometry_max_size: Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE),
-            submodule_index: engine,
             ..DatabaseConfig::default()
         }
     }
@@ -181,7 +180,6 @@ mod tests {
 
     fn open_module(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
         storage: StorageSyncConfig,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
@@ -197,7 +195,7 @@ mod tests {
             }),
             storage,
             base_directory: tmp.path().to_path_buf(),
-            database: index_database(engine),
+            database: index_database(),
             ..NodeConfig::testing()
         };
         let config = irys_types::Config::new_with_random_peer_id(node_config);
@@ -269,11 +267,7 @@ mod tests {
 
     #[test]
     fn rocks_data_and_entropy_rows_round_trip() -> eyre::Result<()> {
-        let (tmp, _config, module) = open_module(
-            "crc_round_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (tmp, _config, module) = open_module("crc_round_rocks", fast_storage())?;
         let data = vec![0x11_u8; CHUNK];
         let entropy = vec![0x22_u8; CHUNK];
         assert!(module.write_chunk(PartitionChunkOffset::from(0), data.clone(), ChunkType::Data));
@@ -309,11 +303,7 @@ mod tests {
 
     #[test]
     fn rocks_data_over_entropy_replaces_the_checksum() -> eyre::Result<()> {
-        let (_tmp, _config, module) = open_module(
-            "crc_replace_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (_tmp, _config, module) = open_module("crc_replace_rocks", fast_storage())?;
         write_synced(&module, 0, 0x22, ChunkType::Entropy);
         let first = module
             .offset_meta_for_test(PartitionChunkOffset::from(0))?
@@ -331,11 +321,7 @@ mod tests {
 
     #[test]
     fn rocks_flipped_chunk_and_bad_row_are_omitted_and_queued() -> eyre::Result<()> {
-        let (tmp, _config, module) = open_module(
-            "crc_flip_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (tmp, _config, module) = open_module("crc_flip_rocks", fast_storage())?;
         write_synced(&module, 0, 0x31, ChunkType::Entropy);
         write_synced(&module, 1, 0x32, ChunkType::Entropy);
         flip_dat(&sub_path(&tmp, "chunks.dat"), 0);
@@ -372,11 +358,7 @@ mod tests {
 
     #[test]
     fn rocks_missing_crc_is_unknown_until_complete_then_a_mismatch() -> eyre::Result<()> {
-        let (_tmp, _config, module) = open_module(
-            "crc_unknown_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (_tmp, _config, module) = open_module("crc_unknown_rocks", fast_storage())?;
         write_synced(&module, 0, 0x61, ChunkType::Data);
         assert!(!module.chunk_crc_complete_for_test());
         // Clearing the checksum on a checksum-only row deletes the row.
@@ -412,11 +394,7 @@ mod tests {
     #[test]
     fn rocks_crash_before_fsync_reloads_uninitialized_without_a_false_mismatch() -> eyre::Result<()>
     {
-        let (tmp, config, module) = open_module(
-            "crc_crash_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (tmp, config, module) = open_module("crc_crash_rocks", fast_storage())?;
         let bytes = vec![0x81_u8; CHUNK];
         assert!(module.write_chunk(
             PartitionChunkOffset::from(0),
@@ -461,11 +439,7 @@ mod tests {
 
     #[test]
     fn rocks_reset_clears_complete_and_a_full_repack_sets_it() -> eyre::Result<()> {
-        let (_tmp, _config, module) = open_module(
-            "crc_reset_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (_tmp, _config, module) = open_module("crc_reset_rocks", fast_storage())?;
         for offset in 0..N as u32 {
             write_synced(&module, offset, 0x91, ChunkType::Entropy);
         }
@@ -490,8 +464,7 @@ mod tests {
             min_durable_interval_ms: 60_000,
             ..fast_storage()
         };
-        let (_tmp, _config, module) =
-            open_module("crc_ahead_rocks", SubmoduleIndexEngine::Rocksdb, storage)?;
+        let (_tmp, _config, module) = open_module("crc_ahead_rocks", storage)?;
         write_synced(&module, 0, 0xc1, ChunkType::Entropy);
         assert!(module.write_chunk(
             PartitionChunkOffset::from(1),
@@ -526,11 +499,7 @@ mod tests {
 
     #[test]
     fn rocks_reconcile_keeps_entropy_checksums_and_drops_uninitialized() -> eyre::Result<()> {
-        let (tmp, config, module) = open_module(
-            "crc_reconcile_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (tmp, config, module) = open_module("crc_reconcile_rocks", fast_storage())?;
         write_synced(&module, 0, 0xd1, ChunkType::Entropy);
         write_synced(&module, 1, 0xd2, ChunkType::Data);
         let entropy_crc = module
@@ -580,11 +549,7 @@ mod tests {
 
     #[test]
     fn rocks_checksum_only_row_is_not_a_data_chunk() -> eyre::Result<()> {
-        let (tmp, config, module) = open_module(
-            "crc_presence_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (tmp, config, module) = open_module("crc_presence_rocks", fast_storage())?;
         let before_uncovered =
             super::super::super::index_read_metrics::uncovered_data_path_for_test();
         write_synced(&module, 2, 0xe4, ChunkType::Entropy);
@@ -635,43 +600,12 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX engine. It asserts that MDBX stores no checksum.
-    fn mdbx_does_not_store_or_check_a_checksum() -> eyre::Result<()> {
-        let (tmp, config, module) =
-            open_module("crc_mdbx", SubmoduleIndexEngine::Mdbx, fast_storage())?;
-        let bytes = vec![0xb2_u8; CHUNK];
-        assert!(module.write_chunk(PartitionChunkOffset::from(1), bytes, ChunkType::Entropy));
-        module.sync_pending_chunks()?;
-        assert!(
-            module
-                .offset_meta_for_test(PartitionChunkOffset::from(1))?
-                .is_none()
-        );
-        assert!(!module.chunk_crc_complete_for_test());
-        assert!(!sub_path(&tmp, CRC_FILE).exists());
-        flip_dat(&sub_path(&tmp, "chunks.dat"), CHUNK as u64);
-        let before = test_mismatch_count();
-        let served = module.read_chunks(partition_chunk_offset_ii!(1, 1))?;
-        assert!(served.contains_key(&PartitionChunkOffset::from(1)));
-        assert_eq!(test_mismatch_count(), before);
-        drop(module);
-        std::fs::write(sub_path(&tmp, CRC_FILE), b"stale")?;
-        let _reopened = StorageModule::new(&presence_info(), &config)?;
-        assert!(!sub_path(&tmp, CRC_FILE).exists());
-        Ok(())
-    }
-
     /// Bytes read before a presence commit must not be judged against the
     /// checksum written by that commit. The read pauses after the pread.
     /// The durable point then commits. The stale bytes are a suspect only.
     #[test]
     fn rocks_bytes_from_before_presence_commit_are_not_a_mismatch() -> eyre::Result<()> {
-        let (_tmp, _config, module) = open_module(
-            "crc_stale_bytes",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (_tmp, _config, module) = open_module("crc_stale_bytes", fast_storage())?;
         write_synced(&module, 0, 0x11, ChunkType::Entropy);
         let entropy_crc = module
             .offset_meta_for_test(PartitionChunkOffset::from(0))?
@@ -890,7 +824,7 @@ mod tests {
             }),
             storage: fast_storage(),
             base_directory: tmp.path().to_path_buf(),
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            database: index_database(),
             ..NodeConfig::testing()
         };
         let config = irys_types::Config::new_with_random_peer_id(node_config);
@@ -992,7 +926,7 @@ mod tests {
             }),
             storage: fast_storage(),
             base_directory: tmp.path().to_path_buf(),
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            database: index_database(),
             ..NodeConfig::testing()
         };
         let config = irys_types::Config::new_with_random_peer_id(node_config);
@@ -1036,11 +970,7 @@ mod tests {
 
     #[test]
     fn rocks_offset_crc_missing_reports_a_gap_and_a_present_span() -> eyre::Result<()> {
-        let (_tmp, _config, module) = open_module(
-            "crc_missing_rocks",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (_tmp, _config, module) = open_module("crc_missing_rocks", fast_storage())?;
         assert!(
             !module.offset_crc_missing_for_test(
                 PartitionChunkOffset::from(1),
@@ -1440,11 +1370,7 @@ mod tests {
 
     #[test]
     fn reset_during_interval_snapshot_keeps_the_file_uninitialized() -> eyre::Result<()> {
-        let (tmp, _config, module) = open_module(
-            "interval_epoch",
-            SubmoduleIndexEngine::Rocksdb,
-            fast_storage(),
-        )?;
+        let (tmp, _config, module) = open_module("interval_epoch", fast_storage())?;
         for offset in 0..N as u32 {
             write_synced(&module, offset, 0x44, ChunkType::Data);
         }

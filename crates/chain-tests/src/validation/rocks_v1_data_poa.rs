@@ -23,14 +23,13 @@ use irys_types::hardfork_config::Cascade;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BoundedFee, DataLedger, DataTransaction, H256, IrysBlockHeader, NodeConfig, PoaData,
-    SendTraced as _, SubmoduleIndexEngine, UnixTimestamp,
+    SendTraced as _, UnixTimestamp,
 };
 
 const CHUNK_SIZE: usize = 32;
 
 fn rocks_config(chunks_in_partition: u64, blocks_in_epoch: u64) -> NodeConfig {
     let mut config = NodeConfig::testing();
-    config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
     // The process-wide cache is installed by the first submodule. A chain
     // test does not need the production 1 GiB cache.
     config.database.rocksdb_block_cache_bytes = 128 * 1024 * 1024;
