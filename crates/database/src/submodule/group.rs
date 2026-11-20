@@ -37,22 +37,19 @@ pub(super) struct GroupCommit {
     enabled: AtomicBool,
     syncs: AtomicU64,
     /// Synced WAL writes. RocksDB only. Includes backstop syncs.
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     wal_syncs: AtomicU64,
     /// Backstop thread, explicit `sync_group`, and shutdown WAL syncs.
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     backstop_syncs: AtomicU64,
     /// Set when a RocksDB WAL sync fails. Later index writes must fail.
     /// RocksDB can clear its own background error; this flag does not clear.
-    #[cfg(feature = "rocksdb")]
     wal_failed: AtomicBool,
     /// Test hook. The next dirty WAL sync fails once and sets [`Self::wal_failed`].
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     fail_next_sync: AtomicBool,
     /// Test hook. The next synced write or compaction WAL flush fails once.
     /// An unsynced group append does not take it. The write path latches
     /// [`Self::wal_failed`]; this flag does not.
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     fail_next_synced_write: AtomicBool,
     state: Mutex<State>,
     wake: Condvar,
@@ -76,7 +73,6 @@ struct State {
     delay: Duration,
     /// [`GroupCommit::set_delay`] has run. Rocks enable uses its default
     /// only when this is false, so a caller-supplied bound is kept.
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     delay_set: bool,
 }
 
@@ -87,11 +83,10 @@ impl GroupCommit {
             syncs: AtomicU64::new(0),
             wal_syncs: AtomicU64::new(0),
             backstop_syncs: AtomicU64::new(0),
-            #[cfg(feature = "rocksdb")]
             wal_failed: AtomicBool::new(false),
-            #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+            #[cfg(any(test, feature = "test-utils"))]
             fail_next_sync: AtomicBool::new(false),
-            #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+            #[cfg(any(test, feature = "test-utils"))]
             fail_next_synced_write: AtomicBool::new(false),
             state: Mutex::new(State {
                 stop: false,
@@ -116,18 +111,15 @@ impl GroupCommit {
         self.syncs.load(Ordering::Relaxed)
     }
 
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn wal_syncs(&self) -> u64 {
         self.wal_syncs.load(Ordering::Relaxed)
     }
 
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn backstop_syncs(&self) -> u64 {
         self.backstop_syncs.load(Ordering::Relaxed)
     }
 
     /// One `set_sync(true)` write or `flush_wal(true)` that is not the backstop.
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn note_wal_sync(&self) {
         self.wal_syncs.fetch_add(1, Ordering::Relaxed);
     }
@@ -136,14 +128,12 @@ impl GroupCommit {
     ///
     /// Also counts as a WAL sync. A synced data write that covers the open
     /// group does not call this.
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn note_backstop_sync(&self) {
         self.wal_syncs.fetch_add(1, Ordering::Relaxed);
         self.backstop_syncs.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A WAL sync failed. Stays set for the life of this index.
-    #[cfg(feature = "rocksdb")]
     pub(super) fn note_wal_failure(&self) {
         self.wal_failed.store(true, Ordering::Release);
         // Take the lock so a waiter between its check and its wait sees this.
@@ -151,34 +141,30 @@ impl GroupCommit {
         self.wake.notify_all();
     }
 
-    #[cfg(feature = "rocksdb")]
     pub(super) fn wal_failed(&self) -> bool {
         self.wal_failed.load(Ordering::Acquire)
     }
 
     fn failed(&self) -> bool {
-        #[cfg(feature = "rocksdb")]
-        return self.wal_failed();
-        #[cfg(not(feature = "rocksdb"))]
-        false
+        self.wal_failed()
     }
 
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn arm_fail_next_sync(&self) {
         self.fail_next_sync.store(true, Ordering::Release);
     }
 
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn take_fail_next_sync(&self) -> bool {
         self.fail_next_sync.swap(false, Ordering::AcqRel)
     }
 
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn arm_fail_next_synced_write(&self) {
         self.fail_next_synced_write.store(true, Ordering::Release);
     }
 
-    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn take_fail_next_synced_write(&self) -> bool {
         self.fail_next_synced_write.swap(false, Ordering::AcqRel)
     }
@@ -187,7 +173,6 @@ impl GroupCommit {
     ///
     /// `Duration::ZERO` makes the thread sync as soon as it wakes. It does
     /// not sync on the caller thread.
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn set_delay(&self, delay: Duration) {
         let mut state = self.lock();
         state.delay = delay;
@@ -196,12 +181,11 @@ impl GroupCommit {
         self.wake.notify_all();
     }
 
-    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn delay_is_set(&self) -> bool {
         self.lock().delay_set
     }
 
-    #[cfg(all(test, feature = "rocksdb"))]
+    #[cfg(test)]
     pub(super) fn delay(&self) -> Duration {
         self.lock().delay
     }
@@ -335,7 +319,6 @@ impl GroupCommit {
     /// Rocks only. A synced `WriteBatch` already flushed the WAL, so this does
     /// not sync again and does not count a backstop sync. MDBX commits are
     /// not synced that way.
-    #[cfg(feature = "rocksdb")]
     pub(super) fn cover_durable(&self) {
         if !self.is_enabled() {
             return;

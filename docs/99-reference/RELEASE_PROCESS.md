@@ -227,6 +227,13 @@ This is the fastest rollback path — it re-uses the existing tested image.
 > is `Data`. Nodes on the RocksDB index are not affected: the conversion leaves
 > `db/` unchanged, and 4.0.x refuses a config that sets `submodule_index`.
 >
+> **Rollback to 4.1.x after the startup move to RocksDB.** A release that moves
+> each submodule `db/` to `rocks/` on start renames `db/` to `db.migrated/` and
+> no longer parses `database.submodule_index`. Before starting 4.1.x, set
+> `database.submodule_index = "rocksdb"`: 4.1.x then reads `rocks/`. Without
+> the key, 4.1.x selects MDBX and refuses to open beside `rocks/`. See
+> `docs/60-indexes/06-storage-module-indexes.md`.
+>
 > **If a release is in flight, cancel it first.** `release.yml`, `docker.yml`,
 > and `docker-retag.yml` share the `release` concurrency group (with
 > `cancel-in-progress: false`) so they can never race each other over `:latest`

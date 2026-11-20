@@ -3262,7 +3262,7 @@ mod assignment_reset_tests {
     #[tokio::test]
     async fn crc_repair_is_enqueued_while_the_disk_lane_runs() {
         use irys_domain::storage_module::ChunkType;
-        use irys_types::{StorageSyncConfig, SubmoduleIndexEngine};
+        use irys_types::StorageSyncConfig;
         use std::os::unix::fs::FileExt as _;
 
         let mut harness = open_harness(Some(DataLedger::Publish.into()), |node_config| {
@@ -3272,7 +3272,6 @@ mod assignment_reset_tests {
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             };
-            node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
         });
         assert!(harness.module.write_chunk(
             PartitionChunkOffset::from(0),

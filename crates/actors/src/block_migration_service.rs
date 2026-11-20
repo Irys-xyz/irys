@@ -2964,7 +2964,10 @@ mod tests {
     /// is also placed by a still-canonical block.
     #[test]
     fn recover_from_network_partition_scopes_data_root_infos_clear() -> eyre::Result<()> {
-        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
+        use irys_database::submodule::{
+            SubmoduleStore as _,
+            tables::{DataRootInfo, TxLeafBinding},
+        };
         use irys_types::RelativeChunkOffset;
 
         let (db, _db_tmp) = open_db()?;
@@ -3003,20 +3006,25 @@ mod tests {
         // offset 3 (inside it).
         let shared_data_root = H256::random();
         let orphan_txid = H256::random();
-        {
-            let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
+        for (start, tx_path_hash) in [(0_u32, H256::random()), (3, H256::random())] {
             submodule.db.update(|tx| {
-                tx.add_data_root_info(
-                    shared_data_root,
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset(0),
-                        data_size: 32,
+                tx.add_tx_leaf_binding(
+                    tx_path_hash,
+                    &TxLeafBinding {
+                        data_root: shared_data_root,
+                        prefix_hash: H256::zero(),
                     },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(start),
+                    PartitionChunkOffset::from(start),
+                    Some(tx_path_hash),
                 )?;
                 tx.add_data_root_info(
                     shared_data_root,
                     &DataRootInfo {
-                        start_offset: RelativeChunkOffset(3),
+                        start_offset: RelativeChunkOffset(i32::try_from(start)?),
                         data_size: 32,
                     },
                 )

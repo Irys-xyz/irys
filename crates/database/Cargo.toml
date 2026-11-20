@@ -6,12 +6,6 @@ rust-version.workspace = true
 
 [features]
 test-utils = []
-# Native engine for the submodule index. Any crate that depends on
-# `irys-domain` turns this on (`irys-domain` enables it), so the node binary
-# links RocksDB. An `irys-database`-only build leaves it off. The converter
-# and bench bins built from this crate alone need `--features rocksdb`.
-# `cargo xtask check` turns it on via `--all-features`.
-rocksdb = ["dep:rocksdb"]
 
 [dependencies]
 rayon.workspace = true
@@ -36,14 +30,13 @@ reth-primitives-traits.workspace = true
 paste.workspace = true
 strum.workspace = true
 # Only irys-database depends on rocksdb (reth does not). Default features include lz4 and leave jemalloc off.
-rocksdb = { version = "0.24.0", optional = true }
+rocksdb = "0.24.0"
 libc = "0.2"
 
 [[bin]]
 # MDBX-SUBMODULE-INDEX: delete the MDBX engine path of this bench. The RocksDB timings can stay.
 name = "submodule-index-bench"
 path = "src/bin/submodule_index_bench.rs"
-required-features = ["rocksdb"]
 
 [[bin]]
 # MDBX-SUBMODULE-INDEX: remove this bin with the v1 to v2 MDBX migration.
@@ -54,7 +47,6 @@ path = "src/bin/submodule_index_migrate.rs"
 # MDBX-SUBMODULE-INDEX: remove this bin once the rollback window is closed.
 name = "submodule-index-convert"
 path = "src/bin/submodule_index_convert.rs"
-required-features = ["rocksdb"]
 
 [[bin]]
 name = "tx-path-derive-bench"

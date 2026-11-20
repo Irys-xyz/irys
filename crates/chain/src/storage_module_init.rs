@@ -1,25 +1,36 @@
 //! Open every storage module before the node serves traffic.
 //!
-//! Each module migrates its own index, limited by that module's disk. Every
-//! open runs on the tokio blocking pool at once, so the disks work in
-//! parallel and no async worker blocks on a migration. A failure does not
-//! cancel the others.
+//! Each module first moves any MDBX submodule index to RocksDB, limited by
+//! that module's disk. Every open runs on the tokio blocking pool at once, so
+//! the disks work in parallel and no async worker blocks on a migration. A
+//! failure does not cancel the others.
 
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
+use irys_database::reth_db::DatabaseEnv;
 use irys_domain::{StorageModule, StorageModuleInfo};
 use irys_types::Config;
+
+use crate::submodule_index_migration::migrate_submodule_index;
 
 pub(super) async fn open_storage_modules(
     config: &Config,
     infos: Vec<StorageModuleInfo>,
+    consensus: Arc<DatabaseEnv>,
+    partition_chunks: u64,
     #[cfg(test)] open_delay: Duration,
 ) -> eyre::Result<Vec<Arc<StorageModule>>> {
+    // The first RocksDB open in the process fixes the shared cache and write
+    // buffer. A startup conversion opens RocksDB before any module open, and
+    // without this it would fix the production defaults instead of the
+    // configured limits.
+    irys_database::submodule::install_process_rocks_resources(&config.node_config.database)?;
     let labels: Vec<String> = infos.iter().map(module_label).collect();
     let opens = infos.into_iter().map(|info| {
         let config = config.clone();
+        let consensus = Arc::clone(&consensus);
         // spawn_blocking does not carry the caller's span. Give each open its
         // own child span so interleaved migration progress names its module.
         let span = tracing::info_span!("open_storage_module", storage_module.id = info.id);
@@ -29,6 +40,8 @@ pub(super) async fn open_storage_modules(
             if !open_delay.is_zero() {
                 std::thread::sleep(open_delay);
             }
+            // MDBX-SUBMODULE-INDEX: delete this call with submodule_index_migration.
+            migrate_submodule_indexes(&info, &config, &consensus, partition_chunks)?;
             StorageModule::new(&info, &config).map(Arc::new)
         })
     });
@@ -54,6 +67,64 @@ pub(super) async fn open_storage_modules(
     }
 }
 
+/// Moves each submodule index of one module to RocksDB on its own thread.
+/// Submodules are often on different disks, so the moves overlap. Every
+/// failure is reported, and a failure does not stop the other moves.
+/// `partition_chunks` is the active slot width (see
+/// [`migrate_submodule_index`]).
+// MDBX-SUBMODULE-INDEX: delete this function with submodule_index_migration.
+fn migrate_submodule_indexes(
+    info: &StorageModuleInfo,
+    config: &Config,
+    consensus: &DatabaseEnv,
+    partition_chunks: u64,
+) -> eyre::Result<()> {
+    let span = tracing::Span::current();
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let moves: Vec<_> = info
+            .submodules
+            .iter()
+            .map(|(_, dir)| {
+                let path = config.node_config.base_directory.join(dir);
+                let label = path.display().to_string();
+                let span = span.clone();
+                let handle = scope.spawn(move || {
+                    let _span = span.enter();
+                    migrate_submodule_index(&path, config, consensus, partition_chunks)
+                });
+                (label, handle)
+            })
+            .collect();
+        // Join every thread before returning, so a panic does not hide the
+        // errors of the submodules joined after it.
+        moves
+            .into_iter()
+            .filter_map(|(label, handle)| match handle.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(format!("{label}: {err:#}")),
+                Err(panic) => Some(format!("{label}: panicked: {}", panic_message(&*panic))),
+            })
+            .collect()
+    });
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "failed to move {} submodule index(es) to RocksDB: {}",
+            failures.len(),
+            failures.join("; ")
+        ))
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+}
+
 fn module_label(info: &StorageModuleInfo) -> String {
     let paths = info
         .submodules
@@ -69,29 +140,18 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use irys_database::metadata::MetadataKey;
-    use irys_database::reth_db::Database as _;
-    use irys_database::submodule::tables::{
-        ChunkPathHashes, ChunkPathHashesByOffset, Metadata, SUBMODULE_SCHEMA, SubmoduleTables,
-        TxPathInterval, TxPathIntervalByStart,
-    };
-    use irys_database::{open_or_create_db, submodule_db_args};
-    use irys_domain::{PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
+    use irys_domain::StorageModuleInfo;
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::PartitionChunkOffset;
     use irys_types::storage::ii;
-    use irys_types::{Config, H256, NodeConfig, PartitionChunkOffset};
-    use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-    use super::open_storage_modules;
+    use super::{migrate_submodule_indexes, open_storage_modules};
+    use crate::submodule_index_migration::tests::{
+        assert_moved, config, consensus, seed_empty_mdbx, seed_foreign_mdbx, seed_placed_mdbx,
+    };
 
     const CHUNKS: u32 = 10;
     const DELAY: Duration = Duration::from_millis(300);
-
-    fn config(dir: &Path) -> Config {
-        let mut node = NodeConfig::testing();
-        node.base_directory = dir.to_path_buf();
-        Config::new_with_random_peer_id(node)
-    }
 
     fn info(id: usize, name: &str) -> StorageModuleInfo {
         let last = CHUNKS - 1;
@@ -105,152 +165,106 @@ mod tests {
         }
     }
 
-    fn db_dir(base: &Path, name: &str) -> std::path::PathBuf {
-        base.join(name).join("db")
+    fn fresh_rocks(base: &Path, name: &str) {
+        assert!(base.join(name).join("rocks").join("SCHEMA").is_file());
+        assert!(!base.join(name).join("db").exists());
+        assert!(!base.join(name).join("db.migrated").exists());
     }
 
-    fn db_args(config: &Config) -> eyre::Result<reth_db::mdbx::DatabaseArguments> {
-        // Same geometry the module open uses. A different cap refuses the env.
-        submodule_db_args(&config.node_config.database)
-    }
-
-    fn seed_v1(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
-        let dir = db_dir(base, name);
-        std::fs::create_dir_all(&dir)?;
-        let env = open_or_create_db(&dir, SubmoduleTables::ALL, db_args(config)?)?;
-        let tx = env.tx_mut()?;
-        let tx_hash = H256::repeat_byte(7);
-        for offset in 0..CHUNKS {
-            tx.put::<ChunkPathHashesByOffset>(
-                PartitionChunkOffset(offset),
-                ChunkPathHashes {
-                    data_path_hash: None,
-                    tx_path_hash: Some(tx_hash),
-                },
-            )?;
-        }
-        tx.commit()?;
-        // Open drops tx intervals when this file is missing. A live module
-        // already has it. `Data` keeps the rows the migration just wrote.
-        write_data_intervals(config, base, name)
-    }
-
-    /// `Data` labels plus the matching `packing_params.toml`. Open refuses
-    /// labels that have no packing identity.
-    fn write_data_intervals(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
-        PackingParams {
-            packing_address: config.node_config.miner_address(),
-            entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
-            chunk_size: Some(config.consensus.chunk_size),
-            ..Default::default()
-        }
-        .write_to_disk(&base.join(name).join(PACKING_PARAMS_FILE_NAME))?;
-        let mut intervals = String::from("[[{\"start\":0,\"end\":");
-        intervals.push_str(&(CHUNKS - 1).to_string());
-        intervals.push_str("},\"Data\"]]");
-        std::fs::write(base.join(name).join("intervals.json"), intervals)?;
-        Ok(())
-    }
-
-    /// Schema v2 already. Open must leave the interval row where it is.
-    fn seed_v2(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
-        let dir = db_dir(base, name);
-        std::fs::create_dir_all(&dir)?;
-        let env = open_or_create_db(&dir, SubmoduleTables::ALL, db_args(config)?)?;
-        let tx = env.tx_mut()?;
-        tx.put::<Metadata>(
-            MetadataKey::DBSchemaVersion,
-            SUBMODULE_SCHEMA.as_bytes().to_vec(),
-        )?;
-        tx.put::<TxPathIntervalByStart>(
-            PartitionChunkOffset(0),
-            TxPathInterval {
-                end: PartitionChunkOffset(CHUNKS - 1),
-                tx_path_hash: H256::repeat_byte(9),
-            },
-        )?;
-        tx.commit()?;
-        drop(env);
-        write_data_intervals(config, base, name)
-    }
-
-    /// `rocks/SCHEMA` with an MDBX config. Open must refuse this directory.
-    fn seed_rocks(base: &Path, name: &str) -> eyre::Result<()> {
-        let rocks = base.join(name).join("rocks");
-        std::fs::create_dir_all(&rocks)?;
-        std::fs::write(rocks.join("SCHEMA"), b"irys-submodule-index rocksdb 1\n")?;
-        Ok(())
-    }
-
-    fn seed_foreign(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
-        let dir = db_dir(base, name);
-        std::fs::create_dir_all(&dir)?;
-        let env = open_or_create_db(&dir, SubmoduleTables::ALL, db_args(config)?)?;
-        let tx = env.tx_mut()?;
-        tx.put::<Metadata>(MetadataKey::DBSchemaVersion, b"not-this-binary\n".to_vec())?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn assert_migrated(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
-        let env = open_or_create_db(db_dir(base, name), SubmoduleTables::ALL, db_args(config)?)?;
-        let tx = env.tx()?;
-        let schema = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
-        assert_eq!(
-            schema.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes()),
-            "{name} did not finish migration"
+    /// A failed submodule move does not stop its sibling in the same module.
+    #[test]
+    fn a_failed_submodule_move_does_not_stop_its_sibling() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("sm-submodules").build();
+        let base = tmp.path();
+        let config = config(base);
+        let consensus = consensus(&config)?;
+        seed_foreign_mdbx(&config, &base.join("sub-bad"))?;
+        seed_empty_mdbx(&config, &base.join("sub-good"))?;
+        let info = StorageModuleInfo {
+            id: 7,
+            partition_assignment: None,
+            submodules: vec![
+                (
+                    ii(PartitionChunkOffset(0), PartitionChunkOffset(4)),
+                    "sub-bad".into(),
+                ),
+                (
+                    ii(PartitionChunkOffset(5), PartitionChunkOffset(CHUNKS - 1)),
+                    "sub-good".into(),
+                ),
+            ],
+        };
+        let err =
+            migrate_submodule_indexes(&info, &config, &consensus, u64::from(CHUNKS)).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("1 submodule index(es)") && text.contains("sub-bad"),
+            "{text}"
         );
-        let interval = tx
-            .get::<TxPathIntervalByStart>(PartitionChunkOffset::from(0))?
-            .unwrap_or_else(|| panic!("{name} has no interval"));
-        assert_eq!(interval.end, PartitionChunkOffset(CHUNKS - 1));
-        assert_eq!(interval.tx_path_hash, H256::repeat_byte(7));
+        assert!(!text.contains("sub-good"), "{text}");
+        assert_moved(&base.join("sub-good"));
+        assert!(base.join("sub-bad").join("db").join("mdbx.dat").is_file());
         Ok(())
     }
 
-    fn assert_v2_unchanged(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
-        let env = open_or_create_db(db_dir(base, name), SubmoduleTables::ALL, db_args(config)?)?;
-        let tx = env.tx()?;
-        let schema = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
-        assert_eq!(
-            schema.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes()),
-            "{name} schema changed"
-        );
-        let interval = tx
-            .get::<TxPathIntervalByStart>(PartitionChunkOffset::from(0))?
-            .unwrap_or_else(|| panic!("{name} lost its interval"));
-        assert_eq!(interval.end, PartitionChunkOffset(CHUNKS - 1));
-        assert_eq!(interval.tx_path_hash, H256::repeat_byte(9));
-        assert_eq!(
-            tx.entries::<ChunkPathHashesByOffset>()?,
-            0,
-            "{name} gained path-hash rows"
-        );
-        Ok(())
-    }
-
-    /// Opens several v1 modules together. The break this catches is a serial
-    /// loop, a reordered result, or an error that names only the first failure.
+    /// After the move, `db.migrated/` holds the only copy of the old rows. A
+    /// lost `rocks/` must not be replaced by an empty index.
     #[tokio::test(flavor = "multi_thread")]
-    async fn parallel_v1_open_keeps_order_reports_every_failure_and_overlaps() -> eyre::Result<()> {
+    async fn a_missing_rocks_index_beside_db_migrated_is_refused() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("sm-open-lost-rocks").build();
+        let base = tmp.path();
+        let config = config(base);
+        let consensus = consensus(&config)?;
+        seed_empty_mdbx(&config, &base.join("moved"))?;
+        let open = |consensus| {
+            open_storage_modules(
+                &config,
+                vec![info(1, "moved")],
+                consensus,
+                u64::from(CHUNKS),
+                Duration::ZERO,
+            )
+        };
+        drop(open(consensus.clone()).await?);
+        assert_moved(&base.join("moved"));
+        std::fs::remove_dir_all(base.join("moved").join("rocks"))?;
+        let err = open(consensus)
+            .await
+            .expect_err("a lost rocks/ must be refused");
+        assert!(
+            format!("{err:#}").contains("the live RocksDB index is missing"),
+            "{err:#}"
+        );
+        assert!(!base.join("moved").join("rocks").exists());
+        Ok(())
+    }
+
+    /// Opens several modules together and moves each MDBX index to RocksDB.
+    /// The break this catches is a serial loop, a reordered result, an error
+    /// that names only the first failure, or a failure that stops another
+    /// module's move.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_open_moves_every_index_keeps_order_reports_every_failure_and_overlaps()
+    -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("sm-open-parallel").build();
         let base = tmp.path();
         let config = config(base);
+        let consensus = consensus(&config)?;
         let names = ["good-0", "good-1", "good-2"];
         for name in names {
-            seed_v1(&config, base, name)?;
+            seed_empty_mdbx(&config, &base.join(name))?;
         }
         let infos = vec![info(10, "good-0"), info(20, "good-1"), info(30, "good-2")];
         let started = Instant::now();
-        let opened = open_storage_modules(&config, infos, DELAY).await?;
+        let opened =
+            open_storage_modules(&config, infos, consensus.clone(), u64::from(CHUNKS), DELAY)
+                .await?;
         let elapsed = started.elapsed();
         let ids: Vec<_> = opened.iter().map(|module| module.id).collect();
         assert_eq!(ids, vec![10, 20, 30]);
         drop(opened);
         for name in names {
-            assert_migrated(&config, base, name)?;
+            assert_moved(&base.join(name));
         }
         let serial = DELAY * names.len() as u32;
         assert!(
@@ -266,14 +280,11 @@ mod tests {
         let bad_second = "bad-3";
         let kept_a = "kept-a";
         let kept_b = "kept-b";
-        let already = "already-v2";
-        let rocks = "rocks-mod";
-        seed_foreign(&config, base, bad_first)?;
-        seed_v1(&config, base, kept_a)?;
-        seed_foreign(&config, base, bad_second)?;
-        seed_v1(&config, base, kept_b)?;
-        seed_v2(&config, base, already)?;
-        seed_rocks(base, rocks)?;
+        let fresh = "fresh";
+        seed_foreign_mdbx(&config, &base.join(bad_first))?;
+        seed_empty_mdbx(&config, &base.join(kept_a))?;
+        seed_placed_mdbx(&config, &base.join(bad_second))?;
+        seed_empty_mdbx(&config, &base.join(kept_b))?;
         let err = open_storage_modules(
             &config,
             vec![
@@ -281,35 +292,40 @@ mod tests {
                 info(2, kept_a),
                 info(3, bad_second),
                 info(4, kept_b),
-                info(5, already),
-                info(6, rocks),
+                info(5, fresh),
             ],
+            consensus,
+            u64::from(CHUNKS),
             Duration::ZERO,
         )
         .await
-        .expect_err("foreign schemas and a rocks directory must fail");
+        .expect_err("a foreign schema and an unconvertible index must fail");
         let text = format!("{err:#}");
         assert!(
-            text.contains(bad_first) && text.contains(bad_second),
-            "every failure must be named, got {text}"
-        );
-        assert!(
-            text.contains("storage module 1") && text.contains("storage module 3"),
+            text.contains("storage module 1")
+                && text.contains(bad_first)
+                && text.contains("not a submodule index"),
             "{text}"
         );
         assert!(
-            text.contains("storage module 6")
-                && text.contains(rocks)
-                && text.contains("the Rocks index was not copied"),
+            text.contains("storage module 3")
+                && text.contains(bad_second)
+                && text.contains("names no data ledger"),
             "{text}"
         );
-        assert!(
-            !text.contains("storage module 5"),
-            "already-v2 module failed to open: {text}"
-        );
-        assert_migrated(&config, base, kept_a)?;
-        assert_migrated(&config, base, kept_b)?;
-        assert_v2_unchanged(&config, base, already)?;
+        for id in [2, 4, 5] {
+            assert!(
+                !text.contains(&format!("storage module {id} ")),
+                "module {id} failed to open: {text}"
+            );
+        }
+        assert_moved(&base.join(kept_a));
+        assert_moved(&base.join(kept_b));
+        fresh_rocks(base, fresh);
+        for name in [bad_first, bad_second] {
+            assert!(base.join(name).join("db").join("mdbx.dat").is_file());
+            assert!(!base.join(name).join("rocks").exists());
+        }
         Ok(())
     }
 }

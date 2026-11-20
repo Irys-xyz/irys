@@ -992,8 +992,8 @@ mod tests {
     #[actix_web::test]
     async fn persisted_offsets_reads_a_real_storage_module() -> eyre::Result<()> {
         use irys_types::{
-            DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, SubmoduleIndexEngine,
-            irys::IrysSigner, ledger_chunk_offset_ii,
+            DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, irys::IrysSigner,
+            ledger_chunk_offset_ii,
         };
 
         let tmp_dir = TempDirBuilder::new()
@@ -1007,7 +1007,6 @@ mod tests {
             ..node_config.consensus_config()
         });
         node_config.base_directory = tmp_dir.path().to_path_buf();
-        node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
         let config = Config::new_with_random_peer_id(node_config);
         let module = module_with_assignment(
             0,
