@@ -159,6 +159,13 @@ pub trait SubmoduleRead {
     /// Inclusive interval that covers `offset`.
     fn tx_interval_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>>;
 
+    /// Root owning a live interval, even when its placement info is incomplete.
+    fn interval_data_root(&self, interval: &IntervalRow) -> eyre::Result<DataRoot> {
+        self.get_tx_leaf_binding(interval.tx_path_hash)?
+            .map(|binding| binding.data_root)
+            .ok_or_else(|| eyre::eyre!("live interval has no data-root binding"))
+    }
+
     /// Intervals that overlap the inclusive span `[start, end]`.
     ///
     /// A row that only touches a neighbor is not returned.
@@ -309,8 +316,8 @@ pub trait SubmoduleWrite: SubmoduleRead {
 
     /// Record one tx-path interval for the inclusive range `[start, end]`.
     ///
-    /// Overlapping intervals are split. `None` removes coverage. A data-path
-    /// hash already stored on an offset stays.
+    /// Only the same data root may overlap live coverage. `None` removes coverage.
+    /// A data-path hash already stored on an offset stays.
     fn add_tx_path_hash_to_offset_range(
         &mut self,
         start: PartitionChunkOffset,
@@ -2226,6 +2233,68 @@ mod tests {
     }
 
     #[test]
+    fn placement_registration_refuses_a_foreign_live_root() -> eyre::Result<()> {
+        each_engine("placement_owner_guard", |store| {
+            let root = H256::zero();
+            let foreign = H256::repeat_byte(22);
+            store.update(|tx| index_tx_span(tx, root, 1, 3))?;
+            let before = store.view(|tx| {
+                tx.tx_intervals_in_range(PartitionChunkOffset(0), PartitionChunkOffset(5))
+            })?;
+            let err = store
+                .update(|tx| index_tx_span(tx, foreign, 2, 4))
+                .unwrap_err();
+            assert!(err.to_string().contains("overlaps live root"), "{err}");
+            assert_eq!(
+                store
+                    .view(|tx| tx
+                        .tx_intervals_in_range(PartitionChunkOffset(0), PartitionChunkOffset(5)))?,
+                before
+            );
+            assert!(store.view(|tx| tx.get_full_tx_path(foreign))?.is_none());
+            store.update(|tx| index_tx_span(tx, root, 1, 3))?;
+            // A different path can carry the same root during replay.
+            store.update(|tx| {
+                tx.add_tx_leaf_binding(
+                    foreign,
+                    &TxLeafBinding {
+                        data_root: root,
+                        prefix_hash: foreign,
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(2),
+                    PartitionChunkOffset(2),
+                    Some(foreign),
+                )
+            })?;
+            assert_eq!(
+                store.view(|tx| {
+                    let row = tx.tx_interval_at(PartitionChunkOffset(2))?.unwrap();
+                    tx.interval_data_root(&row)
+                })?,
+                root
+            );
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(1),
+                    PartitionChunkOffset(3),
+                    None,
+                )?;
+                index_tx_span(tx, foreign, 1, 3)
+            })?;
+            assert_eq!(
+                store.view(|tx| {
+                    let row = tx.tx_interval_at(PartitionChunkOffset(2))?.unwrap();
+                    tx.interval_data_root(&row)
+                })?,
+                foreign
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
     fn tx_range_preserves_data_path_hashes_and_appends() -> eyre::Result<()> {
         each_engine("submodule_store_tx_range", |store| {
             let data_hash = H256::repeat_byte(4);
@@ -2246,6 +2315,11 @@ mod tests {
                     },
                 )?;
                 tx.add_full_data_path(PartitionChunkOffset::from(2), data_bytes.clone())?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(3),
+                    None,
+                )?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(0),
                     PartitionChunkOffset::from(3),
@@ -2310,6 +2384,11 @@ mod tests {
             })?;
             assert_eq!(store.interval_row_count()?, 2);
             store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(5),
+                    PartitionChunkOffset(9),
+                    None,
+                )?;
                 bind_as_root(tx, hash_a)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(5),
@@ -2323,6 +2402,11 @@ mod tests {
                 .expect("merged span covers the old right edge");
             assert_eq!(at_nine.tx_path_hash, Some(hash_a));
             store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(2),
+                    None,
+                )?;
                 bind_as_root(tx, hash_b)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(0),
@@ -2428,6 +2512,11 @@ mod tests {
             let new = H256::repeat_byte(8);
             store.update(|tx| index_tx_span(tx, old, 0, 4))?;
             store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(4),
+                    None,
+                )?;
                 tx.add_full_tx_path(new, vec![new.0[0]])?;
                 tx.add_tx_leaf_binding(new, &leaf_for(new))?;
                 tx.add_tx_path_hash_to_offset_range(

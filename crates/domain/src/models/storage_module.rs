@@ -8245,8 +8245,7 @@ impl StorageModule {
                     },
                 )?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
-                    // One interval for this submodule's slice of the tx. A later
-                    // placement that overlaps it is split. Data-path hashes stay.
+                    // Only the same root may replay live coverage. Data paths stay.
                     tx.add_tx_path_hash_to_offset_range(
                         range.start(),
                         range.end(),
@@ -22497,6 +22496,42 @@ mod tests {
         Ok((tmp, config, storage, unpacked, header, tx_path))
     }
 
+    /// Model rollback's index cleanup for the whole transaction slice before replay.
+    /// Keep the body/label manipulation in each race fixture at its original pause point.
+    fn clear_replaced_placement(
+        storage: &StorageModule,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let (root, _) = storage
+            .data_root_and_tx_offset_at(offset)?
+            .ok_or_else(|| eyre!("old placement missing"))?;
+        let infos = storage.collect_data_root_infos(root)?;
+        let info = infos
+            .0
+            .iter()
+            .find(|info| {
+                let start = i64::from(info.start_offset.0);
+                let end =
+                    start + info.data_size.div_ceil(storage.config.consensus.chunk_size) as i64;
+                start <= i64::from(offset.0) && i64::from(offset.0) < end
+            })
+            .ok_or_else(|| eyre!("old placement extent missing"))?;
+        let start = PartitionChunkOffset(u32::try_from(info.start_offset.0.max(0))?);
+        let end = PartitionChunkOffset(u32::try_from(
+            (i64::from(info.start_offset.0)
+                + i64::try_from(info.data_size.div_ceil(storage.config.consensus.chunk_size))?
+                - 1)
+            .min(i64::try_from(storage.partition_chunks())? - 1),
+        )?);
+        storage.clear_data_root_infos_in_range(start, end, &[root])?;
+        for (range, submodule) in storage.submodules.overlapping(ii(start, end)) {
+            submodule.db.update(|tx| {
+                tx.clear_tx_coverage_in_ranges(&[(start.max(range.start()), end.min(range.end()))])
+            })?;
+        }
+        Ok(())
+    }
+
     /// Queue entropy, then a new proved body, and sync both. The offset's
     /// checksum and data root change. A settled `Data` label is not a
     /// `write_data_chunk` target, so the entropy write has to land first.
@@ -22504,6 +22539,7 @@ mod tests {
         storage: &StorageModule,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<DataRoot> {
+        clear_replaced_placement(storage, offset)?;
         let chunk_size = storage.config.consensus.chunk_size as usize;
         eyre::ensure!(
             storage.write_chunk(offset, vec![0xE1; chunk_size], ChunkType::Entropy),
@@ -22866,6 +22902,7 @@ mod tests {
             "{engine:?} kept the data path after the entropy commit"
         );
 
+        clear_replaced_placement(&storage, offset)?;
         let (_second, root2) = index_pattern(&storage, &[0x22], 1)?;
         let placed = storage.data_root_and_tx_offset_at(offset)?;
         eyre::ensure!(
@@ -22882,6 +22919,7 @@ mod tests {
             );
         }
 
+        clear_replaced_placement(&storage, offset)?;
         let (replacement, _) = index_pattern(&storage, &[0x33], 2)?;
         let during = serve_during_paused_pwrite(&storage, offset, &replacement[0])?;
         if let Some(chunk) = &during {
@@ -22957,6 +22995,7 @@ mod tests {
                 "entropy overwrite was refused"
             );
             storage.force_sync_pending_chunks()?;
+            clear_replaced_placement(&storage, offset)?;
             let (second, root2) = index_pattern(&storage, &[0x11, 0x33], 1)?;
             storage.write_data_chunk(&second[0])?;
             storage.force_sync_pending_chunks()?;
