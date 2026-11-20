@@ -2006,7 +2006,7 @@ impl IrysNode {
                     storage_module.id = module.id,
                     retained = module.partition_chunks(),
                     canonical = logical_chunks,
-                    "storage module is truncated beyond the canonical partition size; bounded to the retained prefix until the chain passes the activation"
+                    "storage module is truncated beyond the canonical partition size; ledger mapping is refused until the chain passes the activation; mining and packing remain bounded to the retained prefix"
                 );
             }
         }

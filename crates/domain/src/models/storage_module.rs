@@ -1024,8 +1024,10 @@ pub struct StorageModule {
     recent_chunk_times: Arc<RwLock<CircularBuffer<ChunkTimeRecord>>>,
     /// Runtime configuration parameters
     pub config: Config,
-    /// Canonical logical extent; may revert with the branch before finality.
+    /// Logical extent clamped to the retained physical bound.
     partition_chunks: AtomicU64,
+    /// Last chain-requested width; a clamped width cannot define a ledger slot base.
+    canonical_partition_chunks: AtomicU64,
     /// Durable physical bound, also checked by late packing/index writers.
     retained_chunks: AtomicU64,
     /// Lowest offset re-exposed by a growing bound that the storage-module
@@ -2649,6 +2651,7 @@ impl StorageModule {
             #[cfg(test)]
             pwrite_panic_once: AtomicBool::new(false),
             partition_chunks: AtomicU64::new(retained_chunks),
+            canonical_partition_chunks: AtomicU64::new(retained_chunks),
             retained_chunks: AtomicU64::new(retained_chunks),
             regrown_from: AtomicU64::new(u64::MAX),
             resize_complete: Mutex::new(None),
@@ -4139,17 +4142,8 @@ impl StorageModule {
 
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
     pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
-        self.partition_assignment
-            .read()
-            .unwrap()
-            .and_then(|part| part.slot_index)
-            .map(|slot_index| {
-                let chunks = self.partition_chunks();
-                let start_offset = slot_index as u64 * chunks;
-                let end_offset = start_offset + chunks;
-                (start_offset..end_offset).contains(&*chunk_offset)
-            })
-            .unwrap_or(false)
+        self.get_storage_module_ledger_offsets()
+            .is_ok_and(|range| range.contains_point(chunk_offset))
     }
 
     /// One submodule for tests and sm-bench. Production code stays inside the module.
@@ -8448,9 +8442,18 @@ impl StorageModule {
         let Some(slot_index) = assignment.slot_index else {
             return Err(eyre::eyre!("Ledger slot not assigned!"));
         };
+        let canonical_chunks = self.canonical_partition_chunks.load(Ordering::Acquire);
         let chunks = self.partition_chunks();
-        let start = slot_index as u64 * chunks;
-        let end = start + chunks;
+        eyre::ensure!(
+            chunks == canonical_chunks,
+            "ledger mapping refused: retained width {chunks} differs from canonical width {canonical_chunks}"
+        );
+        let start = (slot_index as u64)
+            .checked_mul(chunks)
+            .ok_or_else(|| eyre!("ledger slot base overflow"))?;
+        let end = start
+            .checked_add(chunks)
+            .ok_or_else(|| eyre!("ledger slot end overflow"))?;
         Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
     }
 
