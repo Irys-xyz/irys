@@ -3718,17 +3718,20 @@ mod tests {
         add_validated(&mut cache, &mut heaviest);
 
         // Ties fork from the canonical chain at heights 0, 1 and 2.
-        let mut fork_at_genesis = extend_chain(random_block(U256::from(5)), &genesis);
-        let mut fork_at_c1 = extend_chain(random_block(U256::from(5)), &c1);
-        let low = fork_at_genesis.block_hash.min(fork_at_c1.block_hash);
-        let high = fork_at_genesis.block_hash.max(fork_at_c1.block_hash);
         // Keep the expected winner's hash between the other two, so no hash order picks it.
-        let mut fork_at_c2 = loop {
-            let candidate = extend_chain(random_block(U256::from(5)), &c2);
-            if low < candidate.block_hash && candidate.block_hash < high {
-                break candidate;
-            }
-        };
+        // Resample all three: fixed random bounds can be arbitrarily close and
+        // make finding a hash between them take longer than the test timeout.
+        // Each fresh triple has a 1/3 chance of putting the deepest fork in the middle.
+        let (mut fork_at_genesis, mut fork_at_c1, mut fork_at_c2) = (0..128)
+            .find_map(|_| {
+                let shallow = extend_chain(random_block(U256::from(5)), &genesis);
+                let middle = extend_chain(random_block(U256::from(5)), &c1);
+                let deep = extend_chain(random_block(U256::from(5)), &c2);
+                let low = shallow.block_hash.min(middle.block_hash);
+                let high = shallow.block_hash.max(middle.block_hash);
+                (low < deep.block_hash && deep.block_hash < high).then_some((shallow, middle, deep))
+            })
+            .expect("a signed deepest fork with a middle-ranked hash");
         for header in [&mut fork_at_c2, &mut fork_at_genesis, &mut fork_at_c1] {
             add_validated(&mut cache, header);
         }
