@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795203110587,
+  "lastUpdate": 1795257201490,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23803,6 +23803,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "521acc41f73c53520f1e27607ff5da475cab7040",
+          "message": "test(domain): resample all three tie forks in the fork-point test (#1838)\n\nThe test needs the deepest fork's hash between the other two, so hash\norder cannot pick the winner. It fixed two hashes and looped on the\nthird. Two close hashes made that loop outlast the test timeout.\n\nSample all three forks together, up to 128 times. Each triple puts the\ndeepest fork in the middle with chance 1/3.",
+          "timestamp": "2026-11-21T10:18:30Z",
+          "tree_id": "07021bc7ab4f8ea76a7a7a0ed8ff6f71ea46e304",
+          "url": "https://github.com/Irys-xyz/irys/commit/521acc41f73c53520f1e27607ff5da475cab7040"
+        },
+        "date": 1795257200067,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012673,
+            "range": "± 0.000327",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155448,
+            "range": "± 0.008186",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.555649,
+            "range": "± 0.038049",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.088705,
+            "range": "± 0.156369",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.072024,
+            "range": "± 0.006463",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 730.964766,
+            "range": "± 11.860648",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 887.994065,
+            "range": "± 44.950064",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120202,
+            "range": "± 0.009472",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1203.156561,
+            "range": "± 4.461981",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1591.279327,
+            "range": "± 160.765339",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.02681,
+            "range": "± 0.000462",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 136.862306,
+            "range": "± 0.692526",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 179.35491,
+            "range": "± 1.078941",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
