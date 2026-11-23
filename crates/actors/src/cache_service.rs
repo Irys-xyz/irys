@@ -1872,11 +1872,15 @@ impl InnerCacheTask {
                 }
                 let mut any_unpromoted = false;
                 for txid in cached_data_root.txid_set.iter() {
-                    if let Some(tx_header) = tx_header_by_txid(&consensus_tx, txid)?
-                        && tx_header.promoted_height().is_none()
-                    {
+                    let tx_header = tx_header_by_txid(&consensus_tx, txid)?;
+                    let tx_is_unpromoted = tx_header
+                        .as_ref()
+                        .is_some_and(|header| header.promoted_height().is_none());
+                    let pending_tx_header_not_migrated =
+                        local_anchor_off_canonical_chain && tx_header.is_none();
+                    if tx_is_unpromoted || pending_tx_header_not_migrated {
                         any_unpromoted = true;
-                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?txid, "Found unpromoted tx for data root");
                         break;
                     }
                 }
@@ -1989,7 +1993,22 @@ impl InnerCacheTask {
                 stored_copy_candidates
             {
                 if !anchor_expired {
-                    if self.live_submit_module_holds_full_copy(&modules, data_root, data_size) {
+                    // A reanchor signs a new proof, so it needs a confirmed
+                    // stored copy. Unreadable metadata keeps the proof as it is.
+                    let stored = modules.iter().any(|storage_module| {
+                        storage_module
+                            .holds_full_persisted_data_root(data_root, data_size)
+                            .unwrap_or_else(|error| {
+                                warn!(
+                                    ingress_proof.data_root = ?data_root,
+                                    storage_module = %storage_module.id,
+                                    ?error,
+                                    "Not reanchoring local ingress proof: storage metadata is unreadable"
+                                );
+                                false
+                            })
+                    });
+                    if stored {
                         to_reanchor.push(proof);
                         debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking local proof for reanchoring; its anchor is not on the canonical chain and a live Submit module stores the full data root");
                     }
@@ -6262,6 +6281,39 @@ mod tests {
         Ok(())
     }
 
+    /// A tx in the cached root remains pending before its header's block
+    /// migrates. A local proof on a fork is reanchored without that header.
+    #[tokio::test]
+    async fn prune_ingress_proofs_reanchors_fork_proof_when_tx_header_has_not_migrated()
+    -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            tx_header_not_migrated: true,
+            author_anchor: AuthorProofAnchor::ForkBlock,
+            under_capacity: true,
+            ..AtCapacityCase::default()
+        })?;
+        let mut expected = vec![pass.author_addr, pass.sibling_addr];
+        expected.sort();
+        assert_eq!(pass.remaining, expected, "no proof is deleted");
+        assert_eq!(pass.author_anchor, Some(pass.migrated_anchor));
+        Ok(())
+    }
+
+    /// A missing consensus header does not make an expired proof eligible for
+    /// reanchoring. The expired-proof path keeps its prior behavior.
+    #[tokio::test]
+    async fn prune_ingress_proofs_does_not_reanchor_expired_proof_with_missing_tx_header()
+    -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            tx_header_not_migrated: true,
+            under_capacity: true,
+            ..AtCapacityCase::default()
+        })?;
+        assert_eq!(pass.remaining, vec![pass.sibling_addr]);
+        assert_eq!(pass.author_anchor, None);
+        Ok(())
+    }
+
     /// A proof anchored inside the window is neither deleted nor reanchored
     /// when it is another signer's, its anchor is canonical, or every tx is
     /// promoted. A fork anchor alone does not make it expire.
@@ -6490,6 +6542,8 @@ mod tests {
         module: Option<StoredCopy>,
         /// The root's only tx is promoted.
         promoted: bool,
+        /// The tx header's block has not migrated into the consensus database.
+        tx_header_not_migrated: bool,
         /// The expired proof is signed by another address, not this node.
         remote_author: bool,
         /// No expired proof is stored, as on a node that already lost it.
@@ -6528,6 +6582,7 @@ mod tests {
         const RESTORE: Self = Self {
             module: None,
             promoted: false,
+            tx_header_not_migrated: false,
             remote_author: false,
             no_expired_proof: true,
             expire_submit_slot_0: false,
@@ -6661,22 +6716,25 @@ mod tests {
                 };
                 cache_tx.put::<CachedDataRoots>(data_root, cdr)?;
 
-                // Unpromoted tx header (promoted_height = None by default).
-                let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                    tx: DataTransactionHeaderV1 {
-                        id: txid,
-                        data_root,
-                        data_size: 64,
-                        ..Default::default()
-                    },
-                    metadata: DataTransactionMetadata::new(),
-                });
-                database::insert_tx_header(wtx, &tx_header)?;
-                if case.promoted {
-                    irys_database::set_data_tx_included_height(wtx, &txid, 1)
-                        .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
-                    irys_database::set_data_tx_promoted_height(wtx, &txid, 2)
-                        .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+                if !case.tx_header_not_migrated {
+                    // Unpromoted tx header (promoted_height = None by default).
+                    let tx_header =
+                        DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                            tx: DataTransactionHeaderV1 {
+                                id: txid,
+                                data_root,
+                                data_size: 64,
+                                ..Default::default()
+                            },
+                            metadata: DataTransactionMetadata::new(),
+                        });
+                    database::insert_tx_header(wtx, &tx_header)?;
+                    if case.promoted {
+                        irys_database::set_data_tx_included_height(wtx, &txid, 1)
+                            .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                        irys_database::set_data_tx_promoted_height(wtx, &txid, 2)
+                            .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+                    }
                 }
 
                 // The author's proof.
