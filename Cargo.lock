@@ -5074,7 +5074,7 @@ dependencies = [
 
 [[package]]
 name = "irys-chain"
-version = "5.0.0"
+version = "5.0.1"
 dependencies = [
  "actix-web",
  "alloy-contract",

@@ -947,8 +947,21 @@ impl ConsensusConfig {
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
-                // Delta hardfork - not scheduled yet
-                delta: None,
+                // Delta hardfork - 2026-12-03T12:00:00+00:00
+                delta: Some(Delta {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-12-03T12:00:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                    initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+                    capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+                    ingress_proof_reward_pool_percent:
+                        Delta::default_ingress_proof_reward_pool_percent(),
+                    token_price_safe_range: Delta::default_token_price_safe_range(),
+                    ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
+                }),
                 // Echo hardfork - PoA ownership from the first block after height 2779312
                 echo: Some(Echo {
                     activation_height: 2779313,
@@ -1388,7 +1401,7 @@ mod tests {
         // update this snapshot.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("F8D8UpXGJC3mUvTh7rS2xLTjiX6eErcVxfi8cbvYQGVx"), // spellchecker:disable-line
+            H256::from_base58("3G4DwmFKANqDgSsXpq2C3pA7cyBoModWhnDYViroRmQV"), // spellchecker:disable-line
             "mainnet consensus-config hash snapshot changed"
         );
     }
@@ -1478,13 +1491,47 @@ mod tests {
                 .is_cascade_active_at(UnixTimestamp::from_secs(1785758400 + 1))
         );
 
-        // Delta — unscheduled. Scheduling it is a protocol change that also moves
-        // the canonical config hash pinned by
+        // Delta — 2026-12-03T12:00:00+00:00. Pin the activation timestamp and its
+        // parameters; any change also moves the canonical config hash pinned by
         // `test_mainnet_genesis_constants_are_frozen`.
-        assert!(
-            config.hardforks.delta.is_none(),
-            "mainnet Delta is unscheduled"
+        let delta_ts = UnixTimestamp::from_secs(1796299200);
+        let delta = config
+            .hardforks
+            .delta
+            .as_ref()
+            .expect("mainnet Delta must be configured");
+        assert_eq!(delta.activation_timestamp, delta_ts);
+        assert_eq!(
+            delta.initial_slots_per_new_ledger,
+            Delta::default_initial_slots_per_new_ledger()
         );
+        assert_eq!(
+            delta.capacity_chunk_reward_percent,
+            Delta::default_capacity_chunk_reward_percent()
+        );
+        assert_eq!(
+            delta.ingress_proof_reward_pool_percent,
+            Delta::default_ingress_proof_reward_pool_percent()
+        );
+        assert_eq!(
+            delta.token_price_safe_range,
+            Delta::default_token_price_safe_range()
+        );
+        assert_eq!(
+            delta.ema_price_adjustment_interval,
+            Delta::default_ema_price_adjustment_interval()
+        );
+        // Inactive one second before the boundary, active at it.
+        assert_eq!(
+            config
+                .hardforks
+                .delta_for_block(UnixTimestamp::from_secs(1796299200 - 1)),
+            Activation::Inactive
+        );
+        assert!(matches!(
+            config.hardforks.delta_for_block(delta_ts),
+            Activation::Active(_)
+        ));
         // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
         // canonical config hash too.
         assert!(
