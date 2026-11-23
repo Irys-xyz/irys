@@ -12,8 +12,8 @@ use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
 /// Bound for the inbound VDF fast-forward channel. Owned by `irys-vdf` so the
-/// VDF crate, not the actor hub, defines the contract. `run_vdf` fully drains
-/// this channel between each ~1s SHA step, so a healthy consumer never fills it.
+/// VDF crate, not the actor hub, defines the contract. The loop drains before
+/// local steps and between recomputed steps so rewrite time cannot block sends.
 pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
 /// Shared re-anchor generation + buffer-suspect flag (FF senders, `run_vdf`,
@@ -387,10 +387,10 @@ pub(crate) async fn fast_forward_validated_steps(
             Err(_) => {
                 // Send timeout means the bounded vdf_fast_forward channel stayed full
                 // for `send_timeout` (the configured progress_timeout, default 15s).
-                // `run_vdf` fully drains this channel between every ~1s SHA step
-                // (see crates/vdf/src/vdf.rs:99), so a healthy consumer cannot fall
-                // this far behind — a trip here means run_vdf is dead (poisoned-lock
-                // exit) or deadlocked.
+                // The loop drains before local steps and between recomputed steps,
+                // dropping already-buffered steps and deferring future steps during
+                // rewrites. A full channel therefore waits for at most one SHA step
+                // on a healthy consumer, including during a long tail rewrite.
                 //
                 // Governing rule: never mislabel a block as Valid or Invalid. With
                 // run_vdf dead we can't validate any block, so surfacing this as an

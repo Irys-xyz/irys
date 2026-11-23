@@ -845,7 +845,10 @@ impl ValidationService {
                 _ = pipeline_log_interval.tick() => {
                     if let Some((stalled_for, stage)) = coordinator
                         .vdf_scheduler
-                        .abort_stalled_current(vdf_task_progress_timeout(&self.inner.config))
+                        .abort_stalled_current(
+                            vdf_task_progress_timeout(&self.inner.config),
+                            &self.inner.service_senders.vdf_reanchor_signals,
+                        )
                     {
                         // Watchdog firing means a VDF task made no progress for
                         // `progress_timeout_secs` (default 15s). VDF difficulty is calibrated

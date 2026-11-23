@@ -8,6 +8,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::{BlockProvider, CanonicalVdfSnapshot};
 use irys_types::{H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed};
 use nodit::interval::ii;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
@@ -122,6 +123,9 @@ pub fn run_vdf<B: BlockProvider>(
     // only advances by fast-forward would otherwise stop, and the validation waiting for
     // that step would read the frozen counter as a dead VDF thread.
     let mut catch_up_to_step: u64 = 0;
+    // A rewrite cannot install future steps until its buffered lineage is complete.
+    // Validation waits for the counter after each block, bounding this to one block.
+    let mut pending_fast_forward = VecDeque::new();
 
     loop {
         if shutdown_token.is_cancelled() {
@@ -145,6 +149,14 @@ pub fn run_vdf<B: BlockProvider>(
                 global_step_number,
                 &mut checkpoints,
                 &shutdown_token,
+                &mut || {
+                    drain_during_rewrite(
+                        &mut fast_forward_receiver,
+                        &mut pending_fast_forward,
+                        global_step_number,
+                        &reanchor_signals,
+                    )
+                },
             ) {
                 ReanchorOutcome::Healed {
                     new_hash,
@@ -178,7 +190,10 @@ pub fn run_vdf<B: BlockProvider>(
         }
 
         // check for VDF fast forward step
-        while let Ok(traced_ff_step) = fast_forward_receiver.try_recv() {
+        while let Some(traced_ff_step) = pending_fast_forward
+            .pop_front()
+            .or_else(|| fast_forward_receiver.try_recv().ok())
+        {
             let (proposed_ff_step, _entered) = traced_ff_step.into_inner();
             // Drop steps validated against a pre-heal buffer.
             if proposed_ff_step.generation < reanchor_signals.generation() {
@@ -368,6 +383,14 @@ pub fn run_vdf<B: BlockProvider>(
                         global_step_number,
                         &mut checkpoints,
                         &shutdown_token,
+                        &mut || {
+                            drain_during_rewrite(
+                                &mut fast_forward_receiver,
+                                &mut pending_fast_forward,
+                                global_step_number,
+                                &reanchor_signals,
+                            )
+                        },
                     ) {
                         ReseedOutcome::Rewritten {
                             new_hash,
@@ -552,6 +575,22 @@ enum ReseedOutcome {
     PoisonedLock,
 }
 
+// Already-buffered steps are covered by this rewrite or the next canonical check.
+// Future steps must pass the normal generation, predecessor and catch-up checks later.
+fn drain_during_rewrite(
+    receiver: &mut Receiver<Traced<VdfStep>>,
+    pending: &mut VecDeque<Traced<VdfStep>>,
+    live_step: u64,
+    signals: &ReanchorSignals,
+) {
+    while let Ok(traced) = receiver.try_recv() {
+        let (step, _entered) = traced.into_inner();
+        if step.generation >= signals.generation() && step.global_step_number > live_step {
+            pending.push_back(Traced::new(step));
+        }
+    }
+}
+
 /// Rewrite the buffered steps after `boundary` to follow the canonical chain in `view`,
 /// in place. Steps the canonical blocks hold are copied from them; only steps past the
 /// canonical tip (free-run steps no block holds yet) are recomputed, from the last copied
@@ -569,6 +608,7 @@ fn rewrite_after_reset_seed_change(
     live_step: u64,
     checkpoints: &mut [H256],
     shutdown_token: &CancellationToken,
+    between_steps: &mut impl FnMut(),
 ) -> ReseedOutcome {
     let reset_frequency = config.reset_frequency as u64;
     let (buffered_at_boundary, recorded) = match vdf_state.read() {
@@ -640,6 +680,7 @@ fn rewrite_after_reset_seed_change(
         seed_for,
         checkpoints,
         shutdown_token,
+        between_steps,
     ) else {
         return ReseedOutcome::Aborted;
     };
@@ -693,6 +734,10 @@ struct RecomputedTail {
 /// Recompute the steps after `from_step` up to `to_step` exactly as the main loop does
 /// (`process_reset` → salt → `vdf_sha`), folding `seed_for(b)` at each boundary `b` in
 /// `[from_step, to_step]`. `None` when shutdown interrupts it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recompute inputs and loop drain callback"
+)]
 fn recompute_tail(
     config: &irys_types::VdfConfig,
     from_hash: H256,
@@ -701,6 +746,7 @@ fn recompute_tail(
     seed_for: impl Fn(u64) -> H256,
     checkpoints: &mut [H256],
     shutdown_token: &CancellationToken,
+    between_steps: &mut impl FnMut(),
 ) -> Option<RecomputedTail> {
     let reset_frequency = config.reset_frequency as u64;
     let mut reset_seeds = Vec::new();
@@ -716,6 +762,7 @@ fn recompute_tail(
     let mut running = fold(from_step, from_hash);
     let mut steps = Vec::with_capacity(usize::try_from(to_step - from_step).unwrap_or(0));
     for step in (from_step + 1)..=to_step {
+        between_steps();
         if shutdown_token.is_cancelled() {
             warn!(
                 from_step,
@@ -805,6 +852,7 @@ fn apply_reanchor(
     live_step: u64,
     checkpoints: &mut [H256],
     shutdown_token: &CancellationToken,
+    between_steps: &mut impl FnMut(),
 ) -> ReanchorOutcome {
     let ReanchorRequest {
         mut canonical_seeds,
@@ -847,6 +895,7 @@ fn apply_reanchor(
         },
         checkpoints,
         shutdown_token,
+        between_steps,
     ) else {
         return ReanchorOutcome::Skipped;
     };
@@ -1785,15 +1834,29 @@ mod tests {
         signals: crate::vdf_utils::ReanchorSignals,
         shutdown: CancellationToken,
         handle: Option<std::thread::JoinHandle<()>>,
+        fast_forward: mpsc::Sender<Traced<VdfStep>>,
+        reanchor: crate::vdf_utils::VdfReanchorSender,
     }
 
     impl LoopUnderTest {
         fn start(config: &Config, chain: &[TestBlock], confirmed_global_step_number: u64) -> Self {
+            Self::start_with_mining(config, chain, confirmed_global_step_number, true)
+        }
+
+        fn start_with_mining(
+            config: &Config,
+            chain: &[TestBlock],
+            confirmed_global_step_number: u64,
+            mining: bool,
+        ) -> Self {
             let provider = ControllableBlockProvider::new(chain, confirmed_global_step_number);
-            let (_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+            let (fast_forward, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+            let (reanchor, reanchor_rx) = crate::reanchor_channel();
             let vdf_state = mocked_vdf_service(config);
             let guard = VdfStateReadonly::new(vdf_state.clone());
-            enable_mining(&vdf_state);
+            if mining {
+                enable_mining(&vdf_state);
+            }
             let signals = crate::vdf_utils::ReanchorSignals::new();
             let shutdown = CancellationToken::new();
             let initial_seed = H256::repeat_byte(0xAA);
@@ -1803,15 +1866,13 @@ mod tests {
                 let shutdown = shutdown.clone();
                 let signals = signals.clone();
                 move || {
-                    // Keep the FF sender alive for the loop's lifetime.
-                    let _tx = _tx;
                     run_vdf(
                         &config.vdf,
                         0,
                         initial_seed,
                         initial_seed,
                         ff_rx,
-                        crate::reanchor_channel().1,
+                        reanchor_rx,
                         signals,
                         MockMining,
                         vdf_state,
@@ -1827,6 +1888,8 @@ mod tests {
                 signals,
                 shutdown,
                 handle: Some(handle),
+                fast_forward,
+                reanchor,
             }
         }
 
@@ -1863,10 +1926,20 @@ mod tests {
         }
     }
 
+    impl Drop for LoopUnderTest {
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+            if let Some(handle) = self.handle.take() {
+                // A worker panic must not cause a second panic during test unwinding.
+                let _ = handle.join();
+            }
+        }
+    }
+
     fn fork_test_config(reset_frequency: usize) -> Config {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = reset_frequency;
-        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 25 * 5;
         Config::new_with_random_peer_id(node_config)
     }
 
@@ -1907,6 +1980,7 @@ mod tests {
         // Five reset windows past the tip, with no block arriving.
         vdf.wait_for_step(21).await;
         let guard = vdf.stop();
+        assert_ne!(guard.get_step(1).unwrap(), guard.get_step(2).unwrap());
         for boundary in [4, 8, 12, 16, 20] {
             assert_eq!(
                 guard.read().reset_seed_at(boundary),
@@ -1914,6 +1988,110 @@ mod tests {
                 "boundary {boundary} above the tip folds the tip's next_seed"
             );
         }
+    }
+
+    #[test]
+    fn rewrite_drain_keeps_only_future_steps_from_current_generation() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let signals = ReanchorSignals::new();
+        signals.record_heal_applied();
+        for (global_step_number, generation) in [(9, 1), (10, 1), (11, 0), (11, 1)] {
+            sender
+                .try_send(Traced::new(VdfStep {
+                    global_step_number,
+                    generation,
+                    step: H256::repeat_byte(1),
+                    predecessor: H256::repeat_byte(2),
+                    reset_seed: H256::repeat_byte(3),
+                }))
+                .unwrap();
+        }
+        let mut pending = VecDeque::new();
+        drain_during_rewrite(&mut receiver, &mut pending, 10, &signals);
+        assert!(receiver.is_empty());
+        assert_eq!(pending.len(), 1);
+        let (step, _) = pending.pop_front().unwrap().into_inner();
+        assert_eq!(step.global_step_number, 11);
+        assert_eq!(step.generation, 1);
+        assert_eq!(step.predecessor, H256::repeat_byte(2));
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn tail_rewrite_drains_more_fast_forward_steps_than_channel_capacity(
+        #[case] reanchor: bool,
+    ) {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 4;
+        // Long enough to keep the rewrite active while several full channel loads arrive.
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 25 * 20_000;
+        let config = Config::new_with_random_peer_id(node_config);
+        let seed = H256::repeat_byte(1);
+        let tip = TestBlock {
+            first_step: 1,
+            last_step: 1,
+            seed,
+            next_seed: seed,
+        };
+        let vdf = LoopUnderTest::start_with_mining(&config, &[tip], 1, false);
+        let live = 256;
+        let predecessor = H256::repeat_byte(0xAA);
+        // Model a trusted block already validated ahead of the local loop.
+        crate::vdf_utils::fast_forward_validated_steps(
+            1,
+            predecessor,
+            &vec![predecessor; live],
+            seed,
+            &vdf.fast_forward,
+            &vdf.signals,
+            0,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        vdf.wait_for_step(live as u64).await;
+        let new_seed = H256::repeat_byte(2);
+        if reanchor {
+            vdf.signals.mark_buffer_suspect();
+            assert!(vdf.reanchor.try_send(ReanchorRequest {
+                canonical_seeds: VecDeque::from([Seed(predecessor)]),
+                c_step: 1,
+                seed: new_seed,
+                next_seed: new_seed,
+                reset_seed_by_boundary: Default::default(),
+            }));
+        } else {
+            vdf.provider.set_chain(
+                &[TestBlock {
+                    next_seed: new_seed,
+                    ..tip
+                }],
+                1,
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !vdf.signals.is_recompute_in_progress() {
+                assert!(Instant::now() < deadline, "rewrite must start");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        // The channel holds only 16 steps. Without rewrite drains this send times out
+        // while the counter stays frozen, even though the hashing worker is healthy.
+        crate::vdf_utils::fast_forward_validated_steps(
+            1,
+            predecessor,
+            &vec![predecessor; live],
+            new_seed,
+            &vdf.fast_forward,
+            &vdf.signals,
+            0,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+        assert!(vdf.signals.is_recompute_in_progress() || vdf.signals.is_buffer_suspect());
+        vdf.stop();
     }
 
     /// Free-run guessed past the tip, then a late block lands that ends between the first
@@ -2381,6 +2559,7 @@ mod tests {
                 live_step,
                 &mut checkpoints,
                 &CancellationToken::new(),
+                &mut || {},
             )
             else {
                 panic!("a boundary-free re-anchor must heal, not skip");
@@ -2464,6 +2643,7 @@ mod tests {
                 live_step,
                 &mut checkpoints,
                 &CancellationToken::new(),
+                &mut || {},
             )
             else {
                 panic!("a boundary tip with a one-boundary tail must heal, not skip");
@@ -2540,6 +2720,7 @@ mod tests {
                 live_step,
                 &mut checkpoints,
                 &CancellationToken::new(),
+                &mut || {},
             ) else {
                 panic!("a tail across several boundaries must heal, not skip");
             };
@@ -2617,6 +2798,7 @@ mod tests {
                 live_step,
                 &mut checkpoints,
                 &cancelled,
+                &mut || {},
             );
             assert!(
                 matches!(outcome, ReanchorOutcome::Skipped),
