@@ -819,7 +819,7 @@ impl BlockMigrationService {
                         let module_range = match module.get_storage_module_ledger_offsets() {
                             Ok(r) => r,
                             Err(err) => {
-                                warn!(
+                                debug!(
                                     module_id = module.id,
                                     ?ledger,
                                     %err,
@@ -848,7 +848,7 @@ impl BlockMigrationService {
                         let partition_range = match module.make_range_partition_relative(overlap) {
                             Ok(r) => r,
                             Err(err) => {
-                                warn!(
+                                debug!(
                                     module_id = module.id,
                                     ?ledger,
                                     %err,

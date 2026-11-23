@@ -4855,6 +4855,20 @@ impl<'a> Batch<'a> {
                         "RocksDB v1 interval requires a tx leaf binding in this batch before the interval is written"
                     )
                 })?;
+                // Live coverage can only be replayed by its owning root.
+                for row in &existing {
+                    if row.start <= end.0
+                        && row.value.end >= start.0
+                        && row.value.data_root != data_root.0
+                    {
+                        let existing_root = H256(row.value.data_root);
+                        tracing::error!(%start, %end, %existing_root, incoming_root = %data_root,
+                            "refusing placement over a different data root");
+                        eyre::bail!(
+                            "placement [{start}, {end}] for {data_root} overlaps live root {existing_root}"
+                        );
+                    }
+                }
                 Some(records::fresh_placement(end.0, data_root, self.origin))
             }
             None => None,
@@ -6386,6 +6400,10 @@ impl SubmoduleRead for Rows<'_> {
         self.interval_covering(offset)
     }
 
+    fn interval_data_root(&self, interval: &IntervalRow) -> eyre::Result<DataRoot> {
+        Ok(interval.tx_path_hash)
+    }
+
     fn tx_intervals_in_range(
         &self,
         start: PartitionChunkOffset,
@@ -6509,6 +6527,7 @@ macro_rules! impl_batch_read {
 
 impl_batch_read! {
     stores_tx_paths() -> bool;
+    interval_data_root(interval: &IntervalRow) -> eyre::Result<DataRoot>;
     stores_offset_crc() -> bool;
     get_data_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkDataPath>>;
     get_offset_meta(offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>>;
@@ -8925,6 +8944,14 @@ mod tests {
         assert_eq!(at_zero.tx_index, Some(3));
         assert_eq!(at_zero.end, PartitionChunkOffset::from(19));
 
+        // Model the coverage-clear step before rollback replay reuses this slice.
+        store.update(|tx| {
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(8),
+                PartitionChunkOffset::from(11),
+                None,
+            )
+        })?;
         place_span(&store, 8, 11, root_b, 0, 7, 1, &[8], None)?;
         assert_no_orphans(&store)?;
         let left = store

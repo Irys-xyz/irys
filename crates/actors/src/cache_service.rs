@@ -1139,6 +1139,12 @@ impl InnerCacheTask {
                     {
                         continue;
                     }
+                    // A refused mapping (width clamped below the chain's) does
+                    // not show that this module holds no copy. Keep the body.
+                    if sm.get_storage_module_ledger_offsets().is_err() {
+                        keep_offset = true;
+                        break 'spans;
+                    }
                     if !sm.contains_offset(ledger_offset) {
                         continue;
                     }
@@ -4294,6 +4300,16 @@ mod tests {
         base_directory: std::path::PathBuf,
         slot_index: usize,
     ) -> eyre::Result<StorageModulesReadGuard> {
+        assigned_module_with_fission(base_directory, slot_index, None)
+    }
+
+    /// [`assigned_module_without_placement`] with an optional Fission resize
+    /// geometry, so a test can finalize a resize on the module.
+    fn assigned_module_with_fission(
+        base_directory: std::path::PathBuf,
+        slot_index: usize,
+        fission: Option<irys_types::hardfork_config::Fission>,
+    ) -> eyre::Result<StorageModulesReadGuard> {
         use irys_domain::{StorageModule, StorageModuleInfo};
         use irys_types::{
             ConsensusConfig, PartitionChunkOffset, partition::PartitionAssignment,
@@ -4301,16 +4317,18 @@ mod tests {
         };
 
         let num_chunks = 10_u64;
+        let mut consensus = ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: num_chunks,
+            num_chunks_in_recall_range: 2,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
+            entropy_packing_iterations: 1,
+            chain_id: 1,
+            ..ConsensusConfig::testing()
+        };
+        consensus.hardforks.fission = fission;
         let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: num_chunks,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
+            consensus: irys_types::ConsensusOptions::Custom(consensus),
             base_directory,
             ..NodeConfig::testing()
         };
@@ -4681,6 +4699,10 @@ mod tests {
             !shifted_slot_body_survives(SlotLabel::OtherSlot)?.0,
             "a module on another slot does not keep this chunk"
         );
+        assert!(
+            shifted_slot_body_survives(SlotLabel::RefusedMapping)?.0,
+            "a module whose ledger mapping is refused may still hold the only copy"
+        );
         Ok(())
     }
 
@@ -4699,6 +4721,9 @@ mod tests {
         OtherPlacement,
         /// The module's slot does not cover the cached span.
         OtherSlot,
+        /// `OwnData`, then a finalized resize clamps the module below the
+        /// width the chain sets, so its ledger mapping is refused.
+        RefusedMapping,
     }
 
     /// One old migrated body at the start of slot 1. `num_chunks` is 10, so
@@ -4766,7 +4791,10 @@ mod tests {
             for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(data_root, updated)?;
             }
-            if matches!(label, SlotLabel::OwnData | SlotLabel::OtherPlacement) {
+            if matches!(
+                label,
+                SlotLabel::OwnData | SlotLabel::OtherPlacement | SlotLabel::RefusedMapping
+            ) {
                 irys_database::store_ingress_data_hash(
                     wtx,
                     data_root,
@@ -4803,9 +4831,18 @@ mod tests {
             SlotLabel::OtherSlot => 0,
             _ => 1,
         };
+        let fission = matches!(label, SlotLabel::RefusedMapping).then(|| {
+            irys_types::hardfork_config::Fission {
+                activation_timestamp: irys_types::UnixTimestamp::from_secs(0),
+                partition_chunks: 4,
+                recall_chunks: 1,
+                target_ingress_bytes_per_second: 1,
+                minimum_partition_ids: 0,
+            }
+        });
         let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let storage_modules_guard =
-            assigned_module_without_placement(sm_dir.path().to_path_buf(), module_slot)?;
+            assigned_module_with_fission(sm_dir.path().to_path_buf(), module_slot, fission)?;
         let sm = storage_modules_guard.read()[0].clone();
         let partition_zero = PartitionChunkOffset::from(0_u32);
         match label {
@@ -4844,7 +4881,10 @@ mod tests {
                     "fixture index does not name the old root at partition offset 0, got {named:?}"
                 );
             }
-            SlotLabel::ClearedData | SlotLabel::OwnData | SlotLabel::OtherPlacement => {
+            SlotLabel::ClearedData
+            | SlotLabel::OwnData
+            | SlotLabel::OtherPlacement
+            | SlotLabel::RefusedMapping => {
                 let ledger_at = if matches!(label, SlotLabel::OtherPlacement) {
                     NUM_CHUNKS + 2
                 } else {
@@ -4911,12 +4951,32 @@ mod tests {
                 "clearing the placement row cleared the Data label"
             );
         }
+        if let Some(params) = fission {
+            // The drive keeps the first 4 chunks; the chain view is back to 10.
+            sm.finalize_partition_resize(&irys_types::partition_resize::PartitionResizeState {
+                params,
+                activation_height: sm.config.consensus.epoch.num_blocks_in_epoch,
+                activation_hash: H256::repeat_byte(7),
+                sampling_origin: 0,
+                preserved_id_floor: 0,
+                reference_partition_chunks: 10,
+            })?;
+            sm.set_partition_chunks(10)?;
+            eyre::ensure!(
+                sm.get_storage_module_ledger_offsets().is_err(),
+                "fixture did not refuse the ledger mapping"
+            );
+            eyre::ensure!(
+                sm.is_data_chunk_persisted_at(partition_zero),
+                "the resize dropped the persisted body"
+            );
+        }
         let placed = sm.placed_tx_offsets_for_data_root(
             data_root,
             &BTreeSet::from([TxChunkOffset::from(0)]),
         )?;
         match label {
-            SlotLabel::OwnData | SlotLabel::OtherPlacement => {
+            SlotLabel::OwnData | SlotLabel::OtherPlacement | SlotLabel::RefusedMapping => {
                 eyre::ensure!(!placed.is_empty(), "own placement row is missing");
             }
             _ => {
