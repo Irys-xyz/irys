@@ -502,13 +502,13 @@ impl Config {
         );
 
         // A reorg within block_migration_depth changes the reset seed of a boundary the VDF
-        // loop already crossed only when the loop is more than a reset window past the fork
-        // point (see `irys_vdf::first_divergent_boundary`). With the VDF clocked at ~1
+        // loop already crossed only when the loop is about a reset window or more past the
+        // fork point (see `irys_vdf::first_divergent_boundary`). With the VDF clocked at ~1
         // step/sec a block spans ~block_time steps, so the confirmation lag is
         // block_migration_depth blocks ≈ block_migration_depth * block_time steps. A reset
-        // window of 2x that keeps such reorgs, and the recompute they cost, to chains that
-        // run much slower than block_time. The loop never waits on this: see
-        // `design/docs/vdf-reset-seed-fork-handling.md`.
+        // window of 2x that makes such reorgs, and the recompute they cost, rare unless the
+        // chain runs much slower than block_time. This is a heuristic, not a bound, and the
+        // loop never waits on it: see `design/docs/vdf-reset-seed-fork-handling.md`.
         let reset_window_steps = self.consensus.vdf.reset_frequency as u64;
         let confirmation_lag_steps = (self.consensus.block_migration_depth as u64)
             .saturating_mul(self.consensus.difficulty_adjustment.block_time);

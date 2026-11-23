@@ -20,7 +20,7 @@ irys_utils::define_metrics! {
     );
     counter VDF_RESET_SEED_RECOMPUTE(
         "irys.vdf.reset_seed_recompute_total",
-        "Number of times the VDF loop found a folded reset seed that is no longer canonical and recomputed the steps after it"
+        "Number of times the VDF loop found a folded reset seed that is no longer canonical and repaired the steps after it (copied, recomputed, or only the pending fold replaced)"
     );
 }
 
