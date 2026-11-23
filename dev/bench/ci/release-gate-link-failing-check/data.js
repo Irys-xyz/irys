@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795452280181,
+  "lastUpdate": 1795473256387,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -24121,6 +24121,110 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 179.386171,
             "range": "± 1.218166",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "e7a7806451cd13a92549d73e21bb65e590f41dc9",
+          "message": "ci(release): link the blocking check's job in the CI gate log",
+          "timestamp": "2026-11-23T16:11:03Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1841/commits/e7a7806451cd13a92549d73e21bb65e590f41dc9"
+        },
+        "date": 1795473254978,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012635,
+            "range": "± 0.000203",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120617,
+            "range": "± 0.0017",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.216503,
+            "range": "± 0.02666",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.976968,
+            "range": "± 0.041895",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065698,
+            "range": "± 0.000391",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 654.211231,
+            "range": "± 1.173382",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 848.012005,
+            "range": "± 21.272858",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.126629,
+            "range": "± 0.003352",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1416.303186,
+            "range": "± 106.329977",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1609.315844,
+            "range": "± 121.914335",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.040127,
+            "range": "± 0.018989",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 186.070194,
+            "range": "± 4.758714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 179.500419,
+            "range": "± 31.354199",
             "unit": "ms/iter"
           },
           {
