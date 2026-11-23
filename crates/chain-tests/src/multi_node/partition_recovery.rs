@@ -768,6 +768,11 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         peer_height += 1;
     }
 
+    // Only a block-tree re-anchor clears suspicion; reset-seed rewrites leave it set.
+    let reanchor_signals = &genesis.node_ctx.service_senders.vdf_reanchor_signals;
+    reanchor_signals.mark_buffer_suspect();
+    assert!(reanchor_signals.is_buffer_suspect());
+
     // Reconnect; gossip the peer's longer fork → deep, boundary-crossing reorg on
     // genesis, firing the re-anchor gate.
     genesis.gossip_enable();
@@ -791,16 +796,11 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         "genesis must converge to the canonical tip after the boundary-crossing reorg"
     );
 
-    // Guard against a trivial pass: the re-anchor generation only bumps when
-    // `apply_reanchor` returns `Healed`, so a non-zero generation is direct
-    // evidence the gate → heal path executed on genesis (a reorg that missed the
-    // boundary would leave the buffer un-poisoned and pass every other assert).
-    // The heal lands asynchronously on the VDF thread's next loop iteration, so
-    // poll rather than assert the instant the height converges.
-    let reanchor_signals = &genesis.node_ctx.service_senders.vdf_reanchor_signals;
+    // A reset-seed rewrite also bumps generation, but only a successful block-tree
+    // re-anchor clears the suspect flag set before reconnecting. The heal is async.
     let mut heal_fired = false;
     for _ in 0..(seconds_to_wait * 20) {
-        if reanchor_signals.generation() >= 1 {
+        if !reanchor_signals.is_buffer_suspect() {
             heal_fired = true;
             break;
         }
@@ -813,7 +813,7 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
 
     // Assertion A: the heal is CORRECT, not merely fired. Genesis's re-anchored VDF
     // buffer over the boundary-crossing range must equal the canonical chain's steps;
-    // the generation bump above proves the gate ran, this proves the healed CONTENT
+    // the suspect clear above proves the re-anchor ran, this proves the healed CONTENT
     // matches canonical (a wrong reset seed would re-step divergent values here).
     // Seeds fold into the hash AFTER the boundary step is stored, so divergent
     // values start at `boundary + 1` — the compared block must carry at least

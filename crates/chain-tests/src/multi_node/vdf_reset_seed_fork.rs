@@ -8,15 +8,15 @@ const SECONDS_TO_WAIT: usize = 30;
 #[test_log::test(tokio::test)]
 async fn heavy_shallow_fork_with_diverged_reset_seeds_heals_vdf_and_syncs() -> eyre::Result<()> {
     let block_migration_depth: u32 = 6;
-    let reset_frequency = 12_usize;
+    let reset_frequency = 120_usize;
 
     let mut genesis_config = NodeConfig::testing_with_epochs(3);
     let consensus = genesis_config.consensus.get_mut();
     consensus.chunk_size = 32;
     consensus.block_tree_depth = 12;
     consensus.block_migration_depth = block_migration_depth;
-    // Testing targets one step per second. Twelve is the minimum valid window for six
-    // confirmations. Test blocks span several steps, so a sub-depth fork can rotate twice.
+    // Leave room for a block between rotations; step targets below make each fork
+    // cross two boundaries without exhausting the shallow-fork block budget.
     consensus.vdf.reset_frequency = reset_frequency;
 
     let peer_signer = genesis_config.new_random_signer();
@@ -69,10 +69,23 @@ async fn heavy_shallow_fork_with_diverged_reset_seeds_heals_vdf_and_syncs() -> e
             fork_seed_summary(&peer_fork),
         );
 
+        // After the first private block, cross the next shared boundary on both
+        // sides. Repeating this rotates each fork's own block hash into its seed.
+        let target_step = genesis_fork
+            .last()
+            .zip(peer_fork.last())
+            .map(|(left, right)| {
+                let last_step = left
+                    .vdf_limiter_info
+                    .global_step_number
+                    .max(right.vdf_limiter_info.global_step_number);
+                (last_step / reset_frequency_u64 + 1) * reset_frequency_u64 + 1
+            })
+            .unwrap_or(0);
         let next_height = fork_parent_height + genesis_fork.len() as u64 + 1;
         let (genesis_block, peer_block) = tokio::try_join!(
-            mine_private_block(&genesis, next_height),
-            mine_private_block(&peer, next_height),
+            mine_private_block_toward_step(&genesis, next_height, target_step),
+            mine_private_block_toward_step(&peer, next_height, target_step),
         )?;
         genesis_fork.push(genesis_block);
         peer_fork.push(peer_block);
@@ -202,8 +215,17 @@ async fn heavy_shallow_fork_with_diverged_reset_seeds_heals_vdf_and_syncs() -> e
         "genesis must accept the block peer mines after healing"
     );
 
-    let tip_height = peer_extension.height;
-    let sync_height = tip_height.saturating_sub(block_migration_depth as u64);
+    // Full sync serves migrated history. Confirm the divergent block and both
+    // healed extensions before starting the fresh peer.
+    genesis
+        .mine_blocks(block_migration_depth as usize + 1)
+        .await?;
+    let tip_height = genesis.get_canonical_chain_height().await;
+    let sync_height = tip_height - block_migration_depth as u64;
+    assert!(sync_height > peer_extension.height);
+    genesis
+        .wait_until_block_index_height(sync_height, SECONDS_TO_WAIT)
+        .await?;
     let mut sync_config = genesis.testing_peer();
     sync_config.node_mode = NodeMode::Miner;
     sync_config.consensus.get_mut().expected_genesis_hash = Some(genesis.node_ctx.genesis_hash);
@@ -215,14 +237,42 @@ async fn heavy_shallow_fork_with_diverged_reset_seeds_heals_vdf_and_syncs() -> e
     fresh_peer
         .wait_until_height(sync_height, SECONDS_TO_WAIT * 3)
         .await?;
-    genesis
-        .verify_blocks_match(&fresh_peer, 0, sync_height)
-        .await?;
+    // Older blocks have left the tree after mining the confirmation suffix.
+    // Compare indexed history as well as the fresh peer's unconfirmed tree tail.
+    for height in 0..=sync_height {
+        let expected = genesis.get_block_by_height_from_index(height, false)?;
+        let actual = match fresh_peer.get_block_by_height(height).await {
+            Ok(block) => block,
+            Err(_) => fresh_peer.get_block_by_height_from_index(height, false)?,
+        };
+        assert_eq!(
+            actual.block_hash, expected.block_hash,
+            "fresh peer differs at height {height}"
+        );
+    }
 
     fresh_peer.stop().await;
     peer.stop().await;
     genesis.stop().await;
     Ok(())
+}
+
+async fn mine_private_block_toward_step(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    height: u64,
+    target_step: u64,
+) -> eyre::Result<IrysBlockHeader> {
+    node.node_ctx.start_vdf();
+    let deadline = Instant::now() + Duration::from_secs(SECONDS_TO_WAIT as u64);
+    while node.node_ctx.vdf_steps_guard.current_step() < target_step {
+        eyre::ensure!(
+            Instant::now() < deadline,
+            "VDF did not reach target {target_step}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    node.node_ctx.stop_vdf();
+    mine_private_block(node, height).await
 }
 
 async fn mine_private_block(
