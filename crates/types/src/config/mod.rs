@@ -314,6 +314,19 @@ impl Config {
             self.consensus.block_migration_depth,
         );
 
+        // A new ingress proof anchors to the latest migrated block, which is
+        // `block_migration_depth` blocks below the tip. The anchor window must
+        // reach past that block by more than one block, or the proof is too old
+        // for the next block before a producer can include it.
+        ensure!(
+            u32::from(self.consensus.mempool.ingress_proof_anchor_expiry_depth)
+                > self.consensus.block_migration_depth.saturating_add(1),
+            "ingress_proof_anchor_expiry_depth ({}) must be > block_migration_depth + 1 ({}): \
+             a new ingress proof anchors to the latest migrated block",
+            self.consensus.mempool.ingress_proof_anchor_expiry_depth,
+            self.consensus.block_migration_depth.saturating_add(1),
+        );
+
         // Commitment anchors must survive at least until their anchor block
         // migrates; but they may outlive the reorg window (resolved from the
         // finalized index below the floor), so they are NOT capped at
@@ -2540,6 +2553,14 @@ mod validate_tests {
             c.mempool.tx_anchor_expiry_depth = 5;
         },
         "tx_anchor_expiry_depth"
+    )]
+    #[case::ingress_proof_anchor_expiry_within_one_block_of_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_migration_depth = 6;
+            c.mempool.tx_anchor_expiry_depth = 7;
+            c.mempool.ingress_proof_anchor_expiry_depth = 7;
+        },
+        "must be > block_migration_depth + 1"
     )]
     fn validate_rejects_depth_invariant_violations(
         #[case] mutate: fn(&mut ConsensusConfig),
