@@ -16,4 +16,5 @@ pub(crate) mod replica_custody;
 pub(crate) mod reth_restart;
 pub(crate) mod sync_chain_state;
 pub(crate) mod validation;
+pub(crate) mod vdf_reset_seed_fork;
 pub(crate) mod vdf_validation_progress;
