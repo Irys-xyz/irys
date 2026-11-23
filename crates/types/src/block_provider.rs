@@ -1,8 +1,8 @@
 use crate::{H256, H256List, VDFLimiterInfo};
 
 /// A consistent snapshot of the canonical chain for the VDF loop: the tip's VDF limiter
-/// info (its `seed`, `next_seed` and tip step), the global step number of the block that is
-/// `block_migration_depth` deep, the reset seed pinned by the canonical block with the greatest
+/// info (its `seed`, `next_seed` and tip step), the last step number and output of the block
+/// that is `block_migration_depth` deep, the reset seed pinned by the canonical block with the greatest
 /// `global_step_number <= requested_step_number`, and the seeds of the canonical blocks above
 /// the confirmed one. One canonical-chain read gives all of them, so the loop never mixes two
 /// views of the chain.
@@ -17,6 +17,8 @@ use crate::{H256, H256List, VDFLimiterInfo};
 pub struct CanonicalVdfSnapshot {
     pub vdf_info: VDFLimiterInfo,
     pub confirmed_global_step_number: u64,
+    /// Last output of the confirmed block, anchoring the buffered lineage.
+    pub confirmed_output: H256,
     /// Reset seed for the next boundary above `step_number`: `next_seed` of the
     /// canonical block whose VDF range ends at or before that step. Using the tip's
     /// `next_seed` alone is wrong when the local loop is behind the tip across one

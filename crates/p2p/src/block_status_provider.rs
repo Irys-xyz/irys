@@ -491,10 +491,18 @@ impl BlockStatusProvider {
                 }
             })
             .collect();
+        let confirmed_global_step_number =
+            binding.confirmed_canonical_step(self.block_migration_depth);
+        let confirmed_output = binding
+            .canonical_entry_at_or_below_step(confirmed_global_step_number)
+            .expect("confirmed block belongs to the canonical cache")
+            .header()
+            .vdf_limiter_info
+            .output;
         CanonicalVdfSnapshot {
             vdf_info: tip.header().vdf_limiter_info.clone(),
-            confirmed_global_step_number: binding
-                .confirmed_canonical_step(self.block_migration_depth),
+            confirmed_global_step_number,
+            confirmed_output,
             reset_seed_for_step,
             unconfirmed_blocks,
         }
@@ -550,6 +558,7 @@ mod tests {
             genesis.vdf_limiter_info.global_step_number
         );
         assert_eq!(snap.reset_seed_for_step, genesis.vdf_limiter_info.next_seed);
+        assert_eq!(snap.confirmed_output, genesis.vdf_limiter_info.output);
     }
 
     #[test]

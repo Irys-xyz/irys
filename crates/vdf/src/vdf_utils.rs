@@ -520,6 +520,7 @@ mod tests {
                 ..VDFLimiterInfo::default()
             },
             confirmed_global_step_number: 2,
+            confirmed_output: H256::zero(),
             reset_seed_for_step: H256::zero(),
             unconfirmed_blocks: vec![block_a.clone(), block_b.clone()],
         };
