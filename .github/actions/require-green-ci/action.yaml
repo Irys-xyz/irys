@@ -245,11 +245,15 @@ runs:
         # pending or failed run of a non-core workflow must not block release and
         # must not count as the required successful CI result. Matched on the
         # workflow file (path basename) of the check run's workflow run, so job
-        # renames inside those workflows cannot make them blocking.
+        # renames inside those workflows cannot make them blocking. A workflow
+        # run's path can carry an @<ref> suffix (e.g. coverage.yml@refs/heads/x);
+        # it is stripped so the file name still matches.
         read -ra non_core_workflows <<< "$(tr ',\n' '  ' <<< "${NON_CORE_WORKFLOWS}")"
         is_non_core_workflow() {
-          local base="${1##*/}" w
+          local base w
           [ -n "$1" ] || return 1
+          base="${1%%@*}"
+          base="${base##*/}"
           for w in "${non_core_workflows[@]}"; do
             [ "${base}" = "${w##*/}" ] && return 0
           done
@@ -293,9 +297,10 @@ runs:
           gate_fail "Could not read the workflow of run ${GITHUB_RUN_ID} from the GitHub API after retries."
         fi
 
-        # check suite id -> workflow file path / head branch / workflow run id, and
+        # check suite id -> workflow file path / head branch / workflow run id /
+        # run status, the suites with a still-running check run this poll, and
         # the set of this workflow's own suites. Refreshed on every poll.
-        declare -A suite_path=() suite_branch=() suite_run=() own_suite=()
+        declare -A suite_path=() suite_branch=() suite_run=() suite_status=() suite_pending=() own_suite=()
         prev_branch_filter=""
 
         # SECONDS is bash's monotonic elapsed-seconds counter since shell start;
@@ -341,7 +346,7 @@ runs:
           if [ "${api_error}" -eq 0 ]; then
             if wf_tsv=$(gh_api --paginate \
               "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
-              -q '.workflow_runs[] | [.check_suite_id, .workflow_id, .id, .path, (.head_branch // "")] | @tsv'); then
+              -q '.workflow_runs[] | [.check_suite_id, .workflow_id, .id, .status, .path, (.head_branch // "")] | @tsv'); then
               :
             else
               rc=$?
@@ -352,16 +357,18 @@ runs:
             fi
           fi
 
-          suite_path=() suite_branch=() suite_run=() own_suite=()
+          suite_path=() suite_branch=() suite_run=() suite_status=() suite_pending=() own_suite=()
           gated_branch_suites=0
           if [ -n "${wf_tsv}" ]; then
-            while IFS=$'\t' read -r s_id wf_id run_id path head_branch; do
+            while IFS=$'\t' read -r s_id wf_id run_id run_status path head_branch; do
               [ -z "${s_id}" ] && continue
               if [ "${wf_id}" = "${own_workflow_id}" ]; then
                 own_suite[${s_id}]=1
                 continue
               fi
+              path="${path%%@*}"
               suite_path[${s_id}]="${path}"
+              suite_status[${s_id}]="${run_status}"
               suite_branch[${s_id}]="${head_branch}"
               suite_run[${s_id}]="${run_id}"
               if [ -n "${GATE_BRANCH}" ] && [ "${head_branch}" = "${GATE_BRANCH}" ] \
@@ -452,6 +459,7 @@ runs:
                 pending=$((pending + 1))
                 pending_names="${pending_names:+${pending_names}, }${name} [${where}] ${url}"
                 add_row "${name}" "${workflow}" "${head_branch}" "${result}" "⏳ waiting" "${url}"
+                suite_pending[${suite_id}]=1
                 continue
               fi
               case "${conclusion}" in
@@ -477,6 +485,28 @@ runs:
               esac
             done <<< "${runs_tsv}"
           fi
+
+          # A gated core workflow run that has not completed is pending even when
+          # none of its check runs is: a queued run may not have created any check
+          # runs yet, and a running one may not have created its later jobs' check
+          # runs. Without this, a poll could see only that run's finished jobs (or
+          # none, plus a green combined commit status) and pass before it reports.
+          for s_id in "${!suite_status[@]}"; do
+            [ "${suite_status[${s_id}]}" = "completed" ] && continue
+            [ -n "${suite_pending[${s_id}]:-}" ] && continue
+            path="${suite_path[${s_id}]}"
+            is_non_core_workflow "${path}" && continue
+            head_branch="${suite_branch[${s_id}]}"
+            if [ "${branch_filter}" -eq 1 ] && [ "${head_branch}" != "${GATE_BRANCH}" ]; then
+              continue
+            fi
+            workflow="${path##*/}"
+            run_url="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${suite_run[${s_id}]}"
+            echo "Workflow run ${workflow} @ ${head_branch:-?} is still ${suite_status[${s_id}]} with jobs not yet reported on ${SHA}: ${run_url}"
+            pending=$((pending + 1))
+            pending_names="${pending_names:+${pending_names}, }workflow run ${workflow} [${head_branch:-?}] ${run_url}"
+            add_row "(workflow run, jobs not yet reported)" "${workflow}" "${head_branch}" "${suite_status[${s_id}]}" "⏳ waiting" "${run_url}"
+          done
 
           # Combined legacy status: the .state field is aggregated server-side across
           # every context, so one read is authoritative regardless of context count.
