@@ -1219,6 +1219,7 @@ impl ChunkIngressServiceInner {
             };
             let db = self.irys_db.clone();
             let block_tree_read_guard = self.block_tree_read_guard.clone();
+            let block_index_guard = self.block_index_guard.clone();
             let config = self.config.clone();
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
             let retry_sender = self.service_senders.chunk_ingress.clone();
@@ -1227,6 +1228,7 @@ impl ChunkIngressServiceInner {
             let _fut = self.exec.clone().spawn_blocking(move || {
                 match generate_and_store_ingress_proof_from_leaves(
                     &block_tree_read_guard,
+                    &block_index_guard,
                     &db,
                     &config,
                     data_root,
@@ -3711,9 +3713,11 @@ mod tests {
         max_chunks_per_item: usize,
         preheader_cap: usize,
     ) -> (ChunkIngressServiceInner, crate::services::ServiceReceivers) {
-        use irys_domain::{BlockTree, BlockTreeReadGuard, StorageModulesReadGuard};
+        use irys_domain::{
+            BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, StorageModulesReadGuard,
+        };
         use irys_testing_utils::new_mock_signed_header;
-        use irys_types::{Config, NodeConfig};
+        use irys_types::{BlockIndexItem, Config, NodeConfig};
         use reth::tasks::TaskExecutor;
         use std::num::NonZeroUsize;
 
@@ -3735,12 +3739,23 @@ mod tests {
         .expect("open test database");
 
         let (service_senders, receivers) = crate::test_helpers::build_test_service_senders();
-        let block_tree_read_guard =
-            BlockTreeReadGuard::new(std::sync::Arc::new(std::sync::RwLock::new(BlockTree::new(
-                &new_mock_signed_header(),
-                config.consensus.clone(),
-            ))));
+        let genesis_block = new_mock_signed_header();
+        let block_tree_read_guard = BlockTreeReadGuard::new(std::sync::Arc::new(
+            std::sync::RwLock::new(BlockTree::new(&genesis_block, config.consensus.clone())),
+        ));
+        let block_index = BlockIndex::new_for_testing(irys_db.clone());
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: genesis_block.block_hash,
+                    num_ledgers: 0,
+                    ledgers: Vec::new(),
+                },
+                genesis_block.height,
+            )
+            .expect("index genesis block");
         let inner = ChunkIngressServiceInner {
+            block_index_guard: BlockIndexReadGuard::new(block_index),
             block_tree_read_guard,
             config,
             exec: TaskExecutor::test(),

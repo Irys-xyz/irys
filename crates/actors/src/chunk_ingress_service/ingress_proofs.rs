@@ -6,7 +6,7 @@ use irys_database::store_ingress_proof;
 use irys_database::{
     cached_data_root_by_data_root, complete_ingress_leaves, ingress_leaf_count_complete,
 };
-use irys_domain::BlockTreeReadGuard;
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
@@ -442,8 +442,8 @@ pub struct ProofCheckResult {
 
 #[derive(Copy, Clone, Debug)]
 pub enum RegenAction {
-    /// The proof has expired - the anchor should be updated to the latest canonical block and
-    ///  the proof re-signed.
+    /// The proof has expired. Update the anchor to the latest migrated block
+    /// and re-sign the proof.
     Reanchor,
     /// The proof is invalid (e.g., bad signature) - the proof should be fully regenerated.
     Regenerate,
@@ -459,10 +459,13 @@ impl ProofCheckResult {
 
 /// Generates and stores an ingress proof once every expected validated compact
 /// leaf is present for the local signer.
+/// Uses `anchor_hint` when present. Otherwise, it anchors to the latest
+/// migrated block, which cannot be reorged out, so producers keep accepting it.
 /// Validates the generated proof's anchor against the canonical chain and gossips it if valid.
 /// Returns the generated proof on success.
 pub fn generate_and_store_ingress_proof(
     block_tree_guard: &BlockTreeReadGuard,
+    block_index_guard: &BlockIndexReadGuard,
     db: &DatabaseProvider,
     config: &Config,
     data_root: DataRoot,
@@ -484,6 +487,7 @@ pub fn generate_and_store_ingress_proof(
         .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
     generate_and_store_ingress_proof_from_leaves(
         block_tree_guard,
+        block_index_guard,
         db,
         config,
         data_root,
@@ -497,8 +501,11 @@ pub fn generate_and_store_ingress_proof(
 /// Generates a proof from a leaf sequence already verified by the readiness
 /// check while holding the root's generation lease. This keeps the hot ingress
 /// path to one ordered leaf walk.
+/// Uses `anchor_hint` when present. Otherwise, it anchors to the latest
+/// migrated block, which cannot be reorged out, so producers keep accepting it.
 pub(crate) fn generate_and_store_ingress_proof_from_leaves(
     block_tree_guard: &BlockTreeReadGuard,
+    block_index_guard: &BlockIndexReadGuard,
     db: &DatabaseProvider,
     config: &Config,
     data_root: DataRoot,
@@ -518,12 +525,10 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
 
     let chain_id = config.consensus.chain_id;
 
-    // Pick anchor: hint or latest canonical block
-    let latest_anchor = block_tree_guard
-        .read()
-        .get_latest_canonical_entry()
-        .block_hash();
-    let anchor = anchor_hint.unwrap_or(latest_anchor);
+    let anchor = match anchor_hint {
+        Some(anchor) => anchor,
+        None => latest_migrated_anchor(block_index_guard)?,
+    };
 
     let proof = super::chunks::generate_ingress_proof(
         db.clone(),
@@ -539,8 +544,11 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
     Ok(proof)
 }
 
+/// Reanchors a proof to the latest migrated block, which cannot be reorged
+/// out, so producers keep accepting the anchor.
 pub fn reanchor_and_store_ingress_proof(
     block_tree_guard: &BlockTreeReadGuard,
+    block_index_guard: &BlockIndexReadGuard,
     db: &DatabaseProvider,
     config: &Config,
     signer: &IrysSigner,
@@ -567,10 +575,7 @@ pub fn reanchor_and_store_ingress_proof(
         .try_acquire(proof.data_root)
         .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
 
-    let latest_anchor = block_tree_guard
-        .read()
-        .get_latest_canonical_entry()
-        .block_hash();
+    let latest_anchor = latest_migrated_anchor(block_index_guard)?;
 
     let mut proof = proof.clone();
     // Re-anchor and re-sign
@@ -584,6 +589,20 @@ pub fn reanchor_and_store_ingress_proof(
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
     Ok(proof)
+}
+
+fn latest_migrated_anchor(
+    block_index_guard: &BlockIndexReadGuard,
+) -> Result<H256, IngressProofGenerationError> {
+    block_index_guard
+        .read()
+        .get_latest_item()
+        .map(|item| item.block_hash)
+        .ok_or_else(|| {
+            IngressProofGenerationError::GenerationFailed(
+                "block index is empty; cannot select a migrated ingress proof anchor".to_string(),
+            )
+        })
 }
 
 pub fn gossip_ingress_proof(
@@ -828,6 +847,9 @@ mod unknown_anchor_tests {
 
         let (service_senders, mut receivers) = crate::test_helpers::build_test_service_senders();
         let inner = ChunkIngressServiceInner {
+            block_index_guard: irys_domain::BlockIndexReadGuard::new(
+                irys_domain::BlockIndex::new_for_testing(db.clone()),
+            ),
             block_tree_read_guard,
             config: config.clone(),
             exec: TaskExecutor::test(),

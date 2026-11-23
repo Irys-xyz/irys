@@ -2063,6 +2063,7 @@ impl InnerCacheTask {
         for proof in to_reanchor.iter() {
             if let Err(error) = reanchor_and_store_ingress_proof(
                 &self.block_tree_guard,
+                &self.block_index_guard,
                 &self.db,
                 &self.config,
                 &signer,
@@ -2081,6 +2082,7 @@ impl InnerCacheTask {
         for proof in to_regen.iter() {
             if let Err(error) = generate_and_store_ingress_proof(
                 &self.block_tree_guard,
+                &self.block_index_guard,
                 &self.db,
                 &self.config,
                 proof.data_root,
@@ -2322,6 +2324,7 @@ impl InnerCacheTask {
             attempted += 1;
             match generate_and_store_ingress_proof(
                 &self.block_tree_guard,
+                &self.block_index_guard,
                 &self.db,
                 &self.config,
                 data_root,
@@ -6132,7 +6135,7 @@ mod tests {
 
     /// At capacity with no cached body, a live Submit module that durably
     /// stores the full placement keeps the local proof, and the staked node
-    /// reanchors it to the tip.
+    /// reanchors it to the latest migrated block.
     #[tokio::test]
     async fn prune_ingress_proofs_at_capacity_keeps_local_proof_for_stored_submit_copy()
     -> eyre::Result<()> {
@@ -6148,8 +6151,8 @@ mod tests {
         );
         assert_eq!(
             pass.author_anchor,
-            Some(pass.tip_hash),
-            "the kept proof is reanchored to the tip"
+            Some(pass.migrated_anchor),
+            "the kept proof is reanchored to the latest migrated block"
         );
         Ok(())
     }
@@ -6166,7 +6169,10 @@ mod tests {
         })?;
         assert!(pass.remaining.contains(&pass.author_addr));
         let anchor = pass.author_anchor.expect("the local proof is kept");
-        assert_ne!(anchor, pass.tip_hash, "the reanchor did not run");
+        assert_eq!(
+            anchor, pass.author_anchor_before_pass,
+            "the reanchor did not run"
+        );
         Ok(())
     }
 
@@ -6222,7 +6228,7 @@ mod tests {
 
     /// After a reorg, this node's proof can keep an anchor on a fork block
     /// inside the window. Producers skip it, so the pass reanchors it to the
-    /// canonical tip while its tx is unpromoted. At capacity the existing
+    /// latest migrated block while its tx is unpromoted. At capacity the existing
     /// keep rules still apply: with no cached body and no stored copy, the
     /// proof stays as it is until it expires.
     #[rstest::rstest]
@@ -6248,7 +6254,7 @@ mod tests {
         expected.sort();
         assert_eq!(pass.remaining, expected, "no proof is deleted");
         let expected_anchor = if expect_reanchor {
-            pass.tip_hash
+            pass.migrated_anchor
         } else {
             pass.author_anchor_before_pass
         };
@@ -6378,9 +6384,11 @@ mod tests {
     }
 
     /// A staked miner whose live Submit module stores the root, with every
-    /// leaf and no proof row, gets the row back anchored to the tip.
+    /// leaf and no proof row, gets the row back anchored to the latest
+    /// migrated block even when the canonical tip is ahead.
     #[tokio::test]
-    async fn restore_regenerates_a_missing_local_proof() -> eyre::Result<()> {
+    async fn restore_regenerates_a_missing_local_proof_at_latest_migrated_block() -> eyre::Result<()>
+    {
         let fixture = proof_fixture(AtCapacityCase {
             module: Some(StoredCopy::FULL_SUBMIT),
             ..AtCapacityCase::RESTORE
@@ -6399,7 +6407,8 @@ mod tests {
         assert_eq!(local_anchor(&fixture.db)?, None);
 
         fixture.task.restore_submit_ingress_proofs()?;
-        assert_eq!(local_anchor(&fixture.db)?, Some(fixture.tip_hash));
+        assert_ne!(fixture.migrated_anchor, fixture.canonical_tip);
+        assert_eq!(local_anchor(&fixture.db)?, Some(fixture.migrated_anchor));
         Ok(())
     }
 
@@ -6540,8 +6549,8 @@ mod tests {
         /// Anchor of the author's proof before the pass.
         author_anchor_before_pass: H256,
         sibling_addr: IrysAddress,
-        /// Canonical tip, the anchor a reanchor or restore signs.
-        tip_hash: H256,
+        /// Latest migrated block, the anchor a reanchor or restore signs.
+        migrated_anchor: H256,
     }
 
     /// One `prune_ingress_proofs` pass at capacity with no cached body.
@@ -6564,7 +6573,7 @@ mod tests {
             author_anchor,
             author_anchor_before_pass: fixture.author_anchor,
             sibling_addr: fixture.sibling_addr,
-            tip_hash: fixture.tip_hash,
+            migrated_anchor: fixture.migrated_anchor,
         })
     }
 
@@ -6576,7 +6585,8 @@ mod tests {
         /// Anchor of the author's proof as stored.
         author_anchor: H256,
         sibling_addr: IrysAddress,
-        tip_hash: H256,
+        migrated_anchor: H256,
+        canonical_tip: H256,
         _db_dir: irys_testing_utils::utils::tempfile::TempDir,
         _sm_dir: irys_testing_utils::utils::tempfile::TempDir,
     }
@@ -6779,6 +6789,14 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
+        block_index.push_item(
+            &irys_types::BlockIndexItem {
+                block_hash: genesis_block.block_hash,
+                num_ledgers: 0,
+                ledgers: Vec::new(),
+            },
+            genesis_block.height,
+        )?;
         let block_index_guard =
             irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
@@ -6816,7 +6834,8 @@ mod tests {
             author_addr,
             author_anchor,
             sibling_addr,
-            tip_hash: tip_block.block_hash,
+            migrated_anchor: genesis_block.block_hash,
+            canonical_tip: tip_block.block_hash,
             _db_dir: _temp_dir,
             _sm_dir: sm_dir,
         })

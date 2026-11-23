@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use irys_database::DatabaseProvider;
 use irys_database::{db::DatabaseProviderCacheExt as _, get_cache_size, tables::CachedChunks};
-use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
     BlockHash, ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, TxChunkOffset,
@@ -167,6 +167,7 @@ impl ChunkIngressState {
 }
 
 pub(crate) struct ChunkIngressServiceInner {
+    pub(crate) block_index_guard: BlockIndexReadGuard,
     pub(crate) block_tree_read_guard: BlockTreeReadGuard,
     pub(crate) config: Config,
     pub(crate) exec: TaskExecutor,
@@ -317,6 +318,7 @@ impl ChunkIngressService {
         irys_db: DatabaseProvider,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
+        block_index_guard: BlockIndexReadGuard,
         rx: UnboundedReceiver<Traced<ChunkIngressMessage>>,
         config: &Config,
         service_senders: &ServiceSenders,
@@ -430,6 +432,7 @@ impl ChunkIngressService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner: Arc::new(ChunkIngressServiceInner {
+                        block_index_guard,
                         block_tree_read_guard,
                         config,
                         exec: task_executor,

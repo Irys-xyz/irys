@@ -9,7 +9,9 @@ use irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl;
 use irys_actors::test_helpers::build_test_service_senders;
 use irys_database::DatabaseProvider;
 use irys_database::db::{DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _};
-use irys_domain::{BlockTree, BlockTreeReadGuard, StorageModulesReadGuard};
+use irys_domain::{
+    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, StorageModulesReadGuard,
+};
 use irys_testing_utils::new_mock_signed_header;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{
@@ -87,6 +89,7 @@ async fn ingest_records_the_cache_commit_duration() {
         db.clone(),
         StorageModulesReadGuard::new(Arc::new(RwLock::new(Vec::new()))),
         &block_tree,
+        BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone())),
         receivers.chunk_ingress,
         &config,
         &service_senders,

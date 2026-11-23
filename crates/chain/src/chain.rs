@@ -2079,6 +2079,7 @@ impl IrysNode {
                 irys_db.clone(),
                 storage_modules_guard.clone(),
                 &block_tree_guard,
+                block_index_guard.clone(),
                 receivers.chunk_ingress,
                 &config,
                 &service_senders,
