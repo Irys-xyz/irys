@@ -1251,23 +1251,41 @@ mod tests {
         state: VdfState,
         block: &VDFLimiterInfo,
     ) -> eyre::Result<()> {
+        validate_batch_on_buffer(config, state, block, 0..block.steps.len(), false).0
+    }
+
+    /// Validate `batch` of `block` with `state` as the local buffer. Returns the result and
+    /// the final cancel flag (`InvalidStep` when a recompute found a bad step).
+    fn validate_batch_on_buffer(
+        config: &VdfConfig,
+        state: VdfState,
+        block: &VDFLimiterInfo,
+        batch: Range<usize>,
+        verify_last_step_checkpoints: bool,
+    ) -> (eyre::Result<()>, u8) {
         let pool = crate::build_verification_pool(config);
         let guard = VdfStateReadonly::new(Arc::new(RwLock::new(state)));
-        vdf_step_batch_is_valid(
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let result = vdf_step_batch_is_valid(
             &pool,
             block,
             config,
             &guard,
-            0..block.steps.len(),
-            false,
-            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
-        )
+            batch,
+            verify_last_step_checkpoints,
+            Arc::clone(&cancel),
+        );
+        (result, cancel.load(Ordering::Relaxed))
     }
 
+    /// Reset every 4 steps. 5 SHA iterations per checkpoint, so every step is a real hash
+    /// of the one before it and a wrong predecessor or seed changes the step.
     fn reset_test_config() -> VdfConfig {
         let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().vdf.reset_frequency = 4;
-        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let vdf = &mut node_config.consensus.get_mut().vdf;
+        vdf.reset_frequency = 4;
+        vdf.num_checkpoints_in_vdf_step = 25;
+        vdf.sha_1s_difficulty = 25 * 5;
         Config::new_with_random_peer_id(node_config).vdf.clone()
     }
 
@@ -1341,6 +1359,96 @@ mod tests {
                 .holds_block_steps(inner.prev_output, 6, &inner.steps.0, H256::zero(), 4)
                 .unwrap()
         );
+    }
+
+    /// The block carries no last-step checkpoints, so a recompute fails on them. On a buffer
+    /// that holds the block's own lineage the batch passes: the fast path skipped the
+    /// recompute. On an empty buffer the same batch is recomputed and fails.
+    #[test]
+    fn fast_path_skips_the_recompute_for_the_blocks_own_steps() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let block = block_over(&state, 5, 8, seed);
+
+        let (result, _) = validate_batch_on_buffer(&config, state, &block, 0..4, true);
+        result.expect("buffer on the block's lineage proves the steps without a recompute");
+
+        let (result, _) = validate_batch_on_buffer(&config, vdf_state_at(0), &block, 0..4, true);
+        assert!(
+            result.is_err(),
+            "a recompute checks the last-step checkpoints"
+        );
+    }
+
+    /// A block that copies the buffered steps but names another predecessor is not the
+    /// buffer's lineage: the fast path declines and the recompute from the block's own
+    /// `prev_output` rejects it.
+    #[test]
+    fn buffered_steps_under_another_prev_output_are_rejected() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let mut block = block_over(&state, 5, 8, seed);
+        block.prev_output = H256::repeat_byte(0x22);
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 0..4, false);
+        assert!(result.is_err(), "copied steps on another parent must fail");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
+    }
+
+    /// A later batch starts from the block's own previous step, not from the buffer. When
+    /// that step is forged, the batch's predecessor differs from the buffer and the
+    /// recompute rejects the batch, though its own steps equal the buffer.
+    #[test]
+    fn later_batch_is_checked_from_the_blocks_previous_step() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let mut block = block_over(&state, 5, 8, seed);
+        block.steps.0[1] = H256::repeat_byte(0xFF);
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 2..4, false);
+        assert!(result.is_err(), "batch after a forged step must fail");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
+    }
+
+    /// A later batch that folds a reset boundary needs the block's seed recorded at that
+    /// boundary. The buffer folded another seed, so the batch is recomputed and rejected.
+    #[test]
+    fn later_batch_after_a_boundary_requires_the_blocks_reset_seed() {
+        let config = reset_test_config();
+        let buffer_seed = H256::repeat_byte(0xA0);
+        let block_seed = H256::repeat_byte(0xB0);
+        let state = buffer_with_folds(&config, 8, buffer_seed, Some(buffer_seed));
+        // Steps 3..=8; batch 2..4 is steps 5..=6, and step 5 folds boundary 4.
+        let block = block_over(&state, 3, 8, block_seed);
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 2..4, false);
+        assert!(result.is_err(), "steps folded with another seed must fail");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
+    }
+
+    /// A block whose steps join two lineages (this buffer's up to step 6, another seed's
+    /// after it) differs from the buffer, so it is recomputed and rejected at the join.
+    #[test]
+    fn block_spliced_from_two_lineages_is_rejected() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let other = buffer_with_folds(&config, 8, H256::repeat_byte(0xB0), None);
+        let mut block = block_over(&state, 5, 8, seed);
+        let other_tail = other.get_steps(ii(7, 8)).unwrap();
+        assert_ne!(
+            other_tail.0[0], block.steps.0[2],
+            "lineages differ after boundary 4"
+        );
+        block.steps.0[2..].copy_from_slice(&other_tail.0);
+        block.output = block.steps.0[3];
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 0..4, false);
+        assert!(result.is_err(), "a spliced range must fail at the join");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
     }
 
     /// `rewrite_tail` replaces the newest steps in place, records the new reset seeds and
