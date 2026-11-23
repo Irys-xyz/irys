@@ -2782,7 +2782,8 @@ mod tests {
     /// Runs the generator over one publish tx with one ingress proof per
     /// signer in `proof_signers`, and returns the tx, the ingress proof reward
     /// pool and the ingress proof reward packets. The tx id is nonzero, so the
-    /// rolling hash is visible.
+    /// rolling hash is visible, and its bytes all differ, so a byte-order
+    /// change is visible.
     fn ingress_proof_reward_increments(
         mut config: ConsensusConfig,
         proof_signers: &[&IrysSigner],
@@ -2796,7 +2797,9 @@ mod tests {
 
         let tx_signer = IrysSigner::random_signer(&config);
         let mut publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
-        publish_tx.id = H256::repeat_byte(0xAB);
+        publish_tx.id = H256(std::array::from_fn(|index| {
+            u8::try_from(index + 1).expect("32 bytes")
+        }));
         let proofs = proof_signers
             .iter()
             .enumerate()
