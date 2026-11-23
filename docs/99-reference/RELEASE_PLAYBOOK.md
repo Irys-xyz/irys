@@ -146,7 +146,7 @@ The workflow will:
 
 1. Verify the commit is on `release/testnet/<major>.x`, **and is the tip of that branch** — releasing a non-tip commit silently drops the later commits on the branch and is a hard error unless you dispatch with `allow_non_tip_commit=true`.
 2. Verify `crates/chain/Cargo.toml` version equals `1.2.3`.
-3. Verify the CI gate target had a passing **core** CI run (Rust Checks and other required jobs; Benchmarks and Coverage do not gate). By default this is the commit's `release/1.x` merge-base (the upstream code being shipped, env-patches aside); dispatch with `gate_ci_on_trunk=false` to instead gate the release commit itself (use when the deployment branch is expected to be green in its own right). Skipped entirely with `force=true` or `dry_run=true`.
+3. Verify the CI gate target had a passing **core** CI run (Rust Checks and other required jobs; Benchmarks and Coverage do not gate). By default this is the commit's `release/1.x` merge-base (the upstream code being shipped, env-patches aside); dispatch with `gate_ci_on_trunk=false` to instead gate the release commit itself (use when the deployment branch is expected to be green in its own right). If the gated branch (`release/1.x`, or `release/<env>/1.x` with `gate_ci_on_trunk=false`) has its own CI runs on that commit, only those gate; runs of the same SHA on other branches are ignored. A failure names the blocking job with a link, prints the `gh run rerun` command, and the job summary lists every check. Skipped entirely with `force=true`; with `dry_run=true` it runs in report-only mode (warns, never fails).
 4. Build `ghcr.io/<owner>/irys-testnet:1.2.3`.
 5. Push git tag `testnet-1.2.3`, push the Docker image, move the `testnet-latest` git tag.
 6. Auto-publish a GitHub **prerelease** with the auto-generated changelog body.
@@ -387,7 +387,7 @@ After publishing, deploy `irys-mainnet:1.2.3` to mainnet.
 | Need to roll back? | Dispatch `docker-retag.yml`. See [`RELEASE_PROCESS.md` § Rollback](./RELEASE_PROCESS.md#rollback). |
 | Intentionally releasing a commit behind the branch tip? | Dispatch with `allow_non_tip_commit=true`. Otherwise the release is rejected — a non-tip commit drops the later commits on `release/<env>/<major>.x` (this is what caused the 4.0.2 `revertme` commit to be excluded). |
 | Deployment branch itself passes CI (env patches don't break it)? | Dispatch with `gate_ci_on_trunk=false` to gate CI on the release commit directly instead of the `release/<major>.x` trunk merge-base — this way the env-specific patches get CI-verified too rather than trusted implicitly. |
-| Want to test the workflow without publishing? | Dispatch with `dry_run=true`. Validates and builds; skips tag/image push and GH Release creation, skips the release-base CI gate, and runs without the environment approval gate (so a mainnet dry-run needs no reviewer and won't block a queued real release). |
+| Want to test the workflow without publishing? | Dispatch with `dry_run=true`. Validates and builds; skips tag/image push and GH Release creation, runs the release-base CI gate in report-only mode (warns about anything that would block, never fails), and runs without the environment approval gate (so a mainnet dry-run needs no reviewer and won't block a queued real release). |
 
 ## Hotfixes and emergencies
 
@@ -411,9 +411,12 @@ then skips every mutating step: no git tag, no image push, no `latest` move, no
 GitHub Release. Use it to prove the workflow and the build are healthy before a
 real cut, or after changing the workflow itself.
 
-A dry-run also skips the release-base CI gate (it can run before `release/<major>.x`
-exists — the setup below branches only the `release/<env>/<major>.x` branch from
-`master`), so it does not require the merge-base commit to have a passing CI run.
+A dry-run runs the release-base CI gate in report-only mode: it reports (as
+warnings and in the job summary) whether the real release would be blocked, but
+never fails, and does not wait for still-running CI. It can run before
+`release/<major>.x` exists — the setup below branches only the
+`release/<env>/<major>.x` branch from `master` — in which case it reports on the
+release commit itself instead of the trunk merge-base.
 
 A dry-run resolves its `environment` to empty, so it does **not** wait on the
 `testnet`/`mainnet` approval gate and does **not** require those Environments to

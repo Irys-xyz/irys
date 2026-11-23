@@ -114,21 +114,37 @@ jobs:
       #   OFF: gate the release commit directly. Use when the deployment branch is
       #     expected to pass CI in its own right, so the env-specific patches above
       #     the trunk merge-base are CI-verified too rather than trusted implicitly.
-      # Scoped to real releases: force=true (emergency hotfixes) and dry_run=true
-      # (which may run before release/<major>.x even exists — see RELEASE_PLAYBOOK.md
-      # dry-run section) both bypass it.
+      # The gate also outputs the branch whose CI is gated on: release/<major>.x
+      # for the trunk merge-base, release/<env>/<major>.x for the release commit.
+      # When that branch has its own CI runs on the commit, only those gate, so a
+      # flaky red job from the same SHA pushed to another branch does not block.
+      # force=true (emergency hotfixes) bypasses it. dry_run=true runs it in
+      # report-only mode: it reports whether the real release would be blocked
+      # but never fails the dry run. A dry run may run before release/<major>.x
+      # exists (see RELEASE_PLAYBOOK.md dry-run section); it then reports on the
+      # release commit itself instead of failing.
       - name: Resolve CI-gate commit
         id: base
-        if: ${{ !inputs.force && !inputs.dry_run }}
+        if: ${{ !inputs.force }}
         env:
           INPUT_COMMIT: ${{ inputs.commit }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
           GATE_ON_TRUNK: ${{ inputs.gate_ci_on_trunk }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
+          MAJOR="${INPUT_VERSION%%.*}"
+          DEPLOY_BRANCH="release/${INPUT_RELEASE_TYPE}/${MAJOR}.x"
           if [ "$GATE_ON_TRUNK" = "true" ]; then
-            MAJOR="${INPUT_VERSION%%.*}"
-            RELEASE_BRANCH="origin/release/${MAJOR}.x"
+            TRUNK="release/${MAJOR}.x"
+            RELEASE_BRANCH="origin/${TRUNK}"
             if ! git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "::notice::Release branch $RELEASE_BRANCH does not exist yet; the dry run reports CI on the release commit ${INPUT_COMMIT} instead."
+                echo "sha=${INPUT_COMMIT}" >> "$GITHUB_OUTPUT"
+                echo "branch=${DEPLOY_BRANCH}" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
               echo "::error::Release branch $RELEASE_BRANCH does not exist; cannot CI-gate the trunk merge-base. (Set gate_ci_on_trunk=false to gate the release commit directly.)"
               exit 1
             fi
@@ -138,22 +154,32 @@ jobs:
             fi
             echo "CI gate target: trunk merge-base of ${INPUT_COMMIT} and $RELEASE_BRANCH: $MERGE_BASE"
             echo "sha=$MERGE_BASE" >> "$GITHUB_OUTPUT"
+            echo "branch=${TRUNK}" >> "$GITHUB_OUTPUT"
           else
             echo "CI gate target: release commit directly (gate_ci_on_trunk=false): ${INPUT_COMMIT}"
             echo "sha=${INPUT_COMMIT}" >> "$GITHUB_OUTPUT"
+            echo "branch=${DEPLOY_BRANCH}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Require green CI on gate target
-        if: ${{ !inputs.force && !inputs.dry_run }}
+        if: ${{ !inputs.force }}
         uses: ./.github/actions/require-green-ci
         with:
           commit: ${{ steps.base.outputs.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.base.outputs.branch }}
+          # Telemetry workflows (by file name) that never gate the release.
+          non-core-workflows: "bench.yml coverage.yml"
+          # Dry runs report what the real release would hit without failing.
+          report-only: ${{ inputs.dry_run }}
           # Wait for in-progress *core* CI on the gate target to finish rather
           # than failing immediately, so a release kicked off while its
           # gate-target CI is still running blocks until the result is known
-          # (up to 60 min). Benchmarks and Coverage are not part of this wait.
-          wait-timeout-seconds: "3600"
+          # (up to 60 min). Non-core workflows are not part of this wait. A dry
+          # run does not wait: it reports still-running checks and moves on.
+          # Written `!dry_run && '3600' || '0'` so the `&&` operand is never a
+          # possibly-falsy value (see the environment expression below).
+          wait-timeout-seconds: ${{ !inputs.dry_run && '3600' || '0' }}
           poll-interval-seconds: "30"
 
       - name: Determine tag name
