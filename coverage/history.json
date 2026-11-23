@@ -1,12 +1,5 @@
 [
   {
-    "date": "2026-07-28T16:26:26Z",
-    "commit": "4ad3461e5650",
-    "total_lines": 111046,
-    "covered_lines": 85357,
-    "percentage": 76.87
-  },
-  {
     "date": "2026-07-30T12:09:30Z",
     "commit": "009871222478",
     "total_lines": 111322,
@@ -698,5 +691,12 @@
     "total_lines": 222785,
     "covered_lines": 186956,
     "percentage": 83.92
+  },
+  {
+    "date": "2026-11-23T11:10:45Z",
+    "commit": "ee945fbc1f46",
+    "total_lines": 223299,
+    "covered_lines": 187466,
+    "percentage": 83.95
   }
 ]
