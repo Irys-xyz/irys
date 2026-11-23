@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795257201490,
+  "lastUpdate": 1795431969220,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23911,6 +23911,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ee945fbc1f461047ec7008f51292c48145fe5552",
+          "message": "fix(storage): guard placement ownership and ledger mapping width (#1836)\n\n* fix(storage): refuse a placement over another data root's live interval\n\nBoth index engines overwrote any interval in the registered range, so a\nregistration for one data root could silently replace live coverage of\nanother. Every valid flow clears coverage first: reset wipes the index\nand rollback clears whole transaction slices before replay. Registration\nnow fails when the range overlaps a live interval of a different root.\nThe same root may replay its own coverage, and clearing stays allowed.\nMDBX refuses when either interval's root cannot be resolved from its\nleaf binding.\n\nTests that replaced a root without clearing now clear coverage first, as\nrollback does.\n\n* fix(storage): data-root lookups skip offsets another root covers\n\nA split placement keeps the transaction's full extent on every fragment,\nso the data-root lookups could name an offset the transaction no longer\ncovers. They now read interval ownership:\n\n- partition_offsets_for_data_root_chunk and the placement classifier\n  skip an offset whose interval belongs to another data root.\n- An offset in the extent with no interval (a hole left by open-time\n  recovery) stays placed but is never persisted, so a cached body is\n  kept until index heal restores the coverage.\n- holds_full_persisted_data_root requires every offset of the placement\n  to be covered by this root, not only labelled Data.\n\nThe classifier reads ownership once per placement and submodule.\nFixtures that faked a placement with only a data-root info row now\nregister the leaf binding and coverage, as transaction indexing does.\n\n* fix(storage): refuse ledger mapping while a module is narrower than the chain\n\nA drive that finished a partition resize keeps its retained width R. On a\nchain view from before the activation (canonical width W > R, after a\nconsensus DB wipe or restore) the module clamps its width to R, and the\nledger range became slot * R, which is wrong for slots above 0.\n\nThe module now keeps the width the chain asked for next to the clamped\nwidth. While they differ, ledger <-> partition mapping returns an error\nand contains_offset is false. Mining and packing still work on the\nretained prefix. The mapping works again once the chain passes the\nactivation or the resize finalizes. Data sync, index heal, rollback and\nthe chunk provider skip the module in that state.\n\n* fix(cache): keep a cached body when a module's ledger mapping is refused\n\nThe assigned-placement check skipped any module whose `contains_offset`\nwas false. A module whose width is clamped below the chain's refuses its\nledger mapping, so it was skipped as if it held no copy, and a body whose\nonly local copy sits there could be pruned. A refused mapping now keeps\nthe body; an offset outside the module's range is still skipped.",
+          "timestamp": "2026-11-23T10:45:43Z",
+          "tree_id": "46660518d6dd15916f46520745fc981accb69801",
+          "url": "https://github.com/Irys-xyz/irys/commit/ee945fbc1f461047ec7008f51292c48145fe5552"
+        },
+        "date": 1795431967650,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011965,
+            "range": "± 0.000146",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120158,
+            "range": "± 0.002111",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.204364,
+            "range": "± 0.015721",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.903294,
+            "range": "± 0.123606",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.066495,
+            "range": "± 0.001304",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 658.865666,
+            "range": "± 4.423581",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 899.571083,
+            "range": "± 48.058406",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120543,
+            "range": "± 0.002479",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1177.970966,
+            "range": "± 8.149007",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1547.163103,
+            "range": "± 9.942502",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.026923,
+            "range": "± 0.001618",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 151.487975,
+            "range": "± 8.524945",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 189.369473,
+            "range": "± 6.443101",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000124,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
