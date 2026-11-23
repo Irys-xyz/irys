@@ -3014,8 +3014,8 @@ mod tests {
     }
 
     /// A validated block that is not the tip is not canonical, so `confirmed_canonical_step`
-    /// never reports its step: the VDF reset-boundary gate must not treat a still-forkable
-    /// block's seed as confirmed during a sync/reorg window.
+    /// never reports its step and the unconfirmed entries never include it. The VDF loop
+    /// checks reset seeds against these entries.
     #[test]
     fn confirmed_canonical_step_ignores_validated_block_above_tip() {
         let comm_cache = Arc::new(CommitmentSnapshot::default());
