@@ -537,11 +537,15 @@ pub fn run_vdf<B: BlockProvider>(
         metrics::record_vdf_global_step(global_step_number);
         info!("Seed created {} step number {}", hash, global_step_number);
 
-        broadcast_mining_service.broadcast(
-            Seed(hash),
-            H256List(checkpoints.clone()), // clone: checkpoints reused across loop iterations
-            global_step_number,
-        );
+        // Catch-up steps computed while mining is paused only serve validation's wait for
+        // the counter; miners get steps only while mining is on.
+        if is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            broadcast_mining_service.broadcast(
+                Seed(hash),
+                H256List(checkpoints.clone()), // clone: checkpoints reused across loop iterations
+                global_step_number,
+            );
+        }
 
         hash = process_reset(global_step_number, hash, vdf_reset_frequency, fold_seed);
     }
