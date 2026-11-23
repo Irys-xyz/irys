@@ -32,6 +32,15 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Mainnet takes no data txs, from the API, gossip or anywhere else.
+        if crate::block_validation::mainnet_rejects_data_txs(self.config.consensus.chain_id) {
+            debug!(
+                "Data tx {} from address {} rejected: mainnet currently doesn't accept data txs",
+                tx.id, tx.signer
+            );
+            return Err(TxIngressError::DataTxsNotAllowed(tx.id));
+        }
+
         // Reject structurally-invalid data txs (zero data_size, prefix_size > data_size,
         // foreign chain_id) using the same shared predicate as consensus prevalidation
         // (`data_tx_structural_defect`), so ingress and consensus enforce identical rules.

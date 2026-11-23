@@ -343,9 +343,12 @@ fn own_block_rejection_cause(err: &PreValidationError) -> OwnBlockRejectionCause
         PreValidationError::AssignedProofCountMismatch { .. }
         | PreValidationError::CascadeNotConfigured { .. }
         | PreValidationError::CommitmentChainIdMismatch { .. }
+        // Mainnet bans: the mempool filters these, but its view can lag the chain.
+        | PreValidationError::CommitmentSignerNotAllowed { .. }
         | PreValidationError::CommitmentVersionInvalid { .. }
         | PreValidationError::DataSizeExceedsMax { .. }
         | PreValidationError::DataTxChainIdMismatch { .. }
+        | PreValidationError::DataTxsNotAllowed { .. }
         | PreValidationError::DuplicateIngressProofSigner { .. }
         | PreValidationError::IngressProofCountMismatch { .. }
         | PreValidationError::IngressProofMismatch { .. }
@@ -383,6 +386,10 @@ fn own_block_rejection_cause(err: &PreValidationError) -> OwnBlockRejectionCause
         | PreValidationError::InvalidEpochSnapshot { .. }
         | PreValidationError::LedgerIdInvalid { .. }
         | PreValidationError::MerkleProofInvalid(_)
+        // Mainnet miner allowlist. A node mining with a key outside the list must
+        // drop the solution, not stop: stopping would take down every such node
+        // on mainnet. It can never produce a valid block, so this repeats.
+        | PreValidationError::MinerNotAllowed { .. }
         | PreValidationError::PartitionAssignmentMissing { .. }
         | PreValidationError::PartitionAssignmentSlotIndexMissing { .. }
         | PreValidationError::PartitionAssignmentSlotIndexTooLarge { .. }

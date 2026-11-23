@@ -1082,10 +1082,14 @@ where
                         }
                 }
                 for data_tx in block_transactions.all_data_txs() {
+                    // Mainnet's mempool takes no data txs; the block still persists them.
                     if let Err(err) = mempool
                         .handle_data_transaction_ingress_gossip(data_tx.clone())
                         .await
-                        && !matches!(err, TxIngressError::Skipped) {
+                        && !matches!(
+                            err,
+                            TxIngressError::Skipped | TxIngressError::DataTxsNotAllowed(_)
+                        ) {
                             warn!(
                                 "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
                                 data_tx.id, current_block_hash, err

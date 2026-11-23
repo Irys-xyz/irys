@@ -531,6 +531,7 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
+    #[expect(dead_code)]
     async fn handle_transaction_v1(
         server: Data<Self>,
         irys_transaction_header_json: web::Json<
@@ -972,6 +973,7 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
+    #[expect(dead_code)]
     async fn handle_transaction_v2(
         server: Data<Self>,
         irys_transaction_header_json: web::Json<
@@ -1990,10 +1992,10 @@ where
         web::scope("/gossip")
             .service(
                 web::scope("/v2")
-                    .route(
-                        GossipRoutes::Transaction.as_str(),
-                        web::post().to(Self::handle_transaction_v2),
-                    )
+                    // .route(
+                    //     GossipRoutes::Transaction.as_str(),
+                    //     web::post().to(Self::handle_transaction_v2),
+                    // )
                     .route(
                         GossipRoutes::CommitmentTx.as_str(),
                         web::post().to(Self::handle_commitment_tx_v2),
@@ -2059,10 +2061,10 @@ where
                         web::get().to(Self::handle_block_index_v2),
                     ),
             )
-            .route(
-                GossipRoutes::Transaction.as_str(),
-                web::post().to(Self::handle_transaction_v1),
-            )
+            // .route(
+            //     GossipRoutes::Transaction.as_str(),
+            //     web::post().to(Self::handle_transaction_v1),
+            // )
             .route(
                 GossipRoutes::CommitmentTx.as_str(),
                 web::post().to(Self::handle_commitment_tx_v1),

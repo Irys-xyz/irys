@@ -298,6 +298,19 @@ impl Inner {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
+        // On mainnet only the hardcoded miner addresses may sign commitment txs,
+        // whatever the configured or gossiped whitelist says.
+        if !crate::block_validation::mainnet_commitment_signer_is_allowed(
+            self.config.consensus.chain_id,
+            commitment_tx.signer(),
+        ) {
+            warn!(
+                "Commitment tx {} from address {} rejected: not an allowed mainnet staker",
+                commitment_tx.id(),
+                commitment_tx.signer()
+            );
+            return Err(CommitmentValidationError::ForbiddenSigner.into());
+        }
         if !self
             .mempool_state
             .is_address_in_a_whitelist(&commitment_tx.signer())

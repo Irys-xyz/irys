@@ -195,6 +195,13 @@ impl From<TxIngressError> for GossipError {
                 // Structurally invalid tx (exceeds max data size), decrease source reputation
                 Self::InvalidData(InvalidDataError::TransactionDataSizeExceedsMax(tx_id))
             }
+            // Local policy, not a fault of the sender: peers still on an older build
+            // gossip data txs, so don't decrease their reputation.
+            TxIngressError::DataTxsNotAllowed(tx_id) => {
+                Self::Internal(InternalGossipError::Unknown(format!(
+                    "data tx {tx_id} rejected: mainnet currently doesn't accept data txs"
+                )))
+            }
         }
     }
 }
