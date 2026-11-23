@@ -194,16 +194,22 @@ runs:
           # GitHub Actions jobs surface as "check runs"; external CI / bots surface
           # as legacy "commit statuses". A passing core CI result must satisfy both.
           # filter=latest (the API default) collapses re-runs to the most recent run
-          # per check name, so a red run that was later re-run green is not counted.
+          # per check name *within a check suite* (one workflow run), so a red job
+          # that was later re-run green is not counted. It does not collapse across
+          # suites: when the same SHA is pushed to several branches, each push's
+          # workflow run is its own suite, and a red job in any of them blocks.
           # Without the own-suite list, this workflow's check runs cannot be told
           # apart, so do not read check runs on this poll (api_error re-polls).
+          # The URL is the job page for Actions checks (details_url), falling back to
+          # the check run page (html_url, always set) for external check apps, so a
+          # blocking check can be opened straight from the gate's log.
           # Only the last field may be empty: `read` with IFS=tab merges adjacent
           # tabs, so an empty field before it would shift the later fields left.
           runs_tsv=""
           if [ "${api_error}" -eq 0 ]; then
             if runs_tsv=$(gh_api --paginate \
               "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
-              -q '.check_runs[] | [.check_suite.id, .name, .status, (.conclusion // "")] | @tsv'); then
+              -q '.check_runs[] | [.check_suite.id, .name, .status, (.details_url // .html_url), (.conclusion // "")] | @tsv'); then
               :
             else
               rc=$?
@@ -221,7 +227,7 @@ runs:
           check_successes=0
           total_runs=0
           if [ -n "${runs_tsv}" ]; then
-            while IFS=$'\t' read -r suite_id name status conclusion; do
+            while IFS=$'\t' read -r suite_id name status url conclusion; do
               [ -z "${name}" ] && continue
               if grep -qxF "${suite_id}" <<< "${own_suites}"; then
                 continue
@@ -231,7 +237,7 @@ runs:
                   case "${conclusion}" in
                     success|skipped|neutral) ;;
                     *)
-                      echo "Ignoring non-core check '${name}' (conclusion=${conclusion}) on ${SHA}."
+                      echo "Ignoring non-core check '${name}' (conclusion=${conclusion}) on ${SHA}: ${url}"
                       ;;
                   esac
                 fi
@@ -246,7 +252,7 @@ runs:
                 total_runs=$((total_runs + 1))
               fi
               if [ "${status}" != "completed" ]; then
-                echo "Check '${name}' is still running (status=${status}) on ${SHA}."
+                echo "Check '${name}' is still running (status=${status}) on ${SHA}: ${url}"
                 pending=$((pending + 1))
                 pending_names="${pending_names:+${pending_names}, }${name}"
                 continue
@@ -262,7 +268,7 @@ runs:
                   # Non-blocking, mirrors GitHub's required-status-check semantics.
                   ;;
                 *)
-                  echo "::error::Check '${name}' did not pass (conclusion=${conclusion}) on ${SHA}."
+                  echo "::error::Check '${name}' did not pass (conclusion=${conclusion}) on ${SHA}: ${url}"
                   fail=1
                   ;;
               esac
