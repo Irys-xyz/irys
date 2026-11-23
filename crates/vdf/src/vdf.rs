@@ -2447,14 +2447,10 @@ mod tests {
             view.confirmed_global_step_number = 5;
             view.confirmed_output = H256::repeat_byte(0xFF);
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while !node.signals.is_buffer_suspect() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "confirmed mismatch must mark the buffer suspect"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), node.signals.wait_for_suspect(None))
+            .await
+            .expect("confirmed mismatch must wake the re-anchor listener");
+        assert!(node.signals.is_buffer_suspect());
         node.stop();
     }
 

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::time::{Duration, timeout};
 
 /// Bound for the inbound VDF fast-forward channel. Owned by `irys-vdf` so the
@@ -25,6 +25,7 @@ pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 pub struct ReanchorSignals {
     generation: Arc<AtomicU64>,
     buffer_suspect: Arc<AtomicBool>,
+    suspect_changed: Arc<Notify>,
     stopped_for_shutdown: Arc<AtomicBool>,
     recompute_in_progress: Arc<AtomicBool>,
 }
@@ -34,6 +35,7 @@ impl ReanchorSignals {
         Self {
             generation: Arc::new(AtomicU64::new(0)),
             buffer_suspect: Arc::new(AtomicBool::new(false)),
+            suspect_changed: Arc::new(Notify::new()),
             stopped_for_shutdown: Arc::new(AtomicBool::new(false)),
             recompute_in_progress: Arc::new(AtomicBool::new(false)),
         }
@@ -65,9 +67,10 @@ impl ReanchorSignals {
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
         self.recompute_in_progress.store(false, Ordering::Release);
+        self.suspect_changed.notify_waiters();
     }
 
-    /// True while `run_vdf` recomputes its tail: the step counter is frozen on
+    /// True while `run_vdf` rewrites its buffer: the step counter is frozen on
     /// purpose, so a waiter must not read that as a dead VDF thread.
     pub fn is_recompute_in_progress(&self) -> bool {
         self.recompute_in_progress.load(Ordering::Acquire)
@@ -84,12 +87,34 @@ impl ReanchorSignals {
         self.buffer_suspect.store(false, Ordering::Release);
         crate::metrics::record_buffer_suspect(false);
         crate::metrics::record_reanchor_healed();
+        self.suspect_changed.notify_waiters();
     }
 
     /// Mark buffer untrusted (gate before queue; `run_vdf` on consume). Release.
     pub fn mark_buffer_suspect(&self) {
         self.buffer_suspect.store(true, Ordering::Release);
         crate::metrics::record_buffer_suspect(true);
+        self.suspect_changed.notify_waiters();
+    }
+
+    /// Wait for a suspect buffer needing a request. An existing suspect flag returns
+    /// immediately unless a rewrite already handles it or its generation was handled.
+    /// Keeping those waits pending prevents request feedback while a heal runs.
+    pub async fn wait_for_suspect(&self, handled_generation: Option<u64>) -> u64 {
+        loop {
+            let changed = self.suspect_changed.notified();
+            tokio::pin!(changed);
+            // Register before reading the flag so a concurrent mark cannot be lost.
+            changed.as_mut().enable();
+            let generation = self.generation();
+            if self.is_buffer_suspect()
+                && !self.is_recompute_in_progress()
+                && handled_generation != Some(generation)
+            {
+                return generation;
+            }
+            changed.await;
+        }
     }
 
     /// True while a re-anchor is pending/running — do not trust the seed buffer.
@@ -495,6 +520,31 @@ mod tests {
         let next_seed = H256::repeat_byte(0x02);
         let got = tip_child_reset_seed(tip_last_step, seed, next_seed, boundary, live_step, 5);
         assert_eq!(got, if expect_next_seed { next_seed } else { seed });
+    }
+
+    #[tokio::test]
+    async fn suspect_wait_handles_existing_flags_and_repeated_heals() {
+        use std::future::Future as _;
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let signals = ReanchorSignals::new();
+        signals.mark_buffer_suspect();
+        assert_eq!(signals.wait_for_suspect(None).await, 0);
+        let waiting = signals.wait_for_suspect(Some(0));
+        tokio::pin!(waiting);
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        signals.mark_buffer_suspect();
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        signals.record_heal_applied();
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        // Consuming an already queued request must not request another heal.
+        signals.begin_recompute();
+        signals.mark_buffer_suspect();
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        signals.record_heal_applied();
+        signals.finish_recompute(false);
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        signals.mark_buffer_suspect();
+        assert_eq!(waiting.await, 2);
     }
 
     /// Below the tip the covering unconfirmed block decides; below those, nothing does.

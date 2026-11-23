@@ -768,11 +768,6 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         peer_height += 1;
     }
 
-    // Only a block-tree re-anchor clears suspicion; reset-seed rewrites leave it set.
-    let reanchor_signals = &genesis.node_ctx.service_senders.vdf_reanchor_signals;
-    reanchor_signals.mark_buffer_suspect();
-    assert!(reanchor_signals.is_buffer_suspect());
-
     // Reconnect; gossip the peer's longer fork → deep, boundary-crossing reorg on
     // genesis, firing the re-anchor gate.
     genesis.gossip_enable();
@@ -796,25 +791,8 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         "genesis must converge to the canonical tip after the boundary-crossing reorg"
     );
 
-    // A reset-seed rewrite also bumps generation, but only a successful block-tree
-    // re-anchor clears the suspect flag set before reconnecting. The heal is async.
-    let mut heal_fired = false;
-    for _ in 0..(seconds_to_wait * 20) {
-        if !reanchor_signals.is_buffer_suspect() {
-            heal_fired = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert!(
-        heal_fired,
-        "the boundary-crossing reorg must have triggered at least one VDF re-anchor heal on genesis"
-    );
-
-    // Assertion A: the heal is CORRECT, not merely fired. Genesis's re-anchored VDF
-    // buffer over the boundary-crossing range must equal the canonical chain's steps;
-    // the suspect clear above proves the re-anchor ran, this proves the healed CONTENT
-    // matches canonical (a wrong reset seed would re-step divergent values here).
+    // The reorg itself must repair the divergent buffer before an explicit heal request.
+    // A wrong reset seed would produce different values across this boundary.
     // Seeds fold into the hash AFTER the boundary step is stored, so divergent
     // values start at `boundary + 1` — the compared block must carry at least
     // one step strictly past the boundary or the comparison is vacuous. The
@@ -860,6 +838,24 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
          mismatch means the re-anchor did not heal the recovered range"
     );
     info!("Assertion A passed: recovered VDF buffer matches canonical across the reset boundary");
+
+    // Check the immediate suspect-request path against the adopted tip. Marking before
+    // reconnect would let the old private tip clear suspicion before the reorg arrived.
+    // Only a successful block-tree re-anchor clears it; reset-seed rewrites leave it set.
+    let reanchor_signals = &genesis.node_ctx.service_senders.vdf_reanchor_signals;
+    reanchor_signals.mark_buffer_suspect();
+    let mut heal_fired = false;
+    for _ in 0..(seconds_to_wait * 20) {
+        if !reanchor_signals.is_buffer_suspect() {
+            heal_fired = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        heal_fired,
+        "the adopted canonical tip must re-anchor the suspect buffer"
+    );
 
     // The heal is observable: genesis mines a block the peer ADOPTS AS CANONICAL,
     // which requires genesis's post-reorg VDF buffer to produce valid recall ranges
