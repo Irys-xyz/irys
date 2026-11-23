@@ -946,7 +946,11 @@ fn apply_reanchor(
     reset_seed_by_boundary.extend(tail.reset_seeds);
 
     match vdf_state.write() {
-        Ok(mut guard) => guard.reanchor_seeds(canonical_seeds, reset_seed_by_boundary),
+        Ok(mut guard) => {
+            let canonical_step = guard.canonical_step().max(c_step);
+            guard.set_canonical_step(canonical_step);
+            guard.reanchor_seeds(canonical_seeds, reset_seed_by_boundary);
+        }
         Err(_) => {
             error!("VDF state write lock poisoned during re-anchor; exiting VDF thread");
             return ReanchorOutcome::PoisonedLock;

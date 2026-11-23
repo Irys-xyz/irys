@@ -279,10 +279,18 @@ impl VdfState {
             !corrected.is_empty(),
             "reanchor_seeds requires a non-empty canonical window"
         );
+        // Keep the window `store_step` keeps: from `capacity` steps below the canonical step
+        // up to the live step. A free-run tail longer than `capacity` stays whole, so block
+        // production and a later reset-seed check still find the steps after the canonical tip.
         let capacity = u64::try_from(self.capacity).expect("VDF capacity must fit in u64");
-        self.minimum_step_to_keep = self.current_step().saturating_sub(capacity);
+        self.minimum_step_to_keep = self
+            .global_step_from_the_latest_canonical_block
+            .saturating_sub(capacity);
+        let retained = self
+            .current_step()
+            .saturating_sub(self.minimum_step_to_keep);
         self.seeds = corrected;
-        while self.seeds.len() > self.capacity {
+        while self.seeds.len() as u64 > retained {
             self.seeds.pop_front();
         }
         self.reset_seed_by_boundary = reset_seeds;
@@ -1605,9 +1613,29 @@ mod tests {
         assert_eq!(last_seed, Seed(H256::from_low_u64_be(10)));
     }
 
-    /// A corrected window longer than `capacity` (canonical window + recomputed
-    /// tail) is trimmed to the NEWEST `capacity` seeds — `store_step`'s
-    /// one-pop-per-push would otherwise carry the excess forever.
+    /// A re-anchor keeps a free-run tail that is longer than `capacity`: block production
+    /// and a later reset-seed check need the steps right after the canonical tip.
+    #[test]
+    fn reanchor_seeds_keeps_a_free_run_tail_longer_than_capacity() {
+        // Capacity 64, live step 100, canonical step 20: the 80 steps past the canonical tip
+        // and the 20 below it all stay, as `store_step` would have kept them.
+        let mut state = vdf_state_at(100);
+        state.set_canonical_step(20);
+        let corrected: VecDeque<Seed> = (1..=100).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        state.reanchor_seeds(corrected, BTreeMap::new());
+
+        assert_eq!(state.seeds.len(), 100);
+        let steps = state.get_steps(ii(1, 100)).expect("whole window retained");
+        assert_eq!(
+            steps.0[20],
+            H256::from_low_u64_be(21),
+            "first step past the canonical tip"
+        );
+    }
+
+    /// A corrected window that reaches more than `capacity` steps below the canonical step
+    /// is trimmed there — `store_step`'s one-pop-per-push would otherwise carry the excess
+    /// forever.
     #[test]
     fn reanchor_seeds_trims_oldest_down_to_capacity() {
         // vdf_state_at uses capacity 64; install a 70-seed window at step 70.
