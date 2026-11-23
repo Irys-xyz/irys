@@ -137,9 +137,14 @@ pub fn run_vdf<B: BlockProvider>(
         }
 
         // Latest-value re-anchor: rewrite buffer values, leave counter forward.
-        if reanchor_receiver.has_changed().unwrap_or(false)
-            && let Some(request) = reanchor_receiver.borrow_and_update().clone()
-        {
+        // Clone the request out first: the watch borrow holds the channel's read lock, and
+        // a block-tree send would block on it for the whole repair.
+        let pending_reanchor = if reanchor_receiver.has_changed().unwrap_or(false) {
+            reanchor_receiver.borrow_and_update().clone()
+        } else {
+            None
+        };
+        if let Some(request) = pending_reanchor {
             // A queued request already supplies the repair. Keep the listener from
             // requesting another while this one runs, even after a prior heal cleared suspect.
             reanchor_signals.begin_recompute();
