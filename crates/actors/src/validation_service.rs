@@ -845,7 +845,10 @@ impl ValidationService {
                 _ = pipeline_log_interval.tick() => {
                     if let Some((stalled_for, stage)) = coordinator
                         .vdf_scheduler
-                        .abort_stalled_current(vdf_task_progress_timeout(&self.inner.config))
+                        .abort_stalled_current(
+                            vdf_task_progress_timeout(&self.inner.config),
+                            &self.inner.service_senders.vdf_reanchor_signals,
+                        )
                     {
                         // Watchdog firing means a VDF task made no progress for
                         // `progress_timeout_secs` (default 15s). VDF difficulty is calibrated
@@ -1270,7 +1273,13 @@ impl ValidationServiceInner {
             vdf_ff
                 .send_validated_batch(
                     batch_start_step_number,
+                    if batch_start_index == 0 {
+                        vdf_info.prev_output
+                    } else {
+                        vdf_info.steps[batch_start_index - 1]
+                    },
                     batch_steps,
+                    vdf_info.seed,
                     progress_timeout,
                     captured_generation,
                 )
@@ -1661,9 +1670,16 @@ mod tests {
         .expect("valid prefix should be accepted");
 
         let captured = tx.current_generation();
-        tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1), captured)
-            .await
-            .expect("validated prefix should fast-forward");
+        tx.send_validated_batch(
+            1,
+            vdf_info.prev_output,
+            &vdf_info.steps.0[..1],
+            H256::zero(),
+            Duration::from_secs(1),
+            captured,
+        )
+        .await
+        .expect("validated prefix should fast-forward");
         let (ff_step, _span) = rx
             .recv()
             .await

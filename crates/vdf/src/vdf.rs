@@ -1,10 +1,14 @@
 use crate::metrics;
-use crate::state::AtomicVdfState;
-use crate::vdf_utils::{ReanchorReceiver, ReanchorRequest, ReanchorSignals};
+use crate::state::{AtomicVdfState, VdfState};
+use crate::vdf_utils::{
+    ReanchorReceiver, ReanchorRequest, ReanchorSignals, canonical_reset_seed, tip_child_reset_seed,
+};
 use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::{BlockProvider, CanonicalVdfSnapshot};
 use irys_types::{H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed};
+use nodit::interval::ii;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
@@ -12,10 +16,6 @@ use tracing::{debug, error, info, warn};
 
 const PAUSED_VDF_LOOP_SLEEP: Duration = Duration::from_millis(200);
 const PAUSED_SYNC_FAST_FORWARD_SLEEP: Duration = Duration::from_millis(10);
-/// Minimum gap between repeated reset-boundary-gate warnings. While parked the loop wakes
-/// every `PAUSED_VDF_LOOP_SLEEP` (200ms), so the warning is rate-limited to avoid ~5/sec
-/// log spam during an expected multi-block park; the first occurrence still logs immediately.
-const BOUNDARY_GATE_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// Minimum gap between repeated "VDF paused" lines. The parked loop wakes every
 /// 10-200ms, so an unthrottled line is 5-100 per second — and a non-mining node
 /// whose free-run the startup benchmark disabled stays parked for its whole
@@ -84,18 +84,19 @@ pub fn run_vdf<B: BlockProvider>(
     shutdown_token: CancellationToken,
 ) {
     let _span = tracing::info_span!("vdf_loop").entered();
+    // Fallback reset seed for a boundary the latest snapshot cannot decide (below the
+    // confirmed step, or before the first snapshot read).
     let mut next_reset_seed = initial_reset_seed;
-    // Step number of the deepest block confirmed past the migration threshold
-    // (`block_migration_depth`), as reported by the canonical snapshot. The reset-boundary
-    // gate compares the upcoming boundary against THIS step, not the canonical tip's, so
-    // the loop never applies a reset seed pinned by a still-forkable block — neither a
-    // 0-confirmation fork-loser seed (issue #1447) nor a seed re-pinned by a reorg.
-    // Because it tracks the confirmed chain (which only advances as blocks migrate), it
-    // is also reorg- and startup-safe with no per-seed bookkeeping.
-    // Extract both the confirmed canonical step and the shared mining-enable
-    // flag under a single read guard. The flag is the SSOT `Arc<AtomicBool>`
-    // owned by `VdfState`; cloning the `Arc` once here lets the loop gate on it
-    // lock-free thereafter.
+    // Latest canonical snapshot. It decides the reset seed of each boundary the loop folds
+    // (`canonical_reset_seed`), and the loop checks the seeds it already folded above the
+    // confirmed step against it. Free-run never waits for a block: a boundary above the tip
+    // folds the seed a child of the tip would carry, and a later block or reorg that
+    // disagrees costs a recompute of the steps after that boundary, never a halt.
+    // See `design/docs/vdf-reset-seed-fork-handling.md`.
+    let mut canonical: Option<CanonicalVdfSnapshot> = None;
+    // Extract the canonical step and the shared mining-enable flag under a single read
+    // guard. The flag is the SSOT `Arc<AtomicBool>` owned by `VdfState`; cloning the `Arc`
+    // once here lets the loop gate on it lock-free thereafter.
     let (mut canonical_global_step_number, is_mining_enabled) = match vdf_state.read() {
         Ok(guard) => (guard.canonical_step(), guard.mining_flag()),
         Err(_) => {
@@ -106,9 +107,6 @@ pub fn run_vdf<B: BlockProvider>(
             return;
         }
     };
-    // Until the first canonical snapshot read, treat the confirmed step as the canonical
-    // step (they coincide at startup); the snapshot overwrites it on the first iteration.
-    let mut confirmed_global_step_number = canonical_global_step_number;
 
     let mut hash: H256 = current_vdf_hash;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
@@ -119,11 +117,15 @@ pub fn run_vdf<B: BlockProvider>(
         global_step_number
     );
     let vdf_reset_frequency = config.reset_frequency as u64;
-    // Timestamp of the last reset-boundary-gate warning, for rate-limiting (see
-    // `BOUNDARY_GATE_WARN_INTERVAL`). Reset when the loop pauses with mining disabled, so a
-    // gate appearing after mining resumes warns immediately.
-    let mut last_boundary_gate_warning: Option<Instant> = None;
     let mut last_paused_log: Option<Instant> = None;
+    // Highest fast-forward step refused for not continuing the buffered lineage. The
+    // loop computes up to it on its own lineage even while mining is paused: a node that
+    // only advances by fast-forward would otherwise stop, and the validation waiting for
+    // that step would read the frozen counter as a dead VDF thread.
+    let mut catch_up_to_step: u64 = 0;
+    // A rewrite cannot install future steps until its buffered lineage is complete.
+    // Validation waits for the counter after each block, bounding this to one block.
+    let mut pending_fast_forward = VecDeque::new();
 
     loop {
         if shutdown_token.is_cancelled() {
@@ -135,10 +137,17 @@ pub fn run_vdf<B: BlockProvider>(
         }
 
         // Latest-value re-anchor: rewrite buffer values, leave counter forward.
-        if reanchor_receiver.has_changed().unwrap_or(false)
-            && let Some(request) = reanchor_receiver.borrow_and_update().clone()
-        {
-            // Re-mark suspect: a prior heal may have cleared the flag mid-queue.
+        // Clone the request out first: the watch borrow holds the channel's read lock, and
+        // a block-tree send would block on it for the whole repair.
+        let pending_reanchor = if reanchor_receiver.has_changed().unwrap_or(false) {
+            reanchor_receiver.borrow_and_update().clone()
+        } else {
+            None
+        };
+        if let Some(request) = pending_reanchor {
+            // A queued request already supplies the repair. Keep the listener from
+            // requesting another while this one runs, even after a prior heal cleared suspect.
+            reanchor_signals.begin_recompute();
             reanchor_signals.mark_buffer_suspect();
             match apply_reanchor(
                 request,
@@ -147,6 +156,14 @@ pub fn run_vdf<B: BlockProvider>(
                 global_step_number,
                 &mut checkpoints,
                 &shutdown_token,
+                &mut || {
+                    drain_during_rewrite(
+                        &mut fast_forward_receiver,
+                        &mut pending_fast_forward,
+                        global_step_number,
+                        &reanchor_signals,
+                    )
+                },
             ) {
                 ReanchorOutcome::Healed {
                     new_hash,
@@ -154,6 +171,7 @@ pub fn run_vdf<B: BlockProvider>(
                 } => {
                     // Bump generation + clear suspect; stale-stamped FF steps drop.
                     reanchor_signals.record_heal_applied();
+                    reanchor_signals.finish_recompute(false);
                     hash = new_hash;
                     next_reset_seed = new_next_seed;
                     info!(
@@ -163,25 +181,29 @@ pub fn run_vdf<B: BlockProvider>(
                     // Notify miners: step numbers unchanged but seeds were healed.
                     broadcast_mining_service.broadcast_reanchored();
                 }
-                // Buffer untouched; the suspect flag stays set, so the
-                // block-tree gate re-sends a fresh request from the next
-                // canonical tip (no broadcast — miners keep their rotation).
-                // Free-run remains paused while suspect so live_step cannot
-                // race further past the second-boundary skip condition.
+                // Buffer untouched; keep mining paused until a usable request heals it.
+                // Changed tip or live-step inputs allow another retry.
                 ReanchorOutcome::Skipped => {
+                    reanchor_signals.finish_recompute(false);
                     metrics::record_reanchor_skipped();
                     warn!(
                         vdf.global_step_number = global_step_number,
-                        "VDF re-anchor skipped; buffer remains suspect until a fresher tip heals"
+                        "VDF re-anchor skipped; buffer remains suspect pending a usable request"
                     );
                 }
-                ReanchorOutcome::PoisonedLock => return,
+                ReanchorOutcome::PoisonedLock => {
+                    reanchor_signals.finish_recompute(false);
+                    return;
+                }
             }
             continue;
         }
 
         // check for VDF fast forward step
-        while let Ok(traced_ff_step) = fast_forward_receiver.try_recv() {
+        while let Some(traced_ff_step) = pending_fast_forward
+            .pop_front()
+            .or_else(|| fast_forward_receiver.try_recv().ok())
+        {
             let (proposed_ff_step, _entered) = traced_ff_step.into_inner();
             // Drop steps validated against a pre-heal buffer.
             if proposed_ff_step.generation < reanchor_signals.generation() {
@@ -192,6 +214,45 @@ pub fn run_vdf<B: BlockProvider>(
                 );
                 continue;
             }
+            // A step past the next one is a gap: the steps before it were refused below,
+            // or have not arrived yet. Either way its validation waits for the counter to
+            // get there, so compute up to it locally rather than wait for a fast-forward
+            // step that may never come.
+            if proposed_ff_step.global_step_number > global_step_number + 1 {
+                debug!(
+                    vdf.ff_step = proposed_ff_step.global_step_number,
+                    vdf.global_step_number = global_step_number,
+                    "Fast-forward step is past the next step; computing up to it locally"
+                );
+                catch_up_to_step = catch_up_to_step.max(proposed_ff_step.global_step_number);
+                continue;
+            }
+            // Store a step only if it continues the buffered lineage. A block on another
+            // lineage (another fork, or one this buffer left by folding a stale reset
+            // seed) must not join it: the validation fast paths rely on every buffered
+            // step being the VDF of the one before it. If the buffer is the stale side,
+            // the reset-seed check below rewrites it in this same iteration.
+            if proposed_ff_step.global_step_number == global_step_number + 1 {
+                let continues_buffer = match vdf_state.read() {
+                    Ok(guard) => !matches!(
+                        guard.get_steps(ii(global_step_number, global_step_number)),
+                        Ok(buffered) if buffered.0[0] != proposed_ff_step.predecessor
+                    ),
+                    Err(_) => {
+                        error!("VDF state read lock poisoned; exiting VDF thread");
+                        return;
+                    }
+                };
+                if !continues_buffer {
+                    warn!(
+                        vdf.ff_step = proposed_ff_step.global_step_number,
+                        "Refusing fast-forward step: its predecessor is not the buffered step (another VDF lineage)"
+                    );
+                    metrics::record_fast_forward_lineage_refused();
+                    catch_up_to_step = catch_up_to_step.max(proposed_ff_step.global_step_number);
+                    continue;
+                }
+            }
             // if the step number is ahead of local nodes vdf steps
             if global_step_number < proposed_ff_step.global_step_number {
                 debug!(
@@ -199,40 +260,53 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number, proposed_ff_step.step
                 );
 
-                // FF path is not gated by is_reset_boundary_blocked (replays
-                // validated steps only). Per-step reset seed, not tip next_seed.
-                if let Some(CanonicalVdfSnapshot {
-                    vdf_info,
-                    confirmed_global_step_number: _,
-                    reset_seed_for_step,
-                }) = block_provider
+                // FF replays validated steps only. Per-step reset seed, not tip next_seed.
+                if let Some(snapshot) = block_provider
                     .canonical_vdf_snapshot(proposed_ff_step.global_step_number.saturating_sub(1))
                 {
-                    next_reset_seed = reset_seed_for_step;
-                    canonical_global_step_number = vdf_info.global_step_number;
+                    next_reset_seed = snapshot.reset_seed_for_step;
+                    canonical_global_step_number = snapshot.vdf_info.global_step_number;
+                    canonical = Some(snapshot);
                 }
 
+                let ff_step_number = proposed_ff_step.global_step_number;
+                let fold_seed = reset_seed_to_fold(
+                    canonical.as_ref(),
+                    next_reset_seed,
+                    ff_step_number,
+                    vdf_reset_frequency,
+                );
+                // The block folded its own seed at the boundary before this step (it
+                // computed the step), so that boundary records the block's seed even if
+                // the block is not canonical: the loop's reset-seed check then finds it.
+                // The loop folds the canonical seed at this step if it is a boundary.
+                let reset_seeds = [
+                    (ff_step_number - 1, proposed_ff_step.reset_seed),
+                    (ff_step_number, fold_seed),
+                ];
                 let prev_step = global_step_number;
                 let Some(returned) = store_step(
                     proposed_ff_step.step,
                     &vdf_state,
-                    proposed_ff_step.global_step_number,
+                    ff_step_number,
                     canonical_global_step_number,
+                    &reset_seeds,
+                    vdf_reset_frequency,
                 ) else {
                     error!(
-                        vdf.proposed_step = proposed_ff_step.global_step_number,
+                        vdf.proposed_step = ff_step_number,
                         "VDF thread exiting: store_step failed during fast-forward (lock poisoned)"
                     );
                     return;
                 };
                 if returned == prev_step {
-                    // Gap rejected — leave hash and global_step_number
-                    // untouched so the VDF state stays consistent. Normal
-                    // stepping will close the gap.
+                    // Not stored (gaps are filtered above, so this is not expected) —
+                    // leave hash and global_step_number untouched so the VDF state
+                    // stays consistent.
                     warn!(
                         prev = prev_step,
-                        proposed = proposed_ff_step.global_step_number,
-                        "Fast-forward step had a gap; VDF will catch up via normal stepping"
+                        proposed = ff_step_number,
+                        "Fast-forward step was not stored"
                     );
                     continue;
                 }
@@ -240,12 +314,7 @@ pub fn run_vdf<B: BlockProvider>(
                 hash = proposed_ff_step.step;
                 chain_sync_state.record_vdf_step(global_step_number);
                 metrics::record_vdf_global_step(global_step_number);
-                hash = process_reset(
-                    global_step_number,
-                    hash,
-                    vdf_reset_frequency,
-                    next_reset_seed,
-                );
+                hash = process_reset(global_step_number, hash, vdf_reset_frequency, fold_seed);
             } else {
                 debug!(
                     "Fastforward Step {} is not ahead of {}",
@@ -254,72 +323,148 @@ pub fn run_vdf<B: BlockProvider>(
             }
         }
 
-        if let Some(CanonicalVdfSnapshot {
-            vdf_info,
-            confirmed_global_step_number: confirmed_step,
-            reset_seed_for_step,
-        }) = block_provider.canonical_vdf_snapshot(global_step_number)
-        {
-            next_reset_seed = reset_seed_for_step;
-            canonical_global_step_number = vdf_info.global_step_number;
-            confirmed_global_step_number = confirmed_step;
+        if let Some(snapshot) = block_provider.canonical_vdf_snapshot(global_step_number) {
+            next_reset_seed = snapshot.reset_seed_for_step;
+            canonical_global_step_number = snapshot.vdf_info.global_step_number;
             debug!(
                 "Canonical global step number: {}, next reset seed: {:?}, prev output: {:?}, confirmed step: {}, global_step: {:?}",
                 canonical_global_step_number,
                 next_reset_seed,
-                vdf_info.prev_output,
-                confirmed_global_step_number,
+                snapshot.vdf_info.prev_output,
+                snapshot.confirmed_global_step_number,
                 global_step_number
             );
+            canonical = Some(snapshot);
         }
-
-        let is_too_far_ahead = is_reset_boundary_blocked(
-            global_step_number + 1,
-            vdf_reset_frequency,
-            confirmed_global_step_number,
-        );
 
         // Pause free-run while suspect; FF of validated steps still runs above.
         let buffer_suspect = reanchor_signals.is_buffer_suspect();
 
-        if !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed)
+        // Check the reset seeds folded above the confirmed step against the canonical
+        // chain. A reorg, or a block that lands after free-run guessed past the tip, can
+        // change them; the steps after the first changed boundary are then rewritten in
+        // place. Skipped while a block-tree re-anchor is pending: it rewrites the buffer.
+        if !buffer_suspect && let Some(snapshot) = canonical.as_ref() {
+            let changed = match vdf_state.read() {
+                Ok(guard) => {
+                    // A wrong fold can fall below the seed-check window as blocks confirm.
+                    if confirmed_output_mismatch(&guard, snapshot) {
+                        reanchor_signals.mark_buffer_suspect();
+                        continue;
+                    }
+                    first_non_canonical_reset_seed(
+                        &guard,
+                        snapshot,
+                        global_step_number,
+                        vdf_reset_frequency,
+                        is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                    .is_some()
+                }
+                Err(_) => {
+                    error!("VDF state read lock poisoned; exiting VDF thread");
+                    return;
+                }
+            };
+            if changed {
+                // Re-read the chain with the canonical blocks' steps, so the rewrite can
+                // copy what they hold and recompute only free-run steps past the tip. The
+                // boundary is decided again on this view: the chain may have moved.
+                let view = block_provider
+                    .canonical_vdf_snapshot_with_steps(global_step_number)
+                    .unwrap_or_else(|| snapshot.clone());
+                let boundary = match vdf_state.read() {
+                    Ok(guard) => {
+                        if confirmed_output_mismatch(&guard, &view) {
+                            reanchor_signals.mark_buffer_suspect();
+                            continue;
+                        }
+                        first_non_canonical_reset_seed(
+                            &guard,
+                            &view,
+                            global_step_number,
+                            vdf_reset_frequency,
+                            is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                    }
+                    Err(_) => {
+                        error!("VDF state read lock poisoned; exiting VDF thread");
+                        return;
+                    }
+                };
+                next_reset_seed = view.reset_seed_for_step;
+                canonical_global_step_number = view.vdf_info.global_step_number;
+                canonical = Some(view);
+                if let (Some(boundary), Some(view)) = (boundary, canonical.as_ref()) {
+                    // The counter stops for the whole rewrite; validation's waits must
+                    // not read that as a dead VDF thread.
+                    reanchor_signals.begin_recompute();
+                    match rewrite_after_reset_seed_change(
+                        boundary,
+                        view,
+                        next_reset_seed,
+                        config,
+                        &vdf_state,
+                        global_step_number,
+                        &mut checkpoints,
+                        &shutdown_token,
+                        &mut || {
+                            drain_during_rewrite(
+                                &mut fast_forward_receiver,
+                                &mut pending_fast_forward,
+                                global_step_number,
+                                &reanchor_signals,
+                            )
+                        },
+                    ) {
+                        ReseedOutcome::Rewritten {
+                            new_hash,
+                            rewrote_steps,
+                        } => {
+                            hash = new_hash;
+                            // Same contract as a block-tree re-anchor: buffered values
+                            // changed under unchanged step numbers.
+                            reanchor_signals.finish_recompute(rewrote_steps);
+                            if rewrote_steps {
+                                broadcast_mining_service.broadcast_reanchored();
+                            }
+                            continue;
+                        }
+                        ReseedOutcome::LineageMismatch => {
+                            // The buffer left the canonical lineage below the boundary,
+                            // where this check cannot see. Hand it to the block-tree
+                            // re-anchor, which rewrites the buffer from the canonical
+                            // blocks; the suspect flag makes it send a request.
+                            reanchor_signals.finish_recompute(false);
+                            reanchor_signals.mark_buffer_suspect();
+                            continue;
+                        }
+                        // Fall through: on shutdown the next iteration exits; otherwise
+                        // re-detecting at once would spin with the counter frozen.
+                        ReseedOutcome::Aborted => reanchor_signals.finish_recompute(false),
+                        ReseedOutcome::PoisonedLock => {
+                            reanchor_signals.finish_recompute(false);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        let catching_up = global_step_number < catch_up_to_step;
+        if (!is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed) && !catching_up)
             || buffer_suspect
-            || is_too_far_ahead
         {
             if buffer_suspect {
                 debug!(
                     vdf.global_step_number = global_step_number,
                     "VDF free-run paused: seed buffer suspect pending re-anchor heal"
                 );
-            } else if is_too_far_ahead {
-                // Rate-limit: an expected multi-block park would otherwise log every 200ms.
-                let now = Instant::now();
-                let throttled = last_boundary_gate_warning
-                    .is_some_and(|last| now.duration_since(last) < BOUNDARY_GATE_WARN_INTERVAL);
-                if throttled {
-                    debug!(
-                        "VDF still gated at reset boundary: next step {} (canonical {}, confirmed {})",
-                        global_step_number + 1,
-                        canonical_global_step_number,
-                        confirmed_global_step_number
-                    );
-                } else {
-                    warn!(
-                        "VDF gated at reset boundary: next step {} (canonical {}, confirmed {}); waiting",
-                        global_step_number + 1,
-                        canonical_global_step_number,
-                        confirmed_global_step_number
-                    );
-                    last_boundary_gate_warning = Some(now);
-                }
-            } else {
-                last_boundary_gate_warning = None;
             }
             // During sync we pause local VDF mining, but trusted-peer catch-up
             // still depends on this loop consuming fast-forward steps promptly.
             // A 200ms sleep here limits that path to ~5 wakeups/sec.
-            let pause_duration = if !is_too_far_ahead
-                && !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed)
+            let pause_duration = if !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed)
                 && chain_sync_state.is_syncing()
             {
                 PAUSED_SYNC_FAST_FORWARD_SLEEP
@@ -366,11 +511,20 @@ pub fn run_vdf<B: BlockProvider>(
             std::thread::sleep(rest);
         }
 
+        let new_step_number = global_step_number + 1;
+        let fold_seed = reset_seed_to_fold(
+            canonical.as_ref(),
+            next_reset_seed,
+            new_step_number,
+            vdf_reset_frequency,
+        );
         let Some(returned) = store_step(
             hash,
             &vdf_state,
-            global_step_number + 1,
+            new_step_number,
             canonical_global_step_number,
+            &[(new_step_number, fold_seed)],
+            vdf_reset_frequency,
         ) else {
             error!(
                 vdf.global_step_number = global_step_number,
@@ -383,20 +537,302 @@ pub fn run_vdf<B: BlockProvider>(
         metrics::record_vdf_global_step(global_step_number);
         info!("Seed created {} step number {}", hash, global_step_number);
 
-        broadcast_mining_service.broadcast(
-            Seed(hash),
-            H256List(checkpoints.clone()), // clone: checkpoints reused across loop iterations
-            global_step_number,
-        );
+        // Catch-up steps computed while mining is paused only serve validation's wait for
+        // the counter; miners get steps only while mining is on.
+        if is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            broadcast_mining_service.broadcast(
+                Seed(hash),
+                H256List(checkpoints.clone()), // clone: checkpoints reused across loop iterations
+                global_step_number,
+            );
+        }
 
-        hash = process_reset(
-            global_step_number,
-            hash,
-            vdf_reset_frequency,
-            next_reset_seed,
-        );
+        hash = process_reset(global_step_number, hash, vdf_reset_frequency, fold_seed);
     }
     debug!(vdf.global_step_number = ?global_step_number, "VDF thread stopped");
+}
+
+/// The reset seed to fold at `boundary` when the loop's live step is `boundary`: the
+/// canonical one from `canonical`, else `fallback` (the snapshot's per-step seed).
+fn reset_seed_to_fold(
+    canonical: Option<&CanonicalVdfSnapshot>,
+    fallback: H256,
+    boundary: u64,
+    reset_frequency: u64,
+) -> H256 {
+    canonical
+        .and_then(|snapshot| canonical_reset_seed(snapshot, boundary, boundary, reset_frequency))
+        .unwrap_or(fallback)
+}
+
+fn confirmed_output_mismatch(state: &VdfState, snapshot: &CanonicalVdfSnapshot) -> bool {
+    state
+        .get_steps(ii(
+            snapshot.confirmed_global_step_number,
+            snapshot.confirmed_global_step_number,
+        ))
+        .is_ok_and(|steps| steps.0[0] != snapshot.confirmed_output)
+}
+
+/// The lowest reset boundary from the confirmed step up to `live_step` whose recorded seed
+/// is missing or differs from the canonical seed in `snapshot`. Only boundaries the buffer
+/// still holds are checked, since a recompute starts from the buffered step at the boundary.
+fn first_non_canonical_reset_seed(
+    state: &VdfState,
+    snapshot: &CanonicalVdfSnapshot,
+    live_step: u64,
+    reset_frequency: u64,
+    mining_enabled: bool,
+) -> Option<u64> {
+    let highest = if mining_enabled {
+        live_step
+    } else {
+        // Only local mining consumes guesses beyond the canonical tip.
+        live_step.min(snapshot.vdf_info.global_step_number)
+    };
+    let lowest = snapshot
+        .confirmed_global_step_number
+        .max(state.first_buffered_step())
+        .max(1);
+    let first_boundary = lowest
+        .div_ceil(reset_frequency)
+        .saturating_mul(reset_frequency);
+    (first_boundary..=highest)
+        .step_by(usize::try_from(reset_frequency).unwrap_or(usize::MAX))
+        .find(|&boundary| {
+            canonical_reset_seed(snapshot, boundary, live_step, reset_frequency)
+                .is_some_and(|expected| state.reset_seed_at(boundary) != Some(expected))
+        })
+}
+
+/// Outcome of [`rewrite_after_reset_seed_change`].
+enum ReseedOutcome {
+    /// The tail after the boundary now follows the canonical chain. Carries the loop's new
+    /// running `hash`; `rewrote_steps` is false when only the fold at the live step changed.
+    Rewritten { new_hash: H256, rewrote_steps: bool },
+    /// Shutdown interrupted the recompute, or the boundary step was not buffered;
+    /// the buffer is untouched.
+    Aborted,
+    /// The canonical blocks hold the step at the boundary and it is not the buffered
+    /// one: the buffer diverged below the boundary. The buffer is untouched.
+    LineageMismatch,
+    /// The state lock was poisoned; the caller must exit the VDF thread.
+    PoisonedLock,
+}
+
+// Already-buffered steps are covered by this rewrite or the next canonical check.
+// Future steps must pass the normal generation, predecessor and catch-up checks later.
+fn drain_during_rewrite(
+    receiver: &mut Receiver<Traced<VdfStep>>,
+    pending: &mut VecDeque<Traced<VdfStep>>,
+    live_step: u64,
+    signals: &ReanchorSignals,
+) {
+    while let Ok(traced) = receiver.try_recv() {
+        let (step, _entered) = traced.into_inner();
+        if step.generation >= signals.generation() && step.global_step_number > live_step {
+            pending.push_back(Traced::new(step));
+        }
+    }
+}
+
+/// Rewrite the buffered steps after `boundary` to follow the canonical chain in `view`,
+/// in place. Steps the canonical blocks hold are copied from them; only steps past the
+/// canonical tip (free-run steps no block holds yet) are recomputed, from the last copied
+/// step or the buffered step at `boundary`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "loop state passed through; grouping it would only rename the fields"
+)]
+fn rewrite_after_reset_seed_change(
+    boundary: u64,
+    view: &CanonicalVdfSnapshot,
+    fallback_seed: H256,
+    config: &irys_types::VdfConfig,
+    vdf_state: &AtomicVdfState,
+    live_step: u64,
+    checkpoints: &mut [H256],
+    shutdown_token: &CancellationToken,
+    between_steps: &mut impl FnMut(),
+) -> ReseedOutcome {
+    let reset_frequency = config.reset_frequency as u64;
+    let (buffered_at_boundary, recorded) = match vdf_state.read() {
+        Ok(guard) => match guard.get_steps(ii(boundary, boundary)) {
+            Ok(steps) => (steps.0[0], guard.reset_seed_at(boundary)),
+            // `first_non_canonical_reset_seed` only returns buffered boundaries, and only
+            // this thread moves the buffer, so this is not expected.
+            Err(err) => {
+                warn!(
+                    vdf.boundary = boundary,
+                    "VDF reset-seed rewrite skipped: boundary step not buffered: {err}"
+                );
+                return ReseedOutcome::Aborted;
+            }
+        },
+        Err(_) => {
+            error!("VDF state read lock poisoned; exiting VDF thread");
+            return ReseedOutcome::PoisonedLock;
+        }
+    };
+    let seed_for = |step: u64| {
+        canonical_reset_seed(view, step, live_step, reset_frequency).unwrap_or(fallback_seed)
+    };
+
+    // A canonical step at `boundary` that differs from the buffered one means the buffer
+    // diverged below the boundary; recomputing from it would only extend the wrong lineage.
+    let canonical_at_boundary = if boundary == view.confirmed_global_step_number {
+        Some(view.confirmed_output)
+    } else {
+        canonical_block_steps(view, boundary, boundary).and_then(|steps| steps.first().copied())
+    };
+    if canonical_at_boundary.is_some_and(|output| output != buffered_at_boundary) {
+        error!(
+            vdf.boundary = boundary,
+            "VDF buffer is off the canonical lineage below a changed reset boundary; marking it suspect"
+        );
+        return ReseedOutcome::LineageMismatch;
+    }
+
+    // Copy `(boundary, min(tip, live)]` from the canonical blocks when they hold all of
+    // it (their step at `boundary` is the buffered one, checked above).
+    let copy_end = live_step.min(view.vdf_info.global_step_number);
+    let copied = (canonical_at_boundary.is_some() && boundary < copy_end)
+        .then(|| canonical_block_steps(view, boundary + 1, copy_end))
+        .flatten();
+    let (mut steps, mut reset_seeds, from_step, from_hash) = match copied {
+        Some(block_steps) => {
+            let reset_seeds: Vec<(u64, H256)> = (boundary..copy_end)
+                .filter(|step| step.is_multiple_of(reset_frequency))
+                .map(|step| (step, seed_for(step)))
+                .collect();
+            let from_hash = *block_steps.last().expect("covers boundary + 1..=copy_end");
+            (block_steps, reset_seeds, copy_end, from_hash)
+        }
+        None => (Vec::new(), Vec::new(), boundary, buffered_at_boundary),
+    };
+    warn!(
+        vdf.boundary = boundary,
+        vdf.global_step_number = live_step,
+        vdf.recorded_reset_seed = ?recorded,
+        vdf.canonical_reset_seed = ?seed_for(boundary),
+        vdf.copied_steps = steps.len(),
+        vdf.recomputed_steps = live_step - from_step,
+        "VDF folded a reset seed the canonical chain no longer has; rewriting the steps after the boundary"
+    );
+    let Some(tail) = recompute_tail(
+        config,
+        from_hash,
+        from_step,
+        live_step,
+        seed_for,
+        checkpoints,
+        shutdown_token,
+        between_steps,
+    ) else {
+        return ReseedOutcome::Aborted;
+    };
+    steps.extend(tail.steps);
+    reset_seeds.extend(tail.reset_seeds);
+    let rewrote_steps = !steps.is_empty();
+    match vdf_state.write() {
+        Ok(mut guard) => guard.rewrite_tail(boundary + 1, steps, reset_seeds),
+        Err(_) => {
+            error!("VDF state write lock poisoned; exiting VDF thread");
+            return ReseedOutcome::PoisonedLock;
+        }
+    }
+    metrics::record_reset_seed_recompute();
+    ReseedOutcome::Rewritten {
+        new_hash: tail.running_hash,
+        rewrote_steps,
+    }
+}
+
+/// The steps `[first, last]` from the unconfirmed canonical blocks in `view`, or `None`
+/// when they do not hold every one of them (or carry no steps).
+fn canonical_block_steps(view: &CanonicalVdfSnapshot, first: u64, last: u64) -> Option<Vec<H256>> {
+    let mut steps = Vec::with_capacity(usize::try_from(last - first + 1).ok()?);
+    for block in &view.unconfirmed_blocks {
+        if block.last_step < first || block.first_step > last {
+            continue;
+        }
+        let block_steps = block.steps.as_ref()?;
+        let from = first.max(block.first_step);
+        let to = last.min(block.last_step);
+        if from != first + steps.len() as u64 {
+            return None;
+        }
+        let offset = usize::try_from(from - block.first_step).ok()?;
+        let count = usize::try_from(to - from + 1).ok()?;
+        steps.extend_from_slice(block_steps.0.get(offset..offset + count)?);
+    }
+    (steps.len() as u64 == last - first + 1).then_some(steps)
+}
+
+/// Steps `(from_step, to_step]` recomputed from step `from_step`.
+struct RecomputedTail {
+    steps: Vec<H256>,
+    /// Reset seed folded at each boundary in `[from_step, to_step]`.
+    reset_seeds: Vec<(u64, H256)>,
+    /// Step `to_step` with its own reset fold applied: the hash that seeds `to_step + 1`.
+    running_hash: H256,
+}
+
+/// Recompute the steps after `from_step` up to `to_step` exactly as the main loop does
+/// (`process_reset` → salt → `vdf_sha`), folding `seed_for(b)` at each boundary `b` in
+/// `[from_step, to_step]`. `None` when shutdown interrupts it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recompute inputs and loop drain callback"
+)]
+fn recompute_tail(
+    config: &irys_types::VdfConfig,
+    from_hash: H256,
+    from_step: u64,
+    to_step: u64,
+    seed_for: impl Fn(u64) -> H256,
+    checkpoints: &mut [H256],
+    shutdown_token: &CancellationToken,
+    between_steps: &mut impl FnMut(),
+) -> Option<RecomputedTail> {
+    let reset_frequency = config.reset_frequency as u64;
+    let mut reset_seeds = Vec::new();
+    let mut fold = |step: u64, hash: H256| {
+        if step > 0 && step.is_multiple_of(reset_frequency) {
+            let seed = seed_for(step);
+            reset_seeds.push((step, seed));
+            process_reset(step, hash, reset_frequency, seed)
+        } else {
+            hash
+        }
+    };
+    let mut running = fold(from_step, from_hash);
+    let mut steps = Vec::with_capacity(usize::try_from(to_step - from_step).unwrap_or(0));
+    for step in (from_step + 1)..=to_step {
+        between_steps();
+        if shutdown_token.is_cancelled() {
+            warn!(
+                from_step,
+                to_step, step, "VDF recompute aborted by shutdown; buffer left untouched"
+            );
+            return None;
+        }
+        let salt = U256::from(step_number_to_salt_number(config, step - 1));
+        vdf_sha(
+            salt,
+            &mut running,
+            config.num_checkpoints_in_vdf_step,
+            config.num_iterations_per_checkpoint(),
+            checkpoints,
+        );
+        steps.push(running);
+        running = fold(step, running);
+    }
+    Some(RecomputedTail {
+        steps,
+        reset_seeds,
+        running_hash: running,
+    })
 }
 
 #[must_use]
@@ -442,18 +878,19 @@ enum ReanchorOutcome {
     /// `hash` (the seed feeding `live_step + 1`) and `next_reset_seed`.
     Healed { new_hash: H256, new_next_seed: H256 },
     /// The request was not applied and the buffer is untouched (unusable window,
-    /// canonical tip ahead of the live step, or the tail would cross a second,
-    /// unpinned reset boundary). Validation's fork-local recompute keeps the
-    /// node on canonical meanwhile, and the block-tree gate re-sends a fresh
-    /// request from every new canonical tip while the buffer stays suspect.
+    /// canonical tip ahead of the live step, or shutdown mid-recompute).
+    /// The buffer stays suspect and local stepping stays paused. The block tree
+    /// retries when tip or live-step inputs change; a later tip alone does not
+    /// guarantee that the request becomes usable.
     Skipped,
     /// The state write lock was poisoned; the caller must exit the VDF thread.
     PoisonedLock,
 }
 
 /// Apply a re-anchor: write canonical `[floor, c_step]`, recompute free-run
-/// tail to `live_step`. Skips if the tail would need a second unpinned boundary
-/// fold, or on shutdown mid-recompute.
+/// tail to `live_step`. Boundaries above the tip fold the seed a child of the
+/// tip would carry ([`tip_child_reset_seed`]), the same rule free-run uses; if
+/// a later block disagrees, the loop's reset-seed check recomputes again.
 #[must_use]
 fn apply_reanchor(
     request: ReanchorRequest,
@@ -462,12 +899,14 @@ fn apply_reanchor(
     live_step: u64,
     checkpoints: &mut [H256],
     shutdown_token: &CancellationToken,
+    between_steps: &mut impl FnMut(),
 ) -> ReanchorOutcome {
     let ReanchorRequest {
         mut canonical_seeds,
         c_step,
         seed,
         next_seed,
+        mut reset_seed_by_boundary,
     } = request;
     let reset_frequency = config.reset_frequency as u64;
 
@@ -485,51 +924,37 @@ fn apply_reanchor(
         );
         return ReanchorOutcome::Skipped;
     }
-    // At most one boundary fold past the tip (second is unpinned).
-    #[expect(
-        clippy::manual_checked_ops,
-        reason = "explicit != 0 guard reads clearer than checked_div here"
-    )]
-    if reset_frequency != 0 {
-        let second_boundary_after_tip = (c_step / reset_frequency)
-            .saturating_add(2)
-            .saturating_mul(reset_frequency);
-        if live_step >= second_boundary_after_tip {
-            warn!(
-                c_step,
-                live_step,
-                second_boundary_after_tip,
-                "VDF re-anchor tail would cross a second, unpinned reset boundary; skipping until a fresher canonical tip arrives"
-            );
-            return ReanchorOutcome::Skipped;
-        }
-    }
 
-    // Free-run tail: same salt → vdf_sha → boundary fold as the main loop.
-    let mut running = process_reset(c_step, tip_seed, reset_frequency, seed);
-    for step in (c_step + 1)..=live_step {
-        if shutdown_token.is_cancelled() {
-            warn!(
+    let Some(tail) = recompute_tail(
+        config,
+        tip_seed,
+        c_step,
+        live_step,
+        |boundary| {
+            tip_child_reset_seed(
                 c_step,
-                live_step, step, "VDF re-anchor aborted by shutdown; buffer left untouched"
-            );
-            return ReanchorOutcome::Skipped;
-        }
-        let salt = U256::from(step_number_to_salt_number(config, step - 1));
-        let mut step_seed = running;
-        vdf_sha(
-            salt,
-            &mut step_seed,
-            config.num_checkpoints_in_vdf_step,
-            config.num_iterations_per_checkpoint(),
-            checkpoints,
-        );
-        canonical_seeds.push_back(Seed(step_seed));
-        running = process_reset(step, step_seed, reset_frequency, next_seed);
-    }
+                seed,
+                next_seed,
+                boundary,
+                live_step,
+                reset_frequency,
+            )
+        },
+        checkpoints,
+        shutdown_token,
+        between_steps,
+    ) else {
+        return ReanchorOutcome::Skipped;
+    };
+    canonical_seeds.extend(tail.steps.into_iter().map(Seed));
+    reset_seed_by_boundary.extend(tail.reset_seeds);
 
     match vdf_state.write() {
-        Ok(mut guard) => guard.reanchor_seeds(canonical_seeds),
+        Ok(mut guard) => {
+            let canonical_step = guard.canonical_step().max(c_step);
+            guard.set_canonical_step(canonical_step);
+            guard.reanchor_seeds(canonical_seeds, reset_seed_by_boundary);
+        }
         Err(_) => {
             error!("VDF state write lock poisoned during re-anchor; exiting VDF thread");
             return ReanchorOutcome::PoisonedLock;
@@ -537,34 +962,26 @@ fn apply_reanchor(
     }
 
     ReanchorOutcome::Healed {
-        new_hash: running,
+        new_hash: tail.running_hash,
         new_next_seed: next_seed,
     }
-}
-
-/// True if free-run must not yet cross the next reset boundary.
-/// Requires the confirmed (migrated) step to have reached `B - reset_frequency`.
-/// See `design/docs/vdf-reset-seed-confirmation-gate.md`.
-#[must_use]
-pub fn is_reset_boundary_blocked(
-    next_global_step: u64,
-    reset_frequency: u64,
-    confirmed_global_step_number: u64,
-) -> bool {
-    next_global_step.is_multiple_of(reset_frequency)
-        && next_global_step > confirmed_global_step_number.saturating_add(reset_frequency)
 }
 
 /// Returns `None` if the VDF state write lock is poisoned, so the VDF loop can
 /// exit gracefully rather than re-panic on `expect`/`unwrap`. On `Some(step)`,
 /// `step` is the new global step (which may equal `new_global_step_number - 1`
 /// if a gap was detected and ignored — see `VdfState::store_step`).
+///
+/// When the step is stored, each `(step, seed)` in `reset_seeds` whose step is a reset
+/// boundary above zero is recorded as that boundary's reset seed.
 #[must_use]
 fn store_step(
     hash: H256,
     vdf_state: &AtomicVdfState,
     new_global_step_number: u64,
     canonical_global_step_number: u64,
+    reset_seeds: &[(u64, H256)],
+    reset_frequency: u64,
 ) -> Option<u64> {
     let mut vdf_guard = match vdf_state.write() {
         Ok(guard) => guard,
@@ -578,6 +995,13 @@ fn store_step(
     // VdfState owns the single step counter; store_step publishes it under
     // this write guard.
     let global_step_number = vdf_guard.store_step(Seed(hash), new_global_step_number);
+    if global_step_number == new_global_step_number {
+        for &(boundary, seed) in reset_seeds {
+            if boundary > 0 && boundary.is_multiple_of(reset_frequency) {
+                vdf_guard.record_reset_seed(boundary, seed);
+            }
+        }
+    }
     Some(global_step_number)
 }
 
@@ -587,9 +1011,11 @@ mod tests {
     use crate::state::test_helpers::mocked_vdf_service;
     use crate::state::{CancelEnum, VdfController, VdfStateReadonly, vdf_steps_are_valid};
     use crate::vdf_sha_verification;
+    use irys_types::block_provider::CanonicalBlockVdf;
     use irys_types::*;
     use nodit::interval::ii;
-    use std::sync::atomic::AtomicU8;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::{sync::Arc, time::Duration};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -624,7 +1050,9 @@ mod tests {
                 vdf_info: self.0.vdf_limiter_info.clone(),
                 // The mock holds a single block, so the tip is also the confirmed tip.
                 confirmed_global_step_number: self.0.vdf_limiter_info.global_step_number,
+                confirmed_output: self.0.vdf_limiter_info.output,
                 reset_seed_for_step: self.0.vdf_limiter_info.next_seed,
+                unconfirmed_blocks: Vec::new(),
             })
         }
     }
@@ -680,7 +1108,6 @@ mod tests {
         let config = Config::new_with_random_peer_id(node_config);
 
         let seed = H256::random();
-        let reset_seed = H256::random();
 
         init_tracing();
 
@@ -694,6 +1121,11 @@ mod tests {
         let mut mock_header = IrysBlockHeader::new_mock_header();
         // Set global step number to 2 to simulate a scenario where canonical chain progresses
         mock_header.vdf_limiter_info.global_step_number = 2;
+        // With no hash rounds, both steps before the first fold equal the initial seed.
+        mock_header.vdf_limiter_info.output = seed;
+        // The loop folds the canonical tip's seeds, so a block over its steps carries them
+        // (the mock tip's `seed` and `next_seed` are equal).
+        let reset_seed = mock_header.vdf_limiter_info.next_seed;
 
         let chain_sync_state = ChainSyncState::new(false, false);
         let shutdown_token = CancellationToken::new();
@@ -784,14 +1216,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vdf_does_not_get_too_far_ahead() {
+    async fn free_run_steps_validate_against_the_buffer() {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
         let config = Config::new_with_random_peer_id(node_config);
 
         let seed = H256::random();
-        let reset_seed = H256::random();
+        // Free-run folds the canonical tip's `next_seed` above the tip.
+        let reset_seed = MockBlockProvider::new().0.vdf_limiter_info.next_seed;
 
         init_tracing();
 
@@ -825,21 +1258,16 @@ mod tests {
             }
         });
 
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        // Free-run crosses reset boundaries without waiting for blocks.
         vdf_steps_guard
-            .wait_for_step(3, Arc::clone(&cancel), Duration::from_secs(5))
+            .wait_for_step(
+                9,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+                Duration::from_secs(5),
+            )
             .await
-            .expect("VDF should reach step 3");
-
-        // The gate must hold the loop at step 3: step 4 never arrives.
-        let gated = vdf_steps_guard
-            .wait_for_step(4, Arc::clone(&cancel), Duration::from_millis(500))
-            .await;
-        assert!(gated.is_err(), "VDF must not run past step 3");
-
+            .expect("free-run must cross several reset boundaries");
         let step_num = vdf_steps_guard.read().current_step();
-
-        assert_eq!(step_num, 3);
 
         // get last 4 steps
         let steps = vdf_steps_guard
@@ -941,7 +1369,9 @@ mod tests {
         ff_step_sender
             .send(Traced::new(VdfStep {
                 step: H256::random(),
+                predecessor: H256::zero(),
                 global_step_number: 1,
+                reset_seed: H256::zero(),
                 generation: 0,
             }))
             .await
@@ -1080,7 +1510,9 @@ mod tests {
         ff_tx
             .send(Traced::new(VdfStep {
                 step: stale_seed,
+                predecessor: H256::zero(),
                 global_step_number: 1,
+                reset_seed: H256::zero(),
                 generation: 0,
             }))
             .await
@@ -1088,7 +1520,9 @@ mod tests {
         ff_tx
             .send(Traced::new(VdfStep {
                 step: fresh_seed,
+                predecessor: H256::zero(),
                 global_step_number: 1,
+                reset_seed: H256::zero(),
                 generation: 1,
             }))
             .await
@@ -1156,7 +1590,9 @@ mod tests {
         }
 
         let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().vdf.reset_frequency = 5;
+        // No reset boundary in the buffer, so the loop's own reset-seed check has nothing
+        // to recompute and only the re-anchor requests below touch the generation.
+        node_config.consensus.get_mut().vdf.reset_frequency = 1_000;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
         let config = Config::new_with_random_peer_id(node_config);
 
@@ -1212,6 +1648,7 @@ mod tests {
             c_step: live_step,
             seed: H256::repeat_byte(0x33),
             next_seed: H256::repeat_byte(0x22),
+            reset_seed_by_boundary: Default::default(),
         };
         assert!(
             reanchor_tx.try_send(heal_request),
@@ -1235,6 +1672,7 @@ mod tests {
             c_step: skip_c_step,
             seed: H256::repeat_byte(0x33),
             next_seed: H256::repeat_byte(0x22),
+            reset_seed_by_boundary: Default::default(),
         };
         assert!(
             reanchor_tx.try_send(skip_request),
@@ -1282,7 +1720,9 @@ mod tests {
         ff_tx
             .send(Traced::new(VdfStep {
                 step: bad_ff_seed,
+                predecessor: H256::zero(),
                 global_step_number: gap_target_step,
+                reset_seed: H256::zero(),
                 generation: 0,
             }))
             .await
@@ -1351,410 +1791,940 @@ mod tests {
         );
     }
 
-    mod boundary_gate {
-        use super::super::is_reset_boundary_blocked;
-        use proptest::prelude::*;
+    /// Canonical chain view the tests drive by hand: the tip's limiter info, the confirmed
+    /// step and the unconfirmed blocks' seeds, swapped atomically so the loop never sees a
+    /// half-applied fork switch.
+    #[derive(Clone)]
+    struct ControllableBlockProvider(std::sync::Arc<std::sync::Mutex<CanonicalVdfSnapshot>>);
 
-        #[rstest::rstest]
-        // not a boundary -> never blocked
-        #[case::not_boundary(7, 4, 100, false)]
-        // boundary, confirmed chain hasn't reached the rotation point (B - rf) -> blocked
-        #[case::confirmed_behind(8, 4, 0, true)]
-        // boundary, confirmed chain only one step short -> blocked
-        #[case::confirmed_one_short(8, 4, 3, true)]
-        // boundary, confirmed chain exactly at the rotation point -> allowed
-        #[case::confirmed_reached(8, 4, 4, false)]
-        // boundary, confirmed chain well past the rotation point -> allowed
-        #[case::confirmed_deep(8, 4, 100, false)]
-        fn cases(
-            #[case] next_global_step: u64,
-            #[case] reset_frequency: u64,
-            #[case] confirmed_global_step_number: u64,
-            #[case] expected: bool,
-        ) {
-            assert_eq!(
-                is_reset_boundary_blocked(
-                    next_global_step,
-                    reset_frequency,
-                    confirmed_global_step_number,
-                ),
-                expected
-            );
-        }
-
-        proptest! {
-            #[test]
-            fn matches_spec_and_never_panics(
-                next_global_step in 0_u64..1_000_000,
-                reset_frequency in 1_u64..5_000,
-                confirmed_global_step_number in 0_u64..1_000_000,
-            ) {
-                let got = is_reset_boundary_blocked(
-                    next_global_step, reset_frequency, confirmed_global_step_number,
-                );
-                let expected = next_global_step.is_multiple_of(reset_frequency)
-                    && next_global_step > confirmed_global_step_number.saturating_add(reset_frequency);
-                prop_assert_eq!(got, expected);
-            }
-        }
-
-        /// The issue #1447 fix isolated to a single decision. At the exact fork window of
-        /// #1447 — boundary 16, whose reset seed is pinned by the rotation block at step 8,
-        /// which sits freshly at the canonical tip (0 confirmations) while the confirmed
-        /// chain still trails at step 6 — the gate's outcome flips purely on which step it is
-        /// given. The OLD rule fed the canonical tip and let the loop CROSS, consuming the
-        /// still-forkable seed (the bug; see the wedge it causes in
-        /// `issue_1447_unconfirmed_reset_seed_poisons_buffer_and_wedges_block_validation`).
-        /// THIS branch feeds the confirmed step and BLOCKS the crossing until the rotation
-        /// block is confirmed (the fix). Same predicate, different argument — that swap is
-        /// the whole change.
-        #[test]
-        fn gating_on_confirmed_step_not_canonical_tip_is_the_1447_fix() {
-            const RESET_FREQUENCY: u64 = 8;
-            const BOUNDARY: u64 = 16; // rotation block at BOUNDARY - RESET_FREQUENCY = step 8
-            const CANONICAL_TIP_STEP: u64 = 8; // rotation block freshly at the tip, 0 confirmations
-            const CONFIRMED_STEP: u64 = 6; // confirmed chain still behind the rotation point
-
-            // OLD rule (gate on the canonical tip): NOT blocked -> the loop crosses and applies
-            // the unconfirmed fork-loser seed. This is the #1447 bug.
-            assert!(
-                !is_reset_boundary_blocked(BOUNDARY, RESET_FREQUENCY, CANONICAL_TIP_STEP),
-                "old rule (gate on canonical tip) crosses the boundary on an unconfirmed seed — the #1447 bug"
-            );
-
-            // THIS branch (gate on the confirmed step): blocked -> the loop parks until the
-            // rotation block is confirmed. This is the fix.
-            assert!(
-                is_reset_boundary_blocked(BOUNDARY, RESET_FREQUENCY, CONFIRMED_STEP),
-                "confirmed-step gate parks until the seed's rotation block is confirmed — the #1447 fix"
-            );
-        }
+    /// One canonical block for [`ControllableBlockProvider`]: step range, seed, next seed.
+    #[derive(Clone, Copy)]
+    struct TestBlock {
+        first_step: u64,
+        last_step: u64,
+        seed: H256,
+        next_seed: H256,
     }
 
-    #[derive(Clone)]
-    struct ControllableBlockProvider(std::sync::Arc<std::sync::Mutex<(VDFLimiterInfo, u64)>>);
     impl ControllableBlockProvider {
-        /// The canonical tip step is held at 0 so `store_step` treats every produced step
-        /// as a normal advance; the `u64` is the confirmed-chain step the gate reads.
-        fn new(confirmed_global_step_number: u64) -> Self {
-            let mut info = IrysBlockHeader::new_mock_header().vdf_limiter_info.clone();
-            info.global_step_number = 0;
-            info.next_seed = H256::repeat_byte(0xAB);
-            Self(std::sync::Arc::new(std::sync::Mutex::new((
-                info,
+        fn new(chain: &[TestBlock], confirmed_global_step_number: u64) -> Self {
+            Self(std::sync::Arc::new(std::sync::Mutex::new(Self::snapshot(
+                chain,
                 confirmed_global_step_number,
+                &BTreeMap::new(),
             ))))
         }
-        fn set_confirmed(&self, confirmed_global_step_number: u64) {
-            self.0.lock().unwrap().1 = confirmed_global_step_number;
+
+        /// Replace the canonical chain (a reorg or a new tip). `chain` holds the blocks above
+        /// the confirmed step, oldest first; the last one is the tip.
+        fn set_chain(&self, chain: &[TestBlock], confirmed_global_step_number: u64) {
+            self.set_chain_with_steps(chain, confirmed_global_step_number, &BTreeMap::new());
         }
-        /// Atomically update the whole snapshot the gate reads: the tip's `next_seed`, the
-        /// canonical tip step (`global_step_number`), and the confirmed-chain step. One lock,
-        /// so the loop never observes a half-applied transition (e.g. the gate opening before
-        /// the intended seed is visible).
-        fn set_snapshot(
+
+        /// [`Self::set_chain`], where a block whose every step is in `steps` also carries
+        /// its steps in [`BlockProvider::canonical_vdf_snapshot_with_steps`].
+        fn set_chain_with_steps(
             &self,
-            next_seed: H256,
-            canonical_tip_step: u64,
+            chain: &[TestBlock],
             confirmed_global_step_number: u64,
+            steps: &BTreeMap<u64, H256>,
         ) {
-            let mut g = self.0.lock().unwrap();
-            g.0.next_seed = next_seed;
-            g.0.global_step_number = canonical_tip_step;
-            g.1 = confirmed_global_step_number;
+            let mut current = self.0.lock().unwrap();
+            let mut next = Self::snapshot(chain, confirmed_global_step_number, steps);
+            if confirmed_global_step_number == current.confirmed_global_step_number
+                && !steps.contains_key(&confirmed_global_step_number)
+            {
+                next.confirmed_output = current.confirmed_output;
+            }
+            *current = next;
+        }
+
+        fn snapshot(
+            chain: &[TestBlock],
+            confirmed_global_step_number: u64,
+            steps: &BTreeMap<u64, H256>,
+        ) -> CanonicalVdfSnapshot {
+            let tip = chain.last().expect("chain needs a tip");
+            let vdf_info = VDFLimiterInfo {
+                global_step_number: tip.last_step,
+                seed: tip.seed,
+                next_seed: tip.next_seed,
+                ..VDFLimiterInfo::default()
+            };
+            CanonicalVdfSnapshot {
+                vdf_info,
+                confirmed_global_step_number,
+                confirmed_output: steps
+                    .get(&confirmed_global_step_number)
+                    .copied()
+                    .unwrap_or_default(),
+                reset_seed_for_step: tip.next_seed,
+                unconfirmed_blocks: chain
+                    .iter()
+                    .map(|block| CanonicalBlockVdf {
+                        first_step: block.first_step,
+                        last_step: block.last_step,
+                        seed: block.seed,
+                        steps: (block.first_step..=block.last_step)
+                            .map(|step| steps.get(&step).copied())
+                            .collect::<Option<Vec<H256>>>()
+                            .map(H256List),
+                    })
+                    .collect(),
+            }
         }
     }
+
     impl BlockProvider for ControllableBlockProvider {
         fn canonical_vdf_snapshot(&self, _step_number: u64) -> Option<CanonicalVdfSnapshot> {
-            let g = self.0.lock().unwrap();
-            Some(CanonicalVdfSnapshot {
-                vdf_info: g.0.clone(),
-                confirmed_global_step_number: g.1,
-                // Single-block mock: tip next_seed is the only seed available.
-                reset_seed_for_step: g.0.next_seed,
-            })
+            let mut snapshot = self.0.lock().unwrap().clone();
+            for block in &mut snapshot.unconfirmed_blocks {
+                block.steps = None;
+            }
+            Some(snapshot)
+        }
+
+        fn canonical_vdf_snapshot_with_steps(
+            &self,
+            _step_number: u64,
+        ) -> Option<CanonicalVdfSnapshot> {
+            Some(self.0.lock().unwrap().clone())
         }
     }
 
-    /// Regression for issue #1447: the loop must not cross a reset boundary until the
-    /// CONFIRMED chain (block_migration_depth deep) has reached the rotation point, so it
-    /// never applies a seed pinned by a still-forkable block. With the confirmed step held
-    /// behind the rotation point the loop parks at the boundary; once it advances to the
-    /// rotation point the loop crosses.
-    ///
-    /// It also guards the inverse — no startup or post-reorg deadlock: a low confirmed step
-    /// still lets the loop cross EARLIER boundaries it is already entitled to (reaching
-    /// step 4 below), so a genesis or freshly started node is never wedged at its first
-    /// boundary.
-    ///
-    /// Deterministic via `wait_for_step` (no fixed sleeps as the assertion mechanism).
+    /// A running `run_vdf` loop driven by a [`ControllableBlockProvider`].
+    struct LoopUnderTest {
+        provider: ControllableBlockProvider,
+        guard: VdfStateReadonly,
+        signals: crate::vdf_utils::ReanchorSignals,
+        shutdown: CancellationToken,
+        handle: Option<std::thread::JoinHandle<()>>,
+        fast_forward: mpsc::Sender<Traced<VdfStep>>,
+        reanchor: crate::vdf_utils::VdfReanchorSender,
+        mining_enabled: Arc<AtomicBool>,
+    }
+
+    impl LoopUnderTest {
+        fn start(config: &Config, chain: &[TestBlock], confirmed_global_step_number: u64) -> Self {
+            Self::start_with_mining(config, chain, confirmed_global_step_number, true)
+        }
+
+        fn start_with_mining(
+            config: &Config,
+            chain: &[TestBlock],
+            confirmed_global_step_number: u64,
+            mining: bool,
+        ) -> Self {
+            let provider = ControllableBlockProvider::new(chain, confirmed_global_step_number);
+            let (fast_forward, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+            let (reanchor, reanchor_rx) = crate::reanchor_channel();
+            let vdf_state = mocked_vdf_service(config);
+            let guard = VdfStateReadonly::new(vdf_state.clone());
+            let mining_enabled = vdf_state.read().unwrap().mining_flag();
+            if mining {
+                enable_mining(&vdf_state);
+            }
+            let signals = crate::vdf_utils::ReanchorSignals::new();
+            let shutdown = CancellationToken::new();
+            let initial_seed = H256::repeat_byte(0xAA);
+            let mut initial_view = provider.0.lock().unwrap();
+            initial_view.confirmed_output = recompute_tail(
+                &config.vdf,
+                initial_seed,
+                0,
+                confirmed_global_step_number,
+                |b| {
+                    canonical_reset_seed(
+                        &initial_view,
+                        b,
+                        confirmed_global_step_number,
+                        config.vdf.reset_frequency as u64,
+                    )
+                    .unwrap_or(initial_view.reset_seed_for_step)
+                },
+                &mut vec![H256::zero(); config.vdf.num_checkpoints_in_vdf_step],
+                &shutdown,
+                &mut || {},
+            )
+            .unwrap()
+            .steps
+            .last()
+            .copied()
+            .unwrap_or(initial_seed);
+            drop(initial_view);
+            let handle = std::thread::spawn({
+                let config = config.clone();
+                let provider = provider.clone();
+                let shutdown = shutdown.clone();
+                let signals = signals.clone();
+                move || {
+                    run_vdf(
+                        &config.vdf,
+                        0,
+                        initial_seed,
+                        initial_seed,
+                        ff_rx,
+                        reanchor_rx,
+                        signals,
+                        MockMining,
+                        vdf_state,
+                        provider,
+                        ChainSyncState::new(false, false),
+                        shutdown,
+                    )
+                }
+            });
+            Self {
+                provider,
+                guard,
+                signals,
+                shutdown,
+                handle: Some(handle),
+                fast_forward,
+                reanchor,
+                mining_enabled,
+            }
+        }
+
+        async fn wait_for_step(&self, step: u64) {
+            let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+            self.guard
+                .wait_for_step(step, cancel, Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|err| panic!("loop must reach step {step}: {err}"));
+        }
+
+        /// Wait until the recorded reset seed of `boundary` is `seed`.
+        async fn wait_for_reset_seed(&self, boundary: u64, seed: H256) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self.guard.read().reset_seed_at(boundary) != Some(seed) {
+                assert!(
+                    Instant::now() < deadline,
+                    "reset seed of boundary {boundary} never became {seed:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        fn steps(&self, from: u64, to: u64) -> H256List {
+            self.guard
+                .get_steps(ii(from, to))
+                .expect("range must be buffered")
+        }
+
+        fn stop(mut self) -> VdfStateReadonly {
+            self.shutdown.cancel();
+            self.handle.take().unwrap().join().unwrap();
+            self.guard.clone()
+        }
+    }
+
+    impl Drop for LoopUnderTest {
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+            if let Some(handle) = self.handle.take() {
+                // A worker panic must not cause a second panic during test unwinding.
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn fork_test_config(reset_frequency: usize) -> Config {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = reset_frequency;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 25 * 5;
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    /// The block validation would see for buffered steps `[first, last]` of `guard`, with
+    /// `seed` as the block's reset seed.
+    fn block_from_buffer(
+        guard: &VdfStateReadonly,
+        first: u64,
+        last: u64,
+        seed: H256,
+    ) -> VDFLimiterInfo {
+        let prev_output = guard.get_step(first - 1).expect("predecessor buffered");
+        let steps = guard.get_steps(ii(first, last)).expect("steps buffered");
+        VDFLimiterInfo {
+            global_step_number: last,
+            output: *steps.0.last().unwrap(),
+            prev_output,
+            steps,
+            seed,
+            ..VDFLimiterInfo::default()
+        }
+    }
+
+    /// Slow chain: the canonical tip does not move for many reset windows. The loop keeps
+    /// stepping across every boundary on the seed a child of the tip would carry — it never
+    /// waits for a block.
     #[tokio::test]
-    async fn parks_at_boundary_until_reset_seed_is_confirmed() {
+    async fn free_run_keeps_stepping_while_tip_is_stalled() {
+        let config = fork_test_config(4);
+        let tip = TestBlock {
+            first_step: 1,
+            last_step: 1,
+            seed: H256::repeat_byte(0x01),
+            next_seed: H256::repeat_byte(0x02),
+        };
+        let vdf = LoopUnderTest::start(&config, &[tip], 1);
+
+        // Five reset windows past the tip, with no block arriving.
+        vdf.wait_for_step(21).await;
+        let guard = vdf.stop();
+        assert_ne!(guard.get_step(1).unwrap(), guard.get_step(2).unwrap());
+        for boundary in [4, 8, 12, 16, 20] {
+            assert_eq!(
+                guard.read().reset_seed_at(boundary),
+                Some(tip.next_seed),
+                "boundary {boundary} above the tip folds the tip's next_seed"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_drain_keeps_only_future_steps_from_current_generation() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let signals = ReanchorSignals::new();
+        signals.record_heal_applied();
+        for (global_step_number, generation) in [(9, 1), (10, 1), (11, 0), (11, 1)] {
+            sender
+                .try_send(Traced::new(VdfStep {
+                    global_step_number,
+                    generation,
+                    step: H256::repeat_byte(1),
+                    predecessor: H256::repeat_byte(2),
+                    reset_seed: H256::repeat_byte(3),
+                }))
+                .unwrap();
+        }
+        let mut pending = VecDeque::new();
+        drain_during_rewrite(&mut receiver, &mut pending, 10, &signals);
+        assert!(receiver.is_empty());
+        assert_eq!(pending.len(), 1);
+        let (step, _) = pending.pop_front().unwrap().into_inner();
+        assert_eq!(step.global_step_number, 11);
+        assert_eq!(step.generation, 1);
+        assert_eq!(step.predecessor, H256::repeat_byte(2));
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn tail_rewrite_drains_more_fast_forward_steps_than_channel_capacity(
+        #[case] reanchor: bool,
+    ) {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 4;
-        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        // Long enough to keep the rewrite active while several full channel loads arrive.
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 25 * 20_000;
         let config = Config::new_with_random_peer_id(node_config);
-
-        let initial_seed = H256::repeat_byte(0xAA);
-
-        // Confirmed chain starts at step 0: boundary 4 is allowed (4 > 0 + 4 is false) but
-        // boundary 8 is gated (8 > 0 + 4), so the loop crosses 4 and parks at 8 (step 7).
-        let provider = ControllableBlockProvider::new(0);
-
-        let (_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let vdf_state = mocked_vdf_service(&config);
-        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-        enable_mining(&vdf_state);
-        let chain_sync_state = ChainSyncState::new(false, false);
-        let shutdown_token = CancellationToken::new();
-
-        let handle = std::thread::spawn({
-            let config = config.clone();
-            let provider = provider.clone();
-            let shutdown_token = shutdown_token.clone();
-            let vdf_state = vdf_state.clone();
-            move || {
-                run_vdf(
-                    &config.vdf,
-                    0,
-                    initial_seed,
-                    initial_seed,
-                    ff_rx,
-                    crate::reanchor_channel().1,
-                    crate::vdf_utils::ReanchorSignals::new(),
-                    MockMining,
-                    vdf_state,
-                    provider,
-                    chain_sync_state,
-                    shutdown_token,
-                )
-            }
-        });
-
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-
-        // Crossing boundary 4 (reaching step 4) proves a low confirmed step does NOT wedge
-        // earlier boundaries — the no-startup-deadlock invariant. The loop then parks at
-        // boundary 8 (confirmed chain has not reached the rotation point), settling at 7.
-        vdf_steps_guard
-            .wait_for_step(4, Arc::clone(&cancel), Duration::from_secs(5))
-            .await
-            .expect("a low confirmed step must still allow the first boundary (no deadlock)");
-        vdf_steps_guard
-            .wait_for_step(7, Arc::clone(&cancel), Duration::from_secs(5))
-            .await
-            .expect("should reach step 7, one short of boundary 8");
-
-        // Must stay parked at boundary 8 while the confirmed chain is behind the rotation
-        // point: step 8 never arrives, so wait_for_step bails with a stall error.
-        let parked = vdf_steps_guard
-            .wait_for_step(8, Arc::clone(&cancel), Duration::from_millis(500))
-            .await;
-        assert!(
-            parked.is_err(),
-            "must park at the boundary while the seed's rotation block is unconfirmed"
-        );
-        assert_eq!(vdf_steps_guard.read().current_step(), 7);
-
-        // Advance the confirmed chain to the rotation point (step 4): now 8 > 4 + 4 is false.
-        provider.set_confirmed(4);
-
-        // Now it crosses boundary 8 (reaches step 8; it then parks at boundary 12 because
-        // the confirmed chain stays at 4 — expected, not asserted).
-        vdf_steps_guard
-            .wait_for_step(8, Arc::clone(&cancel), Duration::from_secs(5))
-            .await
-            .expect("should cross the boundary once the rotation block is confirmed");
-
-        shutdown_token.cancel();
-        handle.join().unwrap();
-    }
-
-    /// Spin up a real `run_vdf` loop and drive it (deterministically, via `wait_for_step`)
-    /// until it parks one step short of reset boundary 16, with the canonical tip already at
-    /// the boundary's rotation point (step 8) but the CONFIRMED chain still behind it (step
-    /// 6). That is the exact fork window of issue #1447: the seed's rotation block is at the
-    /// tip yet not confirmed. The caller then decides what the loop observes next.
-    ///
-    /// `reset_frequency` is 8, so boundary 16's rotation point is step 8. The gate reads the
-    /// confirmed step (6), not the canonical tip (8), so boundary 16 remains blocked.
-    async fn parked_one_short_of_boundary_16(
-        config: &Config,
-    ) -> (
-        ControllableBlockProvider,
-        VdfStateReadonly,
-        CancellationToken,
-        std::thread::JoinHandle<()>,
-    ) {
-        // Seed applied at the earlier boundary 8; identical across runs, so the buffers can
-        // only diverge at boundary 16.
-        let pre_boundary_seed = H256::repeat_byte(0xAB);
-        let provider = ControllableBlockProvider::new(6);
-        // Canonical tip at the rotation point (8); confirmed chain behind it (6), so the gate
-        // blocks boundary 16.
-        provider.set_snapshot(pre_boundary_seed, 8, 6);
-
-        let (_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let vdf_state = mocked_vdf_service(config);
-        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-        enable_mining(&vdf_state);
-        let chain_sync_state = ChainSyncState::new(false, false);
-        let shutdown_token = CancellationToken::new();
-
-        let handle = std::thread::spawn({
-            let config = config.clone();
-            let provider = provider.clone();
-            let shutdown_token = shutdown_token.clone();
-            let vdf_state = vdf_state.clone();
-            move || {
-                run_vdf(
-                    &config.vdf,
-                    0,
-                    pre_boundary_seed,
-                    pre_boundary_seed,
-                    ff_rx,
-                    crate::reanchor_channel().1,
-                    crate::vdf_utils::ReanchorSignals::new(),
-                    MockMining,
-                    vdf_state,
-                    provider,
-                    chain_sync_state,
-                    shutdown_token,
-                )
-            }
-        });
-
-        // Crosses boundary 8 (rotation point 0, always allowed) applying `pre_boundary_seed`,
-        // then parks one short of boundary 16 because the confirmed chain (6) has not reached
-        // the rotation point (8).
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-        vdf_steps_guard
-            .wait_for_step(15, Arc::clone(&cancel), Duration::from_secs(5))
-            .await
-            .expect("loop should reach step 15, parked one short of boundary 16");
-        assert_eq!(
-            vdf_steps_guard.read().current_step(),
-            15,
-            "loop must be parked exactly at step 15"
-        );
-
-        (provider, vdf_steps_guard, shutdown_token, handle)
-    }
-
-    /// Issue #1447 — deterministic end-to-end reproduction across the real causal chain.
-    ///
-    /// A VDF loop that crosses a reset boundary while the seed's rotation block is still
-    /// forkable consumes a fork-LOSER seed, poisoning its step buffer; it then REJECTS the
-    /// canonical fork-WINNER block during validation and wedges. The confirmation gate
-    /// prevents this: presented the same unconfirmed seed the loop parks, and crosses only
-    /// once the rotation block is confirmed — so its buffer matches canonical and validation
-    /// passes.
-    ///
-    /// This drives the real `run_vdf` loop and the real `vdf_steps_are_valid` (the function
-    /// the validation service calls), deterministically via `wait_for_step`. It exercises the
-    /// fix directly: the "loop stays parked while the seed is unconfirmed" assertion FAILS if
-    /// the gate is reverted to read the canonical tip instead of the confirmed step.
-    #[tokio::test]
-    async fn issue_1447_unconfirmed_reset_seed_poisons_buffer_and_wedges_block_validation() {
-        let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().vdf.reset_frequency = 8;
-        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new_with_random_peer_id(node_config);
-
-        // The two competing rotation blocks at boundary 16 pin distinct reset seeds.
-        let loser_seed = H256::repeat_byte(0x10);
-        let winner_seed = H256::repeat_byte(0x20);
-
-        // --- Materialise the buffer a node holds after consuming the LOSER seed. ---
-        // The fixed loop will not cross on an unconfirmed seed (that is the fix), so to obtain
-        // the post-boundary steps such a node would compute we let it cross with the loser
-        // seed confirmed. The resulting steps 17..=20 are exactly what ANY node that crossed
-        // boundary 16 on the loser seed holds — including a pre-fix node that crossed at 0
-        // confirmations.
-        let (provider, poisoned_guard, shutdown, handle) =
-            parked_one_short_of_boundary_16(&config).await;
-        provider.set_snapshot(loser_seed, 8, 8);
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-        poisoned_guard
-            .wait_for_step(20, Arc::clone(&cancel), Duration::from_secs(5))
-            .await
-            .expect("loop crosses boundary 16 once the loser rotation block is confirmed");
-        shutdown.cancel();
-        handle.join().unwrap();
-
-        // --- The fix: faced with the SAME unconfirmed loser seed, the loop refuses to cross.
-        let (provider, clean_guard, shutdown, handle) =
-            parked_one_short_of_boundary_16(&config).await;
-        // The loser rotation block is at the canonical tip (step 8 = boundary 16's rotation
-        // point) but NOT yet confirmed (confirmed chain at 6). The gate reads the confirmed
-        // step, so the loop must stay parked. THIS is the fix — a build that gated on the
-        // canonical tip would cross here and consume the loser seed.
-        provider.set_snapshot(loser_seed, 8, 6);
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-        let still_parked = clean_guard
-            .wait_for_step(16, Arc::clone(&cancel), Duration::from_millis(500))
-            .await;
-        assert!(
-            still_parked.is_err(),
-            "confirmation gate must refuse the unconfirmed loser seed (regression guard for #1447)"
-        );
-        assert_eq!(clean_guard.read().current_step(), 15);
-
-        // The fork resolves: the winner's rotation block becomes canonical AND is confirmed,
-        // so the loop crosses boundary 16 applying the winner seed.
-        provider.set_snapshot(winner_seed, 8, 8);
-        clean_guard
-            .wait_for_step(20, Arc::clone(&cancel), Duration::from_secs(5))
-            .await
-            .expect("loop crosses boundary 16 once the winner rotation block is confirmed");
-        shutdown.cancel();
-        handle.join().unwrap();
-
-        // --- Sanity: the two seeds really did fork the buffer after boundary 16. ---
-        let poisoned_steps = poisoned_guard
-            .get_steps(ii(17, 20))
-            .expect("poisoned buffer must hold steps 17..=20");
-        let clean_steps = clean_guard
-            .get_steps(ii(17, 20))
-            .expect("clean buffer must hold steps 17..=20");
-        assert_ne!(
-            poisoned_steps.0, clean_steps.0,
-            "loser vs winner reset seed must diverge the VDF buffer after the boundary"
-        );
-
-        // --- The wedge: the canonical (winner) block is REJECTED by the poisoned buffer but
-        //     ACCEPTED by the clean one. `vdf_steps_are_valid` is exactly what the validation
-        //     service runs, so this is the real rejection a poisoned node would hit. ---
-        let canonical_block = VDFLimiterInfo {
-            global_step_number: 20,
-            steps: clean_steps,
-            ..VDFLimiterInfo::default()
+        let seed = H256::repeat_byte(1);
+        let tip = TestBlock {
+            first_step: 1,
+            last_step: 1,
+            seed,
+            next_seed: seed,
         };
+        let vdf = LoopUnderTest::start_with_mining(&config, &[tip], 1, false);
+        let live = 256;
+        let predecessor = H256::repeat_byte(0xAA);
+        // Model a trusted block already validated ahead of the local loop.
+        vdf.provider.0.lock().unwrap().confirmed_output = predecessor;
+        crate::vdf_utils::fast_forward_validated_steps(
+            1,
+            predecessor,
+            &vec![predecessor; live],
+            seed,
+            &vdf.fast_forward,
+            &vdf.signals,
+            0,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        vdf.wait_for_step(live as u64).await;
+        let new_seed = H256::repeat_byte(2);
+        if reanchor {
+            vdf.signals.mark_buffer_suspect();
+            assert!(vdf.reanchor.try_send(ReanchorRequest {
+                canonical_seeds: VecDeque::from([Seed(predecessor)]),
+                c_step: 1,
+                seed: new_seed,
+                next_seed: new_seed,
+                reset_seed_by_boundary: Default::default(),
+            }));
+        } else {
+            vdf.mining_enabled.store(true, Ordering::Relaxed);
+            vdf.provider.set_chain(
+                &[TestBlock {
+                    next_seed: new_seed,
+                    ..tip
+                }],
+                1,
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !vdf.signals.is_recompute_in_progress() {
+                assert!(Instant::now() < deadline, "rewrite must start");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        // The channel holds only 16 steps. Without rewrite drains this send times out
+        // while the counter stays frozen, even though the hashing worker is healthy.
+        crate::vdf_utils::fast_forward_validated_steps(
+            1,
+            predecessor,
+            &vec![predecessor; live],
+            new_seed,
+            &vdf.fast_forward,
+            &vdf.signals,
+            0,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+        assert!(vdf.signals.is_recompute_in_progress() || vdf.signals.is_buffer_suspect());
+        vdf.stop();
+    }
+
+    /// Free-run guessed past the tip, then a late block lands that ends between the first
+    /// and the second boundary after the old tip. The second boundary's seed is now that
+    /// block's `next_seed`, not the old tip's: the loop recomputes the steps after it and
+    /// ends up with the buffer a node that saw the block in time holds.
+    #[tokio::test]
+    async fn late_block_after_free_run_guess_recomputes_the_tail() {
+        let config = fork_test_config(4);
+        let old_tip = TestBlock {
+            first_step: 1,
+            last_step: 2,
+            seed: H256::repeat_byte(0x01),
+            next_seed: H256::repeat_byte(0x02),
+        };
+        // Contains boundary 4: seed = old tip's next_seed, next_seed = old tip's hash.
+        let late_block = TestBlock {
+            first_step: 3,
+            last_step: 5,
+            seed: old_tip.next_seed,
+            next_seed: H256::repeat_byte(0x03),
+        };
+
+        let guessing = LoopUnderTest::start(&config, &[old_tip], 1);
+        guessing.wait_for_step(10).await;
+        assert_eq!(
+            guessing.guard.read().reset_seed_at(8),
+            Some(old_tip.next_seed)
+        );
+        guessing.provider.set_chain(&[old_tip, late_block], 1);
+        guessing.wait_for_reset_seed(8, late_block.next_seed).await;
+        guessing.wait_for_step(12).await;
+
+        let reference = LoopUnderTest::start(&config, &[old_tip, late_block], 1);
+        reference.wait_for_step(12).await;
+
+        assert_eq!(guessing.steps(1, 12), reference.steps(1, 12));
+        assert!(
+            guessing.signals.generation() >= 1,
+            "rewriting steps bumps the generation"
+        );
+        guessing.stop();
+        reference.stop();
+    }
+
+    /// Fork-loser seed without a confirmation gate. The loop crosses boundary 16 on a fork-loser
+    /// seed (the rotation block is at the tip, unconfirmed). The fork resolves within the
+    /// migration depth to the winner. The loop sees its folded seed is no longer canonical,
+    /// recomputes after boundary 16, and then holds exactly the buffer of a node that only
+    /// ever saw the winner — so it accepts the winner's next block through the buffer fast
+    /// path, and still rejects a block built from its old, loser-seed steps.
+    #[tokio::test]
+    async fn crosses_on_fork_loser_seed_then_recomputes_when_fork_resolves() {
+        let config = fork_test_config(8);
+        let confirmed_step = 6;
+        // Two competing tips that contain boundary 8, above the confirmed step. Their
+        // `next_seed` pins boundary 16.
+        let loser_tip = TestBlock {
+            first_step: 7,
+            last_step: 9,
+            seed: H256::repeat_byte(0x0A),
+            next_seed: H256::repeat_byte(0x10),
+        };
+        let winner_tip = TestBlock {
+            next_seed: H256::repeat_byte(0x20),
+            ..loser_tip
+        };
+
+        let node = LoopUnderTest::start(&config, &[loser_tip], confirmed_step);
+        node.wait_for_step(20).await;
+        assert_eq!(
+            node.guard.read().reset_seed_at(16),
+            Some(loser_tip.next_seed)
+        );
+        let loser_block = block_from_buffer(&node.guard, 17, 20, winner_tip.next_seed);
+
+        node.provider.set_chain(&[winner_tip], confirmed_step);
+        node.wait_for_reset_seed(16, winner_tip.next_seed).await;
+        node.wait_for_step(24).await;
+
+        let clean = LoopUnderTest::start(&config, &[winner_tip], confirmed_step);
+        clean.wait_for_step(24).await;
+        assert_eq!(node.steps(1, 24), clean.steps(1, 24));
+
+        let node_guard = node.stop();
+        clean.stop();
+
+        let winner_block = block_from_buffer(&node_guard, 17, 20, winner_tip.next_seed);
+        assert!(
+            node_guard
+                .read()
+                .holds_block_steps(
+                    winner_block.prev_output,
+                    17,
+                    &winner_block.steps.0,
+                    winner_block.seed,
+                    8
+                )
+                .unwrap(),
+            "the recomputed buffer holds the winner's lineage, so the fast path applies"
+        );
         let pool = crate::build_verification_pool(&config.vdf);
-
-        let rejected = vdf_steps_are_valid(
-            &pool,
-            &canonical_block,
-            &config.vdf,
-            &poisoned_guard,
-            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
-        );
+        let cancel = || Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        vdf_steps_are_valid(&pool, &winner_block, &config.vdf, &node_guard, cancel())
+            .expect("the winner's block must validate");
         assert!(
-            rejected.is_err(),
-            "poisoned buffer must REJECT the canonical winner block — this is the #1447 wedge"
+            vdf_steps_are_valid(&pool, &loser_block, &config.vdf, &node_guard, cancel()).is_err(),
+            "steps folded with the loser seed are invalid under the winner's seed"
+        );
+    }
+
+    /// A two-block fork within the migration depth replaces the block whose hash pins the
+    /// seed of boundary 16, after the loop already crossed 16. Boundary 8 keeps its seed
+    /// (both forks inherit it); boundary 16 changes. The loop recomputes after 16 only.
+    #[tokio::test]
+    async fn shallow_fork_at_rotation_block_after_loop_crossed_the_boundary() {
+        let config = fork_test_config(8);
+        let confirmed_step = 4;
+        let inherited_seed = H256::repeat_byte(0x08);
+        let old_parent = TestBlock {
+            first_step: 5,
+            last_step: 7,
+            seed: H256::repeat_byte(0x04),
+            next_seed: inherited_seed,
+        };
+        // Contains boundary 8: seed = parent's next_seed, next_seed = parent's hash.
+        let old_rotation = TestBlock {
+            first_step: 8,
+            last_step: 9,
+            seed: inherited_seed,
+            next_seed: H256::repeat_byte(0x0B),
+        };
+        let new_parent = TestBlock {
+            last_step: 6,
+            ..old_parent
+        };
+        let new_rotation = TestBlock {
+            first_step: 7,
+            last_step: 10,
+            seed: inherited_seed,
+            next_seed: H256::repeat_byte(0x0C),
+        };
+
+        let node = LoopUnderTest::start(&config, &[old_parent, old_rotation], confirmed_step);
+        node.wait_for_step(20).await;
+        assert_eq!(
+            node.guard.read().reset_seed_at(16),
+            Some(old_rotation.next_seed)
+        );
+        let steps_before_16 = node.steps(1, 16);
+
+        node.provider
+            .set_chain(&[new_parent, new_rotation], confirmed_step);
+        node.wait_for_reset_seed(16, new_rotation.next_seed).await;
+        node.wait_for_step(22).await;
+        assert_eq!(
+            node.steps(1, 16),
+            steps_before_16,
+            "steps up to the changed boundary are kept"
+        );
+        assert_eq!(node.guard.read().reset_seed_at(8), Some(inherited_seed));
+
+        let clean = LoopUnderTest::start(&config, &[new_parent, new_rotation], confirmed_step);
+        clean.wait_for_step(22).await;
+        assert_eq!(node.steps(1, 22), clean.steps(1, 22));
+        node.stop();
+        clean.stop();
+    }
+
+    /// A fork switch whose changed boundary (16) sits below the new canonical tip (18):
+    /// the steps the canonical blocks hold (17, 18) are copied from them, and only the
+    /// free-run steps past the tip are recomputed, from the last copied step. Sentinel
+    /// values in the blocks prove where the rewritten steps came from.
+    #[rstest::rstest]
+    #[case(4)]
+    #[case(16)]
+    #[tokio::test]
+    async fn fork_switch_copies_steps_canonical_blocks_hold(#[case] copy_confirmed_step: u64) {
+        let config = fork_test_config(8);
+        let confirmed_step = 4;
+        let inherited_seed = H256::repeat_byte(0x08);
+        let old_parent = TestBlock {
+            first_step: 5,
+            last_step: 7,
+            seed: H256::repeat_byte(0x04),
+            next_seed: inherited_seed,
+        };
+        let old_rotation = TestBlock {
+            first_step: 8,
+            last_step: 9,
+            seed: inherited_seed,
+            next_seed: H256::repeat_byte(0x0B),
+        };
+        let node = LoopUnderTest::start(&config, &[old_parent, old_rotation], confirmed_step);
+        node.wait_for_step(22).await;
+
+        let new_parent = TestBlock {
+            last_step: 6,
+            ..old_parent
+        };
+        let new_rotation = TestBlock {
+            first_step: 7,
+            last_step: 10,
+            seed: inherited_seed,
+            next_seed: H256::repeat_byte(0x0C),
+        };
+        // Holds boundary 16: its seed is the new rotation block's next_seed.
+        let new_tip = TestBlock {
+            first_step: 11,
+            last_step: 18,
+            seed: new_rotation.next_seed,
+            next_seed: H256::repeat_byte(0x0D),
+        };
+        // Up to 16 nothing changed, so the new blocks hold the node's own steps there.
+        let mut block_steps: BTreeMap<u64, H256> = (5..=16)
+            .map(|step| (step, node.guard.get_step(step).unwrap()))
+            .collect();
+        let sentinels = [H256::repeat_byte(0x51), H256::repeat_byte(0x52)];
+        block_steps.insert(17, sentinels[0]);
+        block_steps.insert(18, sentinels[1]);
+        let chain = if copy_confirmed_step == 16 {
+            vec![TestBlock {
+                first_step: 17,
+                ..new_tip
+            }]
+        } else {
+            vec![new_parent, new_rotation, new_tip]
+        };
+        node.provider
+            .set_chain_with_steps(&chain, copy_confirmed_step, &block_steps);
+        node.wait_for_reset_seed(16, new_tip.seed).await;
+        node.wait_for_step(24).await;
+
+        assert_eq!(
+            node.steps(17, 18).0,
+            sentinels.to_vec(),
+            "copied from the blocks"
+        );
+        let mut expected_19 = sentinels[1];
+        let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 18)),
+            &mut expected_19,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+        assert_eq!(
+            node.steps(19, 19).0,
+            vec![expected_19],
+            "recomputed from the last copied step"
+        );
+        assert_eq!(node.guard.read().reset_seed_at(24), Some(new_tip.next_seed));
+        node.stop();
+    }
+
+    #[tokio::test]
+    async fn wrong_confirmed_output_marks_buffer_suspect_without_a_seed_mismatch() {
+        let config = fork_test_config(8);
+        let tip = TestBlock {
+            first_step: 1,
+            last_step: 6,
+            seed: H256::repeat_byte(1),
+            next_seed: H256::repeat_byte(2),
+        };
+        let node = LoopUnderTest::start(&config, &[tip], 1);
+        node.wait_for_step(6).await;
+        node.mining_enabled.store(false, Ordering::Relaxed);
+        {
+            let mut view = node.provider.0.lock().unwrap();
+            view.confirmed_global_step_number = 5;
+            view.confirmed_output = H256::repeat_byte(0xFF);
+        }
+        tokio::time::timeout(Duration::from_secs(5), node.signals.wait_for_suspect(None))
+            .await
+            .expect("confirmed mismatch must wake the re-anchor listener");
+        assert!(node.signals.is_buffer_suspect());
+        node.stop();
+    }
+
+    #[test]
+    fn confirmed_boundary_rewrite_rejects_a_different_buffered_anchor() {
+        let config = fork_test_config(8);
+        let state = mocked_vdf_service(&config);
+        for step in 1..=10 {
+            state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::repeat_byte(1)), step);
+        }
+        let view = ControllableBlockProvider::snapshot(
+            &[TestBlock {
+                first_step: 9,
+                last_step: 10,
+                seed: H256::repeat_byte(2),
+                next_seed: H256::repeat_byte(3),
+            }],
+            8,
+            &(8..=10).map(|step| (step, H256::repeat_byte(4))).collect(),
+        );
+        assert!(matches!(
+            rewrite_after_reset_seed_change(
+                8,
+                &view,
+                view.reset_seed_for_step,
+                &config.vdf,
+                &state,
+                10,
+                &mut vec![H256::zero(); config.vdf.num_checkpoints_in_vdf_step],
+                &CancellationToken::new(),
+                &mut || {},
+            ),
+            ReseedOutcome::LineageMismatch
+        ));
+        assert_eq!(
+            state.read().unwrap().get_steps(ii(8, 10)).unwrap().0,
+            vec![H256::repeat_byte(1); 3]
+        );
+    }
+
+    #[test]
+    fn confirmed_output_check_ignores_unbuffered_steps() {
+        let mut state = VdfState::new(2, 0, Arc::new(AtomicBool::new(false)));
+        for step in 1..=3 {
+            state.set_canonical_step(step);
+            state.store_step(Seed(H256::repeat_byte(1)), step);
+        }
+        let mut view = ControllableBlockProvider::snapshot(
+            &[TestBlock {
+                first_step: 1,
+                last_step: 4,
+                seed: H256::zero(),
+                next_seed: H256::zero(),
+            }],
+            1,
+            &BTreeMap::new(),
+        );
+        assert!(!confirmed_output_mismatch(&state, &view), "pruned step");
+        view.confirmed_global_step_number = 4;
+        assert!(
+            !confirmed_output_mismatch(&state, &view),
+            "step not reached"
+        );
+        view.confirmed_global_step_number = 3;
+        assert!(confirmed_output_mismatch(&state, &view));
+        view.confirmed_output = H256::repeat_byte(1);
+        assert!(!confirmed_output_mismatch(&state, &view));
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn fast_forward_above_tip_is_checked_when_mining_turns_on(#[case] canonize: bool) {
+        let config = fork_test_config(8);
+        let tip = TestBlock {
+            first_step: 1,
+            last_step: 3,
+            seed: H256::repeat_byte(1),
+            next_seed: H256::repeat_byte(2),
+        };
+        let node = LoopUnderTest::start_with_mining(&config, &[tip], 1, false);
+        let block_seed = H256::repeat_byte(3);
+        let confirmed_output = node.provider.0.lock().unwrap().confirmed_output;
+        let mut steps = vec![H256::repeat_byte(0x51); 10];
+        steps[0] = confirmed_output;
+        crate::vdf_utils::fast_forward_validated_steps(
+            1,
+            H256::repeat_byte(0xAA),
+            &steps,
+            block_seed,
+            &node.fast_forward,
+            &node.signals,
+            0,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        node.wait_for_step(10).await;
+        // Give the paused loop several self-checks after the fast-forward drain.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(node.steps(1, 10).0, steps);
+        assert_eq!(node.guard.read().reset_seed_at(8), Some(block_seed));
+        assert_eq!(node.signals.generation(), 0);
+        if canonize {
+            node.provider.set_chain_with_steps(
+                &[
+                    tip,
+                    TestBlock {
+                        first_step: 4,
+                        last_step: 10,
+                        seed: block_seed,
+                        next_seed: block_seed,
+                    },
+                ],
+                1,
+                &(1..=10).zip(steps.iter().copied()).collect(),
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert_eq!(node.steps(1, 10).0, steps);
+            assert_eq!(
+                node.signals.generation(),
+                0,
+                "canonical steps need no rewrite"
+            );
+        }
+        node.mining_enabled.store(true, Ordering::Relaxed);
+        node.wait_for_step(12).await;
+        if canonize {
+            assert_eq!(node.steps(1, 10).0, steps);
+            assert_eq!(node.signals.generation(), 0);
+        } else {
+            assert_eq!(node.guard.read().reset_seed_at(8), Some(tip.next_seed));
+            assert_ne!(node.steps(9, 10).0, steps[8..]);
+            assert_eq!(node.signals.generation(), 1);
+        }
+        node.stop();
+    }
+
+    /// Fast-forward stores a validated step only when its predecessor is the buffered
+    /// step; a step from another lineage is refused and the buffer stays one chain.
+    /// With mining paused, the loop then computes the refused steps on its own lineage,
+    /// so the counter still reaches them and validation waiting on them does not stall.
+    #[tokio::test]
+    async fn fast_forward_refuses_a_step_off_the_buffered_lineage() {
+        let config = fork_test_config(1_000);
+        let vdf_state = mocked_vdf_service(&config);
+        for step in 1..=3 {
+            vdf_state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::from_low_u64_be(step)), step);
+        }
+        let guard = VdfStateReadonly::new(vdf_state.clone());
+        let (ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+        let other_lineage = VdfStep {
+            step: H256::repeat_byte(0xBA),
+            predecessor: H256::repeat_byte(0xBB),
+            global_step_number: 4,
+            reset_seed: H256::zero(),
+            generation: 0,
+        };
+        let same_lineage = VdfStep {
+            step: H256::repeat_byte(0x04),
+            predecessor: H256::from_low_u64_be(3),
+            ..other_lineage.clone()
+        };
+        let other_lineage_next = VdfStep {
+            step: H256::repeat_byte(0xBC),
+            predecessor: other_lineage.step,
+            global_step_number: 5,
+            ..other_lineage.clone()
+        };
+        ff_tx.send(Traced::new(other_lineage)).await.unwrap();
+        ff_tx.send(Traced::new(same_lineage)).await.unwrap();
+        ff_tx.send(Traced::new(other_lineage_next)).await.unwrap();
+
+        // Mining paused + syncing, so the loop only advances via fast-forward.
+        let shutdown = CancellationToken::new();
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let shutdown = shutdown.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    3,
+                    H256::from_low_u64_be(3),
+                    H256::zero(),
+                    ff_rx,
+                    crate::reanchor_channel().1,
+                    crate::vdf_utils::ReanchorSignals::new(),
+                    MockMining,
+                    vdf_state,
+                    MockBlockProvider::new(),
+                    ChainSyncState::new(true, false),
+                    shutdown,
+                )
+            }
+        });
+
+        guard
+            .wait_for_step(
+                4,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("the step on the buffered lineage must be stored");
+        assert_eq!(
+            guard.get_step(4).unwrap(),
+            H256::repeat_byte(0x04),
+            "the step from another lineage must not be stored"
         );
 
-        let accepted = vdf_steps_are_valid(
-            &pool,
-            &canonical_block,
-            &config.vdf,
-            &clean_guard,
-            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        // Step 5 continues the other lineage, not the buffer: refused, then computed
+        // locally from the buffered step 4.
+        guard
+            .wait_for_step(
+                5,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("a refused step is computed locally even with mining paused");
+        let mut expected_5 = H256::repeat_byte(0x04);
+        let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 4)),
+            &mut expected_5,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
         );
-        assert!(
-            accepted.is_ok(),
-            "clean buffer (gate held until the seed was confirmed) must ACCEPT the canonical block: {accepted:?}"
-        );
+        assert_eq!(guard.get_step(5).unwrap(), expected_5);
+
+        // A later batch of the refused block arrives in a later drain as a gap (step 8
+        // while the buffer is at 5). The loop computes up to it too.
+        ff_tx
+            .send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0xBD),
+                predecessor: H256::repeat_byte(0xBE),
+                global_step_number: 8,
+                reset_seed: H256::zero(),
+                generation: 0,
+            }))
+            .await
+            .unwrap();
+        guard
+            .wait_for_step(
+                8,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("a gap step from a refused block is computed locally too");
+        assert_ne!(guard.get_step(8).unwrap(), H256::repeat_byte(0xBD));
+        shutdown.cancel();
+        handle.join().unwrap();
     }
 
     mod apply_reanchor_tests {
@@ -1841,6 +2811,7 @@ mod tests {
                 // ignored: a distinct sentinel proves no fold consumes it.
                 seed: H256::repeat_byte(0x33),
                 next_seed,
+                reset_seed_by_boundary: Default::default(),
             };
 
             let mut checkpoints = vec![H256::default(); vdf.num_checkpoints_in_vdf_step];
@@ -1854,6 +2825,7 @@ mod tests {
                 live_step,
                 &mut checkpoints,
                 &CancellationToken::new(),
+                &mut || {},
             )
             else {
                 panic!("a boundary-free re-anchor must heal, not skip");
@@ -1923,6 +2895,7 @@ mod tests {
                 c_step,
                 seed,
                 next_seed,
+                reset_seed_by_boundary: Default::default(),
             };
 
             let mut checkpoints = vec![H256::default(); vdf.num_checkpoints_in_vdf_step];
@@ -1936,6 +2909,7 @@ mod tests {
                 live_step,
                 &mut checkpoints,
                 &CancellationToken::new(),
+                &mut || {},
             )
             else {
                 panic!("a boundary tip with a one-boundary tail must heal, not skip");
@@ -1972,58 +2946,83 @@ mod tests {
             assert_eq!(new_next_seed, next_seed);
         }
 
-        /// A tail that reaches the SECOND reset boundary past the canonical tip
-        /// must skip: that boundary's rotation block lies strictly past the tip,
-        /// so no canonical block has pinned its fold seed yet. Covers both an
-        /// off-boundary and an on-boundary tip. The buffer stays untouched (the
-        /// gate re-sends with a fresher tip on the next canonical advance).
+        /// A tail that reaches the SECOND reset boundary past the canonical tip heals
+        /// too: free-run never waits for a block, so the re-anchor must not either.
+        /// A child of the tip that reaches `live_step` spans a reset step, so it
+        /// carries the tip's `next_seed` and folds it at every boundary from `c_step`
+        /// on — including `c_step` itself when the tip ends on a boundary. Covers an
+        /// off-boundary and an on-boundary tip.
         #[rstest::rstest]
         #[case::off_boundary_tip(8, 15)]
         #[case::on_boundary_tip(10, 20)]
-        fn skips_when_tail_would_cross_second_boundary(
-            #[case] c_step: u64,
-            #[case] live_step: u64,
-        ) {
+        fn heals_when_tail_crosses_several_boundaries(#[case] c_step: u64, #[case] live_step: u64) {
             let mut node_config = NodeConfig::testing();
             node_config.consensus.get_mut().vdf.reset_frequency = 5;
             node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
             let config = Config::new_with_random_peer_id(node_config);
             let vdf = &config.vdf;
+            let reset_frequency = vdf.reset_frequency as u64;
 
             let capacity = 1_000_usize;
-            let poison = Seed(H256::repeat_byte(0xEE));
             let mut state = VdfState::new(capacity, live_step, Arc::new(AtomicBool::new(false)));
-            state.seeds = vec![poison.clone(); live_step as usize].into();
+            state.seeds = vec![Seed(H256::repeat_byte(0xEE)); live_step as usize].into();
             let vdf_state: AtomicVdfState = Arc::new(RwLock::new(state));
 
+            let window: Vec<H256> = (1..=c_step).map(H256::from_low_u64_be).collect();
+            let next_seed = H256::repeat_byte(0x22);
             let request = ReanchorRequest {
-                canonical_seeds: (1..=c_step)
-                    .map(|i| Seed(H256::from_low_u64_be(i)))
-                    .collect(),
+                canonical_seeds: window.iter().copied().map(Seed).collect(),
                 c_step,
                 seed: H256::repeat_byte(0x44),
-                next_seed: H256::repeat_byte(0x22),
+                next_seed,
+                reset_seed_by_boundary: Default::default(),
             };
 
             let mut checkpoints = vec![H256::default(); vdf.num_checkpoints_in_vdf_step];
-            let outcome = apply_reanchor(
+            let ReanchorOutcome::Healed { new_hash, .. } = apply_reanchor(
                 request,
                 vdf,
                 &vdf_state,
                 live_step,
                 &mut checkpoints,
                 &CancellationToken::new(),
+                &mut || {},
+            ) else {
+                panic!("a tail across several boundaries must heal, not skip");
+            };
+
+            let mut expected = window;
+            let mut running = process_reset(
+                c_step,
+                *expected.last().unwrap(),
+                reset_frequency,
+                next_seed,
             );
-            assert!(
-                matches!(outcome, ReanchorOutcome::Skipped),
-                "a tail crossing a second, unpinned boundary must skip the re-anchor"
-            );
+            for step in (c_step + 1)..=live_step {
+                let salt = U256::from(step_number_to_salt_number(vdf, step - 1));
+                vdf_sha(
+                    salt,
+                    &mut running,
+                    vdf.num_checkpoints_in_vdf_step,
+                    vdf.num_iterations_per_checkpoint(),
+                    &mut checkpoints,
+                );
+                expected.push(running);
+                running = process_reset(step, running, reset_frequency, next_seed);
+            }
 
             let guard = vdf_state.read().unwrap();
-            assert!(
-                guard.seeds.iter().all(|s| *s == poison),
-                "the buffer must be untouched on a skip"
-            );
+            assert_eq!(guard.current_step(), live_step, "counter stays forward");
+            assert_eq!(guard.get_steps(ii(1, live_step)).unwrap().0, expected);
+            assert_eq!(new_hash, running, "running hash must seed step live+1");
+            let first_boundary = c_step.div_ceil(reset_frequency) * reset_frequency;
+            for boundary in (first_boundary..=live_step).step_by(reset_frequency as usize) {
+                assert_eq!(
+                    guard.reset_seed_at(boundary),
+                    Some(next_seed),
+                    "boundary {boundary} must record the seed it folded"
+                );
+            }
         }
 
         /// The sequential tail recompute (~1 s/step in production) honours the
@@ -2052,6 +3051,7 @@ mod tests {
                 c_step,
                 seed: H256::repeat_byte(0x44),
                 next_seed: H256::repeat_byte(0x22),
+                reset_seed_by_boundary: Default::default(),
             };
 
             let cancelled = CancellationToken::new();
@@ -2064,6 +3064,7 @@ mod tests {
                 live_step,
                 &mut checkpoints,
                 &cancelled,
+                &mut || {},
             );
             assert!(
                 matches!(outcome, ReanchorOutcome::Skipped),

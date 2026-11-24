@@ -21,8 +21,9 @@ pub mod verify;
 
 pub use vdf_utils::{
     ReanchorReceiver, ReanchorRequest, ReanchorSignals, VdfFastForwardSender,
-    VdfFastForwardStopped, VdfReanchorGenerationChanged, VdfReanchorSender, fast_forward_channel,
-    first_divergent_boundary, reanchor_channel, reorg_crossed_divergent_boundary,
+    VdfFastForwardStopped, VdfReanchorGenerationChanged, VdfReanchorSender, canonical_reset_seed,
+    fast_forward_channel, first_divergent_boundary, reanchor_channel,
+    reorg_crossed_divergent_boundary, reset_seeds_folded_by_block, tip_child_reset_seed,
 };
 
 const SHA256_IV: [u32; 8] = [
@@ -459,7 +460,15 @@ pub const fn step_number_to_salt_number(config: &VdfConfig, step_number: u64) ->
 #[derive(Debug, Clone)]
 pub struct VdfStep {
     pub step: H256,
+    /// The validated block's own step before `step` (its `prev_output` for the
+    /// block's first step). `run_vdf` stores `step` only when the buffered step
+    /// before it equals this, so the buffer never joins two VDF lineages.
+    pub predecessor: H256,
     pub global_step_number: u64,
+    /// The validated block's `vdf_limiter_info.seed`. When `global_step_number - 1` is a
+    /// reset boundary, `step` was computed by folding this seed there, so `run_vdf` records
+    /// it as that boundary's reset seed.
+    pub reset_seed: H256,
     /// The re-anchor generation this step was validated under (stamped by
     /// [`vdf_utils::VdfFastForwardSender`]). `run_vdf` drops a step whose
     /// generation is older than the buffer's current one: it predates an

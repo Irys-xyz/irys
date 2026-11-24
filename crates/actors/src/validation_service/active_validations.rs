@@ -571,11 +571,23 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
     pub(super) fn abort_stalled_current(
         &mut self,
         hard_timeout: Duration,
+        reanchor_signals: &irys_vdf::ReanchorSignals,
     ) -> Option<(Duration, VdfTaskStage)> {
         let current = self.current.as_mut()?;
 
         let stage = VdfTaskStage::from(current.stage_signal.load(Ordering::Relaxed));
-        // Only `WaitPrevStep`/`WaitFinalCatchUp` are skipped, and not because
+        // A large batch can span several rewrite drains. Do not charge that
+        // backpressure to the stage timer, including just after the rewrite ends.
+        if stage == VdfTaskStage::FastForwardBatch
+            && (reanchor_signals.is_recompute_in_progress() || reanchor_signals.is_buffer_suspect())
+        {
+            *current
+                .last_progress_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+            return None;
+        }
+        // `WaitPrevStep`/`WaitFinalCatchUp` are skipped, not because
         // they have a redundant check — they need a *different kind* of check.
         // The watchdog measures stage wall-clock duration; `wait_for_step`
         // measures `global_step` advancement. These are different things, and
@@ -592,7 +604,8 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         // granularity here, and it shares the same shutdown path as this
         // watchdog.
         //
-        // Every other stage is watched, including `Starting` and `Completed`:
+        // Outside rewrite backpressure, other stages are watched, including
+        // `Starting` and `Completed`:
         // - `Starting`: resilience to first-poll delay is achieved by
         //   `PreemptibleVdfTask::execute` refreshing `progress_instant` at its
         //   first statement. A 15 s queue-to-first-poll latency *does* trip the
@@ -1648,7 +1661,7 @@ mod tests {
         scheduler.current = Some(running_task);
 
         let (stalled_for, stage) = scheduler
-            .abort_stalled_current(Duration::from_secs(5))
+            .abort_stalled_current(Duration::from_secs(5), &irys_vdf::fast_forward_channel().2)
             .expect("watchdog should abort a stale task");
         assert_eq!(stage, VdfTaskStage::ValidateBatch);
         assert!(
@@ -1673,6 +1686,48 @@ mod tests {
             join_error.is_cancelled(),
             "watchdog abort should cancel the JoinHandle"
         );
+    }
+
+    #[tokio::test]
+    async fn fast_forward_watchdog_waits_for_reanchor() {
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
+        let (task, cancel) = make_running_vdf_task(BlockPriorityMeta {
+            height: 1,
+            state: BlockPriority::Canonical,
+            vdf_step_count: 1,
+        });
+        task.stage_signal
+            .store(VdfTaskStage::FastForwardBatch as u8, Ordering::Relaxed);
+        *task.last_progress_at.lock().unwrap() =
+            Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+        scheduler.current = Some(task);
+        let signals = irys_vdf::fast_forward_channel().2;
+        signals.mark_buffer_suspect();
+        assert!(
+            scheduler
+                .abort_stalled_current(Duration::from_secs(5), &signals)
+                .is_none()
+        );
+        assert_eq!(cancel.load(Ordering::Relaxed), CancelEnum::Continue as u8);
+        signals.test_record_heal_applied();
+        assert!(
+            scheduler
+                .abort_stalled_current(Duration::from_secs(5), &signals)
+                .is_none()
+        );
+        *scheduler
+            .current
+            .as_ref()
+            .unwrap()
+            .last_progress_at
+            .lock()
+            .unwrap() = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+        assert!(
+            scheduler
+                .abort_stalled_current(Duration::from_secs(5), &signals)
+                .is_some()
+        );
+        let _ = (&mut scheduler.current.as_mut().unwrap().handle).await;
     }
 
     /// Regression test for the CI flake where the watchdog force-aborted (and
@@ -1714,7 +1769,7 @@ mod tests {
 
         assert!(
             scheduler
-                .abort_stalled_current(Duration::from_secs(5))
+                .abort_stalled_current(Duration::from_secs(5), &irys_vdf::fast_forward_channel().2)
                 .is_none(),
             "watchdog must not abort a task whose handle has already finished",
         );

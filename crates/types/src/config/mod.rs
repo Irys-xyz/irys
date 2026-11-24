@@ -501,12 +501,14 @@ impl Config {
             self.consensus.vdf.num_checkpoints_in_vdf_step,
         );
 
-        // The reset-boundary confirmation gate parks the VDF loop at a boundary
-        // until the rotation block is confirmed (block_migration_depth deep). For the gate to
-        // reopen before the next boundary — i.e. for honest mining not to wedge — a reset
-        // window must comfortably outspan the confirmation lag. With the VDF clocked at ~1
-        // step/sec a block spans ~block_time steps, so the lag is block_migration_depth blocks
-        // ≈ block_migration_depth * block_time steps; require 2x that for headroom.
+        // A reorg within block_migration_depth changes the reset seed of a boundary the VDF
+        // loop already crossed only when the loop is about a reset window or more past the
+        // fork point (see `irys_vdf::first_divergent_boundary`). With the VDF clocked at ~1
+        // step/sec a block spans ~block_time steps, so the confirmation lag is
+        // block_migration_depth blocks ≈ block_migration_depth * block_time steps. A reset
+        // window of 2x that makes such reorgs, and the recompute they cost, rare unless the
+        // chain runs much slower than block_time. This is a heuristic, not a bound, and the
+        // loop never waits on it: see `design/docs/vdf-reset-seed-fork-handling.md`.
         let reset_window_steps = self.consensus.vdf.reset_frequency as u64;
         let confirmation_lag_steps = (self.consensus.block_migration_depth as u64)
             .saturating_mul(self.consensus.difficulty_adjustment.block_time);
@@ -523,7 +525,7 @@ impl Config {
             })?;
         ensure!(
             reset_window_steps >= required_reset_window_steps,
-            "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window wedges honest mining at the reset boundary",
+            "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window lets reorgs within the migration depth change reset seeds the VDF already folded",
             reset_window_steps,
             required_reset_window_steps,
             self.consensus.block_migration_depth,

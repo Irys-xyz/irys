@@ -652,6 +652,7 @@ impl BlockValidationTask {
             let outcome = recall_recall_range_is_valid(
                 block,
                 geometry,
+                self.service_inner.config.vdf.reset_frequency as u64,
                 &self.service_inner.vdf_state,
                 &self.service_inner.block_tree_guard,
                 &self.service_inner.db,

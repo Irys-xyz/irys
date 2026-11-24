@@ -604,28 +604,22 @@ async fn post_tx_with_chunks(
 /// divergence window at real step pacing), and `spiky_` caps how many
 /// CPU-spiking tests run beside it. The re-anchor mechanism is also covered
 /// deterministically by faster unit tests (`handle_reanchored` recall-range
-/// rebuild, `apply_reanchor` incl. the tip-on-boundary skip, the
-/// `first_divergent_boundary` / gate tests, the fast-forward generation-drop
-/// test, and the heal-aware `wait_for_step_or_suspect` stall tests); this spec
-/// proves the pieces compose end-to-end.
+/// rebuild, `apply_reanchor` incl. the tip-on-boundary fold, the
+/// `first_divergent_boundary` tests, the loop's reset-seed recompute tests, the
+/// fast-forward generation-drop test, and the heal-aware
+/// `wait_for_step_or_suspect` stall tests); this spec proves the pieces compose
+/// end-to-end.
 ///
 /// Config note: the fork is driven toward a VDF STEP target, not a fixed block
-/// count. The reset-boundary confirmation gate (#1447) parks the loop at a
-/// boundary until the rotation block confirms; it operates in VDF steps, so a
-/// `reset_frequency` smaller than the harness's steps-per-block wedges mining
-/// before any block is produced (the earlier `reset_frequency = 6` did exactly
-/// that, deadlocking in setup). `reset_frequency` is therefore kept comfortably
-/// above the per-block step count, and each fork is mined only just past the
-/// first divergent boundary — the confirmation lag grows with fork length, so a
-/// short fork keeps it below `reset_frequency` and avoids a permanent park.
+/// count. `reset_frequency` is kept above the per-block step count, and each
+/// fork is mined only just past the first divergent boundary.
 #[test_log::test(tokio::test)]
 async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> {
     let seconds_to_wait = 60;
     let block_migration_depth: u32 = 1;
-    // Reset window must comfortably outspan the harness's steps-per-block, else the
-    // confirmation gate parks the loop before a block can confirm (see the fn doc).
-    // A test block spans a few dozen VDF steps, so 240 leaves ample headroom while
-    // still being crossable within a short fork.
+    // Reset window must comfortably outspan the harness's steps-per-block (see the fn
+    // doc). A test block spans a few dozen VDF steps, so 240 leaves ample headroom
+    // while still being crossable within a short fork.
     let reset_frequency = 240;
 
     let mut genesis_config = NodeConfig::testing().with_consensus(|c| {
@@ -639,11 +633,9 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         c.entropy_packing_iterations = 1_000;
         // 0.5 packed partitions × 2 chunks/recall-range × 1s block time pins
         // genesis difficulty to zero: every scanned chunk is a solution, so the
-        // fork loops can always mine at a VDF step parked by the confirmation
-        // gate — only the mined block releases the gate, and under non-zero
-        // difficulty re-hashing the same recall chunks there can fail forever.
-        // Fork choice is unaffected: per-block work is uniform, so the strictly
-        // longer fork still wins.
+        // fork loops can always mine at the current VDF step. Fork choice is
+        // unaffected: per-block work is uniform, so the strictly longer fork
+        // still wins.
         c.genesis.initial_packed_partitions = Some(0.5);
     });
     genesis_config.storage.num_writes_before_sync = 1;
@@ -697,11 +689,9 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
     // Freeze the peer's VDF until its own fork phase; must sit AFTER the last
     // peer-side `wait_*` call (every harness wait auto-restarts the VDF "for
     // sync"). Left running it free-runs ahead of the peer's frozen chain, so
-    // the peer's first fork block would span the whole run-ahead — and any
-    // block spanning >= `reset_frequency` steps wedges the confirmation gate
-    // permanently (the fresh step it needs is only granted once a block that
-    // can no longer be mined confirms). Starting the fork phase from the fork
-    // point keeps every span far below that.
+    // the peer's first fork block would span the whole run-ahead, possibly
+    // several reset windows. Starting the fork phase from the fork point keeps
+    // every span far below `reset_frequency`.
     peer.node_ctx.stop_vdf();
 
     let rf = reset_frequency as u64;
@@ -709,7 +699,7 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
     // production divergence rule (`irys_vdf::first_divergent_boundary`): the
     // seed folded at boundary `B` is pinned by the rotation block at `B - rf`,
     // so the first fork-local boundary sits two windows above the LCA. Derived
-    // from the shared fork block's own step (the gate's `lca_step`) — boundaries
+    // from the shared fork block's own step (the block tree's `lca_step`) — boundaries
     // below it fold seeds pinned by shared blocks, so crossing only those can
     // never poison a buffer, and asserting on them would compare identical data.
     let lca_step = genesis
@@ -801,37 +791,13 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         "genesis must converge to the canonical tip after the boundary-crossing reorg"
     );
 
-    // Guard against a trivial pass: the re-anchor generation only bumps when
-    // `apply_reanchor` returns `Healed`, so a non-zero generation is direct
-    // evidence the gate → heal path executed on genesis (a reorg that missed the
-    // boundary would leave the buffer un-poisoned and pass every other assert).
-    // The heal lands asynchronously on the VDF thread's next loop iteration, so
-    // poll rather than assert the instant the height converges.
-    let reanchor_signals = &genesis.node_ctx.service_senders.vdf_reanchor_signals;
-    let mut heal_fired = false;
-    for _ in 0..(seconds_to_wait * 20) {
-        if reanchor_signals.generation() >= 1 {
-            heal_fired = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert!(
-        heal_fired,
-        "the boundary-crossing reorg must have triggered at least one VDF re-anchor heal on genesis"
-    );
-
-    // Assertion A: the heal is CORRECT, not merely fired. Genesis's re-anchored VDF
-    // buffer over the boundary-crossing range must equal the canonical chain's steps;
-    // the generation bump above proves the gate ran, this proves the healed CONTENT
-    // matches canonical (a wrong reset seed would re-step divergent values here).
+    // The reorg itself must repair the divergent buffer before an explicit heal request.
+    // A wrong reset seed would produce different values across this boundary.
     // Seeds fold into the hash AFTER the boundary step is stored, so divergent
     // values start at `boundary + 1` — the compared block must carry at least
     // one step strictly past the boundary or the comparison is vacuous. The
-    // left bound admits `first == boundary + 1` because the confirmation gate
-    // parks mining AT boundaries, so a fork block ending exactly on the
-    // boundary (with the divergent steps opening the NEXT block) is a common
-    // geometry.
+    // left bound admits `first == boundary + 1`: a fork block can end exactly
+    // on the boundary, with the divergent steps opening the NEXT block.
     let boundary_block = peer_fork_blocks
         .iter()
         .find(|b| {
@@ -872,6 +838,24 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
          mismatch means the re-anchor did not heal the recovered range"
     );
     info!("Assertion A passed: recovered VDF buffer matches canonical across the reset boundary");
+
+    // Check the immediate suspect-request path against the adopted tip. Marking before
+    // reconnect would let the old private tip clear suspicion before the reorg arrived.
+    // Only a successful block-tree re-anchor clears it; reset-seed rewrites leave it set.
+    let reanchor_signals = &genesis.node_ctx.service_senders.vdf_reanchor_signals;
+    reanchor_signals.mark_buffer_suspect();
+    let mut heal_fired = false;
+    for _ in 0..(seconds_to_wait * 20) {
+        if !reanchor_signals.is_buffer_suspect() {
+            heal_fired = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        heal_fired,
+        "the adopted canonical tip must re-anchor the suspect buffer"
+    );
 
     // The heal is observable: genesis mines a block the peer ADOPTS AS CANONICAL,
     // which requires genesis's post-reorg VDF buffer to produce valid recall ranges

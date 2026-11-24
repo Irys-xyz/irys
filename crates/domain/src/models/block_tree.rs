@@ -857,21 +857,37 @@ impl BlockTree {
 
     /// Global step number of the most recent canonical block confirmed past reorg risk —
     /// the deepest block that is both `Onchain` and at least `depth` blocks below the tip.
-    /// Used by the VDF reset-boundary gate so the loop never applies a seed pinned by a
-    /// still-forkable block. Reads the cache in place — no chain clone.
+    /// The VDF loop checks only the reset seeds it folded above this step against the
+    /// canonical chain. Reads the cache in place — no chain clone.
     ///
     /// The chain cache (`.0`) is the tip's ancestry; `.1` counts the entries that are not
     /// `Onchain` (normally zero). We skip `max(not_onchain_count, depth)` from the tip so
     /// the result is at least `depth` blocks below the tip.
     #[must_use]
     pub fn confirmed_canonical_step(&self, depth: u64) -> u64 {
-        let (chain, not_onchain_count) = &self.longest_chain_cache;
-        let skip = (*not_onchain_count).max(usize::try_from(depth).unwrap_or(usize::MAX));
-        let idx = chain.len().saturating_sub(skip.saturating_add(1));
+        let (chain, _) = &self.longest_chain_cache;
         chain
-            .get(idx)
+            .get(self.confirmed_canonical_index(depth))
             .map(|entry| entry.header().vdf_limiter_info.global_step_number)
             .unwrap_or(0)
+    }
+
+    /// The canonical entries above the confirmed one (see [`Self::confirmed_canonical_step`]),
+    /// oldest first, ending with the tip. Reads the cache in place — no chain clone.
+    #[must_use]
+    pub fn unconfirmed_canonical_entries(&self, depth: u64) -> &[BlockTreeEntry] {
+        let (chain, _) = &self.longest_chain_cache;
+        let start = self
+            .confirmed_canonical_index(depth)
+            .saturating_add(1)
+            .min(chain.len());
+        &chain[start..]
+    }
+
+    fn confirmed_canonical_index(&self, depth: u64) -> usize {
+        let (chain, not_onchain_count) = &self.longest_chain_cache;
+        let skip = (*not_onchain_count).max(usize::try_from(depth).unwrap_or(usize::MAX));
+        chain.len().saturating_sub(skip.saturating_add(1))
     }
 
     /// Find the lowest common ancestor of two tips by walking both lineages
@@ -2998,8 +3014,8 @@ mod tests {
     }
 
     /// A validated block that is not the tip is not canonical, so `confirmed_canonical_step`
-    /// never reports its step: the VDF reset-boundary gate must not treat a still-forkable
-    /// block's seed as confirmed during a sync/reorg window.
+    /// never reports its step and the unconfirmed entries never include it. The VDF loop
+    /// checks reset seeds against these entries.
     #[test]
     fn confirmed_canonical_step_ignores_validated_block_above_tip() {
         let comm_cache = Arc::new(CommitmentSnapshot::default());
@@ -3058,12 +3074,25 @@ mod tests {
         // Cache = [b1, b2]: the canonical chain follows the tip, not the heaviest block.
         check_longest_chain(&[&b1, &b2], 0, &cache).unwrap();
 
-        // The gate reports the tip (b2, step 20) at depth 0 and never the forkable b3
+        // The confirmed step at depth 0 is the tip (b2, step 20), never the forkable b3
         // (step 30).
         assert_eq!(cache.confirmed_canonical_step(0), 20);
         assert_eq!(cache.confirmed_canonical_step(1), 10);
         // `depth` past the oldest cached block saturates to it.
         assert_eq!(cache.confirmed_canonical_step(2), 10);
+
+        // The unconfirmed entries are exactly the blocks above the confirmed one.
+        let unconfirmed_steps = |depth: u64| -> Vec<u64> {
+            cache
+                .unconfirmed_canonical_entries(depth)
+                .iter()
+                .map(|entry| entry.header().vdf_limiter_info.global_step_number)
+                .collect()
+        };
+        assert_eq!(unconfirmed_steps(0), Vec::<u64>::new());
+        assert_eq!(unconfirmed_steps(1), vec![20]);
+        // A chain shorter than `depth` treats its oldest block as confirmed.
+        assert_eq!(unconfirmed_steps(10), vec![20]);
     }
 
     /// Regression for the per-boundary VDF seed lookup: the provider must resolve the canonical

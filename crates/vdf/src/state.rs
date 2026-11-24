@@ -10,7 +10,7 @@ use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     ops::Range,
     sync::{Arc, OnceLock, RwLock, RwLockReadGuard},
 };
@@ -50,6 +50,12 @@ pub struct VdfState {
     pub capacity: usize,
     /// stored seeds
     pub seeds: VecDeque<Seed>,
+    /// The reset seed folded at each reset boundary `b` to compute buffered step `b + 1`.
+    /// Kept for every boundary from the step before the oldest buffered step up to the
+    /// current step. A boundary missing here counts as unverified: validation recomputes
+    /// steps that depend on it, and `run_vdf` re-derives it when it is above the confirmed
+    /// step. See `design/docs/vdf-reset-seed-fork-handling.md`.
+    reset_seed_by_boundary: BTreeMap<u64, H256>,
     /// whether the VDF thread is mining or paused. The single shared
     /// allocation (same `Arc` as the `VdfController` and the read handle);
     /// private so it cannot be swapped out after construction.
@@ -67,6 +73,7 @@ impl VdfState {
             global_step_from_the_latest_canonical_block: global_step,
             minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
             seeds: VecDeque::with_capacity(capacity),
+            reset_seed_by_boundary: BTreeMap::new(),
             capacity,
             is_vdf_mining_enabled,
         }
@@ -139,7 +146,94 @@ impl VdfState {
         }
         self.seeds.push_back(seed);
         self.global_step.store(current + 1, Ordering::Relaxed);
+        self.prune_reset_seeds();
         global_step
+    }
+
+    /// Step number of the oldest buffered step (`current_step + 1` when empty).
+    pub fn first_buffered_step(&self) -> u64 {
+        (self.current_step() + 1).saturating_sub(self.seeds.len() as u64)
+    }
+
+    /// Record that `seed` was folded at reset boundary `boundary`.
+    pub fn record_reset_seed(&mut self, boundary: u64, seed: H256) {
+        self.reset_seed_by_boundary.insert(boundary, seed);
+    }
+
+    /// The reset seed recorded for `boundary`, if any.
+    pub fn reset_seed_at(&self, boundary: u64) -> Option<H256> {
+        self.reset_seed_by_boundary.get(&boundary).copied()
+    }
+
+    /// Drop reset seeds of boundaries below the step before the oldest buffered step.
+    fn prune_reset_seeds(&mut self) {
+        let keep_from = self.first_buffered_step().saturating_sub(1);
+        while self
+            .reset_seed_by_boundary
+            .first_key_value()
+            .is_some_and(|(boundary, _)| *boundary < keep_from)
+        {
+            self.reset_seed_by_boundary.pop_first();
+        }
+    }
+
+    /// True when the buffer provably holds what validation computes for `steps`, a run of
+    /// block steps starting at `first_step` whose predecessor is `predecessor` and whose
+    /// block folds `reset_seed` at every reset boundary in its range. That needs: the
+    /// buffered step `first_step - 1` equals `predecessor`, the buffered steps equal `steps`,
+    /// and every boundary `b > 0` in `[first_step - 1, last - 1]` was recorded with
+    /// `reset_seed`. Each buffered step is the VDF of the one before it under the recorded
+    /// fold, so equality then carries over to the block. `Err` when the buffer does not hold
+    /// the range.
+    pub fn holds_block_steps(
+        &self,
+        predecessor: H256,
+        first_step: u64,
+        steps: &[H256],
+        reset_seed: H256,
+        reset_frequency: u64,
+    ) -> eyre::Result<bool> {
+        let Some(last_step) = (first_step + steps.len() as u64).checked_sub(1) else {
+            bail!("empty step run");
+        };
+        let buffered = self.get_steps(ii(first_step.saturating_sub(1), last_step))?;
+        let Some((buffered_predecessor, buffered_steps)) = buffered.0.split_first() else {
+            bail!("empty buffered range");
+        };
+        if *buffered_predecessor != predecessor || buffered_steps != steps {
+            return Ok(false);
+        }
+        let lowest_boundary = first_step.saturating_sub(1).max(1);
+        let first_boundary = lowest_boundary
+            .div_ceil(reset_frequency)
+            .saturating_mul(reset_frequency);
+        let folds_match = (first_boundary..last_step)
+            .step_by(usize::try_from(reset_frequency).unwrap_or(usize::MAX))
+            .all(|boundary| self.reset_seed_at(boundary) == Some(reset_seed));
+        Ok(folds_match)
+    }
+
+    /// Rewrite the buffered steps `[first_step, current_step]` with `steps` and record
+    /// `reset_seeds`, leaving the step counter untouched. Used when `run_vdf` recomputes its
+    /// tail after a reset seed it folded turned out not to be canonical.
+    pub fn rewrite_tail(
+        &mut self,
+        first_step: u64,
+        steps: Vec<H256>,
+        reset_seeds: impl IntoIterator<Item = (u64, H256)>,
+    ) {
+        assert!(
+            first_step >= self.first_buffered_step()
+                && first_step + steps.len() as u64 == self.current_step() + 1,
+            "rewrite_tail must cover the buffered tail exactly"
+        );
+        let offset = usize::try_from(first_step - self.first_buffered_step())
+            .expect("buffer offset fits in usize");
+        for (slot, step) in self.seeds.iter_mut().skip(offset).zip(steps) {
+            *slot = Seed(step);
+        }
+        self.reset_seed_by_boundary.extend(reset_seeds);
+        self.prune_reset_seeds();
     }
 
     /// Get steps in the given global steps numbers Interval
@@ -177,19 +271,30 @@ impl VdfState {
         ))
     }
 
-    /// Replace the seed buffer with `corrected`; leave the step counter untouched.
+    /// Replace the seed buffer with `corrected` and the recorded reset seeds with
+    /// `reset_seeds`; leave the step counter untouched.
     /// Seeds must end at the current step (`get_steps` maps by counter).
-    pub fn reanchor_seeds(&mut self, corrected: VecDeque<Seed>) {
+    pub fn reanchor_seeds(&mut self, corrected: VecDeque<Seed>, reset_seeds: BTreeMap<u64, H256>) {
         assert!(
             !corrected.is_empty(),
             "reanchor_seeds requires a non-empty canonical window"
         );
+        // Keep the window `store_step` keeps: from `capacity` steps below the canonical step
+        // up to the live step. A free-run tail longer than `capacity` stays whole, so block
+        // production and a later reset-seed check still find the steps after the canonical tip.
         let capacity = u64::try_from(self.capacity).expect("VDF capacity must fit in u64");
-        self.minimum_step_to_keep = self.current_step().saturating_sub(capacity);
+        self.minimum_step_to_keep = self
+            .global_step_from_the_latest_canonical_block
+            .saturating_sub(capacity);
+        let retained = self
+            .current_step()
+            .saturating_sub(self.minimum_step_to_keep);
         self.seeds = corrected;
-        while self.seeds.len() > self.capacity {
+        while self.seeds.len() as u64 > retained {
             self.seeds.pop_front();
         }
+        self.reset_seed_by_boundary = reset_seeds;
+        self.prune_reset_seeds();
     }
 }
 
@@ -279,7 +384,8 @@ impl VdfStateReadonly {
     }
 
     /// Like [`Self::wait_for_step`], but holds the stall timer open while the
-    /// buffer is suspect (heal freezes the counter). Does not abort on generation change.
+    /// buffer is suspect or `run_vdf` recomputes its tail (both freeze the
+    /// counter). Does not abort on generation change.
     pub async fn wait_for_step_or_suspect(
         &self,
         desired_step_number: u64,
@@ -367,12 +473,15 @@ impl VdfStateReadonly {
                 return Ok(());
             }
 
-            // While suspect, counter freeze is expected (heal in progress).
+            // While suspect or recomputing, counter freeze is expected (heal in progress).
             let advanced = current_step > last_observed_step;
             if advanced {
                 last_observed_step = current_step;
             }
-            if advanced || signals.is_some_and(ReanchorSignals::is_buffer_suspect) {
+            let heal_in_progress = signals.is_some_and(|signals| {
+                signals.is_buffer_suspect() || signals.is_recompute_in_progress()
+            });
+            if advanced || heal_in_progress {
                 last_progress_at = Instant::now();
             } else if last_progress_at.elapsed() >= progress_timeout {
                 return Err(WaitForStepError::Stalled {
@@ -462,11 +571,14 @@ pub struct VdfBootstrap {
     pub global_step: u64,
     pub first_step: u64,
     pub ordered_seeds: VecDeque<Seed>,
+    /// Reset seed folded at each boundary in `first_step - 1..=global_step`, from the
+    /// block headers the window came from (see [`VdfState::record_reset_seed`]).
+    pub reset_seed_by_boundary: BTreeMap<u64, H256>,
 }
 
 /// Seed history for VDF startup (implemented in `irys-chain`).
 pub trait VdfSeedSource {
-    fn vdf_bootstrap(&self, capacity: usize) -> VdfBootstrap;
+    fn vdf_bootstrap(&self, capacity: usize, reset_frequency: u64) -> VdfBootstrap;
 }
 
 pub fn create_state(
@@ -479,7 +591,8 @@ pub fn create_state(
         global_step,
         first_step,
         ordered_seeds,
-    } = seed_source.vdf_bootstrap(capacity);
+        reset_seed_by_boundary,
+    } = seed_source.vdf_bootstrap(capacity, config.vdf.reset_frequency as u64);
     // Enforce the VdfBootstrap contract in release builds too: a corrupt or buggy
     // VdfSeedSource must fail fast at startup rather than silently initialize a
     // non-contiguous or empty seed window (consensus-critical).
@@ -513,14 +626,17 @@ pub fn create_state(
         global_step
     );
 
-    VdfState {
+    let mut state = VdfState {
         global_step: Arc::new(AtomicU64::new(global_step)),
         global_step_from_the_latest_canonical_block: global_step,
         minimum_step_to_keep: global_step.saturating_sub(capacity_u64),
         seeds: ordered_seeds,
+        reset_seed_by_boundary,
         capacity,
         is_vdf_mining_enabled,
-    }
+    };
+    state.prune_reset_seeds();
+    state
 }
 
 /// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()
@@ -579,28 +695,39 @@ pub fn vdf_step_batch_is_valid(
     let batch_start_step_number = vdf_info.first_step_number() + batch_range.start as u64;
     let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
 
-    // Fast-path: if the range is already known locally and matches, skip the
-    // parallel VDF recomputation. `get_steps` returns owned data and releases
-    // the underlying read guard before we log or compare below.
-    match vdf_steps_guard.get_steps(ii(batch_start_step_number, batch_end_step_number)) {
-        Ok(steps) => {
-            tracing::debug!(
-                vdf.batch_start = batch_start_step_number,
-                vdf.batch_end = batch_end_step_number,
-                "Validating VDF steps from VdfStepsReadGuard!"
-            );
-            if steps.0.as_slice() == batch_steps {
-                // Checkpoints already proven in prevalidate; do not re-hash here.
-                return Ok(());
-            }
+    let previous_seed = if batch_range.start == 0 {
+        vdf_info.prev_output
+    } else {
+        vdf_info.steps[batch_range.start - 1]
+    };
 
-            // Mismatch: recompute from the block (buffer may be post-reorg poison).
+    // Fast path: skip the parallel recompute only when the buffer provably holds what the
+    // recompute would produce — same predecessor, same steps, and this block's seed folded at
+    // every reset boundary in the batch (`VdfState::holds_block_steps`). Equal steps alone are
+    // not enough: the loop may have folded another fork's seed, or a guess made on an older
+    // tip, and a block built from those steps must fail here exactly as it fails on a node
+    // that recomputes.
+    match vdf_steps_guard.read().holds_block_steps(
+        previous_seed,
+        batch_start_step_number,
+        batch_steps,
+        vdf_info.seed,
+        config.reset_frequency as u64,
+    ) {
+        Ok(true) => {
             tracing::debug!(
                 vdf.batch_start = batch_start_step_number,
                 vdf.batch_end = batch_end_step_number,
-                "Local VDF buffer disagrees with the block's claimed steps; recomputing from the block's own seed (buffer may be poisoned by a cross-boundary reorg)"
+                "VDF batch matches the local buffer and its reset seeds; skipping recompute"
             );
+            // Checkpoints already proven in prevalidate; do not re-hash here.
+            return Ok(());
         }
+        Ok(false) => tracing::debug!(
+            vdf.batch_start = batch_start_step_number,
+            vdf.batch_end = batch_end_step_number,
+            "Local VDF buffer differs from the block's steps, predecessor or reset seed; recomputing from the block's own seed"
+        ),
         Err(err) => tracing::debug!(
             vdf.batch_start = batch_start_step_number,
             vdf.batch_end = batch_end_step_number,
@@ -608,12 +735,6 @@ pub fn vdf_step_batch_is_valid(
             err.to_string()
         ),
     }
-
-    let previous_seed = if batch_range.start == 0 {
-        vdf_info.prev_output
-    } else {
-        vdf_info.steps[batch_range.start - 1]
-    };
 
     if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
         bail!("Cancelled");
@@ -776,6 +897,7 @@ pub mod test_helpers {
             minimum_step_to_keep: 0,
             capacity,
             seeds: VecDeque::default(),
+            reset_seed_by_boundary: BTreeMap::new(),
             is_vdf_mining_enabled,
         };
         Arc::new(RwLock::new(state))
@@ -845,6 +967,7 @@ mod tests {
             global_step_from_the_latest_canonical_block: 0,
             minimum_step_to_keep: 0,
             capacity: 1000,
+            reset_seed_by_boundary: BTreeMap::new(),
             seeds: {
                 let mut seeds = VecDeque::new();
                 // Only store the initial seed (step 0)
@@ -1035,6 +1158,7 @@ mod tests {
             minimum_step_to_keep: 0,
             capacity: 1000,
             seeds: VecDeque::from([Seed(prev_output)]),
+            reset_seed_by_boundary: BTreeMap::new(),
             is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         })));
         let validate = |info: &VDFLimiterInfo| {
@@ -1079,9 +1203,299 @@ mod tests {
             global_step_from_the_latest_canonical_block: current_step,
             minimum_step_to_keep: current_step.saturating_sub(capacity as u64),
             seeds: VecDeque::with_capacity(capacity),
+            reset_seed_by_boundary: BTreeMap::new(),
             capacity,
             is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// A buffer of steps `1..=last` computed as `run_vdf` does, folding `folded_seed` at every
+    /// reset boundary and recording `recorded_seed` for it.
+    fn buffer_with_folds(
+        config: &VdfConfig,
+        last: u64,
+        folded_seed: H256,
+        recorded_seed: Option<H256>,
+    ) -> VdfState {
+        let reset_frequency = config.reset_frequency as u64;
+        let mut state = vdf_state_at(0);
+        let mut checkpoints = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+        let mut running = H256::repeat_byte(0x11);
+        for step in 1..=last {
+            let salt = U256::from(step_number_to_salt_number(config, step - 1));
+            vdf_sha(
+                salt,
+                &mut running,
+                config.num_checkpoints_in_vdf_step,
+                config.num_iterations_per_checkpoint(),
+                &mut checkpoints,
+            );
+            state.store_step(Seed(running), step);
+            if step.is_multiple_of(reset_frequency) {
+                if let Some(recorded) = recorded_seed {
+                    state.record_reset_seed(step, recorded);
+                }
+                running = apply_reset_seed(running, folded_seed);
+            }
+        }
+        state
+    }
+
+    /// The block validation sees for buffered steps `[first, last]` of `state`.
+    fn block_over(state: &VdfState, first: u64, last: u64, seed: H256) -> VDFLimiterInfo {
+        let steps = state.get_steps(ii(first, last)).unwrap();
+        VDFLimiterInfo {
+            global_step_number: last,
+            output: *steps.0.last().unwrap(),
+            prev_output: state.get_steps(ii(first - 1, first - 1)).unwrap().0[0],
+            steps,
+            seed,
+            ..VDFLimiterInfo::default()
+        }
+    }
+
+    fn validate_block_steps(
+        config: &VdfConfig,
+        state: VdfState,
+        block: &VDFLimiterInfo,
+    ) -> eyre::Result<()> {
+        validate_batch_on_buffer(config, state, block, 0..block.steps.len(), false).0
+    }
+
+    /// Validate `batch` of `block` with `state` as the local buffer. Returns the result and
+    /// the final cancel flag (`InvalidStep` when a recompute found a bad step).
+    fn validate_batch_on_buffer(
+        config: &VdfConfig,
+        state: VdfState,
+        block: &VDFLimiterInfo,
+        batch: Range<usize>,
+        verify_last_step_checkpoints: bool,
+    ) -> (eyre::Result<()>, u8) {
+        let pool = crate::build_verification_pool(config);
+        let guard = VdfStateReadonly::new(Arc::new(RwLock::new(state)));
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let result = vdf_step_batch_is_valid(
+            &pool,
+            block,
+            config,
+            &guard,
+            batch,
+            verify_last_step_checkpoints,
+            Arc::clone(&cancel),
+        );
+        (result, cancel.load(Ordering::Relaxed))
+    }
+
+    /// Reset every 4 steps. 5 SHA iterations per checkpoint, so every step is a real hash
+    /// of the one before it and a wrong predecessor or seed changes the step.
+    fn reset_test_config() -> VdfConfig {
+        let mut node_config = NodeConfig::testing();
+        let vdf = &mut node_config.consensus.get_mut().vdf;
+        vdf.reset_frequency = 4;
+        vdf.num_checkpoints_in_vdf_step = 25;
+        vdf.sha_1s_difficulty = 25 * 5;
+        Config::new_with_random_peer_id(node_config).vdf.clone()
+    }
+
+    /// The fast path trusts the buffer only when the buffered predecessor, steps and
+    /// recorded reset seed all match the block. A buffer computed on another seed must not
+    /// accept a block that carries the buffer's steps under a different seed: validation
+    /// recomputes with the block's seed and rejects it, as a node with a clean buffer does.
+    #[test]
+    fn fast_path_requires_the_blocks_reset_seed() {
+        let config = reset_test_config();
+        let buffer_seed = H256::repeat_byte(0xA0);
+        let canonical_seed = H256::repeat_byte(0xB0);
+
+        // Honest: the block carries the seed the buffer folded at boundary 4.
+        let state = buffer_with_folds(&config, 8, buffer_seed, Some(buffer_seed));
+        let block = block_over(&state, 5, 8, buffer_seed);
+        assert!(
+            state
+                .holds_block_steps(block.prev_output, 5, &block.steps.0, buffer_seed, 4)
+                .unwrap()
+        );
+        validate_block_steps(&config, state, &block).expect("honest block validates");
+
+        // Same steps, but the block's seed is the canonical one: the buffer's fold is not
+        // this block's, so the fast path declines and the recompute rejects the steps.
+        let state = buffer_with_folds(&config, 8, buffer_seed, Some(buffer_seed));
+        let block = block_over(&state, 5, 8, canonical_seed);
+        assert!(
+            !state
+                .holds_block_steps(block.prev_output, 5, &block.steps.0, canonical_seed, 4)
+                .unwrap()
+        );
+        assert!(
+            validate_block_steps(&config, state, &block).is_err(),
+            "steps folded with another seed must be rejected"
+        );
+
+        // A correct block for the canonical seed still validates on that buffer, by recompute.
+        let canonical = buffer_with_folds(&config, 8, canonical_seed, Some(canonical_seed));
+        let block = block_over(&canonical, 5, 8, canonical_seed);
+        let state = buffer_with_folds(&config, 8, buffer_seed, Some(buffer_seed));
+        validate_block_steps(&config, state, &block).expect("recompute accepts a valid block");
+    }
+
+    /// Without a recorded reset seed, or with a different predecessor, the buffer is not
+    /// trusted either.
+    #[test]
+    fn fast_path_requires_recorded_seed_and_predecessor() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+
+        let unrecorded = buffer_with_folds(&config, 8, seed, None);
+        let block = block_over(&unrecorded, 5, 8, seed);
+        assert!(
+            !unrecorded
+                .holds_block_steps(block.prev_output, 5, &block.steps.0, seed, 4)
+                .unwrap()
+        );
+
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let block = block_over(&state, 5, 8, seed);
+        assert!(
+            !state
+                .holds_block_steps(H256::repeat_byte(0x99), 5, &block.steps.0, seed, 4)
+                .unwrap()
+        );
+        // No boundary is folded inside [6, 7], so only predecessor and steps count.
+        let inner = block_over(&unrecorded, 6, 7, H256::zero());
+        assert!(
+            unrecorded
+                .holds_block_steps(inner.prev_output, 6, &inner.steps.0, H256::zero(), 4)
+                .unwrap()
+        );
+    }
+
+    /// The block carries no last-step checkpoints, so a recompute fails on them. On a buffer
+    /// that holds the block's own lineage the batch passes: the fast path skipped the
+    /// recompute. On an empty buffer the same batch is recomputed and fails.
+    #[test]
+    fn fast_path_skips_the_recompute_for_the_blocks_own_steps() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let block = block_over(&state, 5, 8, seed);
+
+        let (result, _) = validate_batch_on_buffer(&config, state, &block, 0..4, true);
+        result.expect("buffer on the block's lineage proves the steps without a recompute");
+
+        let (result, _) = validate_batch_on_buffer(&config, vdf_state_at(0), &block, 0..4, true);
+        assert!(
+            result.is_err(),
+            "a recompute checks the last-step checkpoints"
+        );
+    }
+
+    /// A block that copies the buffered steps but names another predecessor is not the
+    /// buffer's lineage: the fast path declines and the recompute from the block's own
+    /// `prev_output` rejects it.
+    #[test]
+    fn buffered_steps_under_another_prev_output_are_rejected() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let mut block = block_over(&state, 5, 8, seed);
+        block.prev_output = H256::repeat_byte(0x22);
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 0..4, false);
+        assert!(result.is_err(), "copied steps on another parent must fail");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
+    }
+
+    /// A later batch starts from the block's own previous step, not from the buffer. When
+    /// that step is forged, the batch's predecessor differs from the buffer and the
+    /// recompute rejects the batch, though its own steps equal the buffer.
+    #[test]
+    fn later_batch_is_checked_from_the_blocks_previous_step() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let mut block = block_over(&state, 5, 8, seed);
+        block.steps.0[1] = H256::repeat_byte(0xFF);
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 2..4, false);
+        assert!(result.is_err(), "batch after a forged step must fail");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
+    }
+
+    /// A later batch that folds a reset boundary needs the block's seed recorded at that
+    /// boundary. The buffer folded another seed, so the batch is recomputed and rejected.
+    #[test]
+    fn later_batch_after_a_boundary_requires_the_blocks_reset_seed() {
+        let config = reset_test_config();
+        let buffer_seed = H256::repeat_byte(0xA0);
+        let block_seed = H256::repeat_byte(0xB0);
+        let state = buffer_with_folds(&config, 8, buffer_seed, Some(buffer_seed));
+        // Steps 3..=8; batch 2..4 is steps 5..=6, and step 5 folds boundary 4.
+        let block = block_over(&state, 3, 8, block_seed);
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 2..4, false);
+        assert!(result.is_err(), "steps folded with another seed must fail");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
+    }
+
+    /// A block whose steps join two lineages (this buffer's up to step 6, another seed's
+    /// after it) differs from the buffer, so it is recomputed and rejected at the join.
+    #[test]
+    fn block_spliced_from_two_lineages_is_rejected() {
+        let config = reset_test_config();
+        let seed = H256::repeat_byte(0xA0);
+        let state = buffer_with_folds(&config, 8, seed, Some(seed));
+        let other = buffer_with_folds(&config, 8, H256::repeat_byte(0xB0), None);
+        let mut block = block_over(&state, 5, 8, seed);
+        let other_tail = other.get_steps(ii(7, 8)).unwrap();
+        assert_ne!(
+            other_tail.0[0], block.steps.0[2],
+            "lineages differ after boundary 4"
+        );
+        block.steps.0[2..].copy_from_slice(&other_tail.0);
+        block.output = block.steps.0[3];
+
+        let (result, cancel) = validate_batch_on_buffer(&config, state, &block, 0..4, false);
+        assert!(result.is_err(), "a spliced range must fail at the join");
+        assert_eq!(cancel, CancelEnum::InvalidStep as u8);
+    }
+
+    /// `rewrite_tail` replaces the newest steps in place, records the new reset seeds and
+    /// leaves the counter alone; `store_step` drops reset seeds that fall out of the buffer.
+    #[test]
+    fn rewrite_tail_and_reset_seed_pruning() {
+        let mut state = vdf_state_at(0);
+        for step in 1..=10 {
+            state.store_step(Seed(H256::from_low_u64_be(step)), step);
+        }
+        state.record_reset_seed(4, H256::repeat_byte(0x04));
+        state.record_reset_seed(8, H256::repeat_byte(0x08));
+
+        state.rewrite_tail(
+            9,
+            vec![H256::repeat_byte(0x09), H256::repeat_byte(0x0A)],
+            [(8, H256::repeat_byte(0x88))],
+        );
+        assert_eq!(state.current_step(), 10);
+        assert_eq!(
+            state.get_steps(ii(8, 10)).unwrap().0,
+            vec![
+                H256::from_low_u64_be(8),
+                H256::repeat_byte(0x09),
+                H256::repeat_byte(0x0A)
+            ]
+        );
+        assert_eq!(state.reset_seed_at(8), Some(H256::repeat_byte(0x88)));
+
+        // A canonical step of 69 with capacity 64 lets the buffer drop one old step per new
+        // step; after step 15, steps 1..=5 are gone, so boundary 4 (which produced step 5)
+        // is no longer needed.
+        state.set_canonical_step(69);
+        for step in 11..=15 {
+            state.store_step(Seed(H256::from_low_u64_be(step)), step);
+        }
+        assert_eq!(state.first_buffered_step(), 6);
+        assert_eq!(state.reset_seed_at(4), None);
+        assert_eq!(state.reset_seed_at(8), Some(H256::repeat_byte(0x88)));
     }
 
     proptest::proptest! {
@@ -1134,6 +1548,7 @@ mod tests {
                 seeds: (0..initial_seeds)
                     .map(|i| Seed(H256::from_low_u64_be(i as u64)))
                     .collect(),
+                reset_seed_by_boundary: BTreeMap::new(),
                 capacity,
                 is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
             };
@@ -1182,7 +1597,7 @@ mod tests {
 
         // Canonical window of the same length (steps 1..=10), different values.
         let canonical: VecDeque<Seed> = (1..=10).map(|i| Seed(H256::from_low_u64_be(i))).collect();
-        state.reanchor_seeds(canonical.clone());
+        state.reanchor_seeds(canonical.clone(), BTreeMap::new());
 
         // Counter is unchanged (forward, never rewound).
         assert_eq!(state.current_step(), 10);
@@ -1198,15 +1613,35 @@ mod tests {
         assert_eq!(last_seed, Seed(H256::from_low_u64_be(10)));
     }
 
-    /// A corrected window longer than `capacity` (canonical window + recomputed
-    /// tail) is trimmed to the NEWEST `capacity` seeds — `store_step`'s
-    /// one-pop-per-push would otherwise carry the excess forever.
+    /// A re-anchor keeps a free-run tail that is longer than `capacity`: block production
+    /// and a later reset-seed check need the steps right after the canonical tip.
+    #[test]
+    fn reanchor_seeds_keeps_a_free_run_tail_longer_than_capacity() {
+        // Capacity 64, live step 100, canonical step 20: the 80 steps past the canonical tip
+        // and the 20 below it all stay, as `store_step` would have kept them.
+        let mut state = vdf_state_at(100);
+        state.set_canonical_step(20);
+        let corrected: VecDeque<Seed> = (1..=100).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        state.reanchor_seeds(corrected, BTreeMap::new());
+
+        assert_eq!(state.seeds.len(), 100);
+        let steps = state.get_steps(ii(1, 100)).expect("whole window retained");
+        assert_eq!(
+            steps.0[20],
+            H256::from_low_u64_be(21),
+            "first step past the canonical tip"
+        );
+    }
+
+    /// A corrected window that reaches more than `capacity` steps below the canonical step
+    /// is trimmed there — `store_step`'s one-pop-per-push would otherwise carry the excess
+    /// forever.
     #[test]
     fn reanchor_seeds_trims_oldest_down_to_capacity() {
         // vdf_state_at uses capacity 64; install a 70-seed window at step 70.
         let mut state = vdf_state_at(70);
         let corrected: VecDeque<Seed> = (1..=70).map(|i| Seed(H256::from_low_u64_be(i))).collect();
-        state.reanchor_seeds(corrected);
+        state.reanchor_seeds(corrected, BTreeMap::new());
 
         assert_eq!(state.current_step(), 70);
         assert_eq!(state.seeds.len(), 64, "trimmed to capacity");
@@ -1444,6 +1879,45 @@ mod tests {
         );
     }
 
+    /// The loop's own tail recompute freezes the counter too, without marking the
+    /// buffer suspect; the wait must ride it out the same way.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_or_suspect_rides_out_a_tail_recompute() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(Arc::clone(&inner));
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        signals.begin_recompute();
+
+        let recompute = {
+            let inner = Arc::clone(&inner);
+            let signals = signals.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(40)).await;
+                inner
+                    .write()
+                    .unwrap()
+                    .global_step
+                    .store(200, Ordering::Relaxed);
+                signals.finish_recompute(true);
+            })
+        };
+
+        let result = readonly
+            .wait_for_step_or_suspect(
+                200,
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(15),
+                &signals,
+            )
+            .await;
+
+        recompute.await.unwrap();
+        assert!(result.is_ok(), "got: {result:?}");
+        assert!(!signals.is_buffer_suspect());
+        assert_eq!(signals.generation(), 1);
+    }
+
     /// The suppression is scoped to the suspect window only: with a clean buffer a
     /// genuinely frozen counter must still surface `Stalled`, preserving the
     /// dead-VDF-writer guard.
@@ -1541,7 +2015,7 @@ mod tests {
 
     struct FakeSeedSource(VdfBootstrap);
     impl VdfSeedSource for FakeSeedSource {
-        fn vdf_bootstrap(&self, _capacity: usize) -> VdfBootstrap {
+        fn vdf_bootstrap(&self, _capacity: usize, _reset_frequency: u64) -> VdfBootstrap {
             self.0.clone()
         }
     }
@@ -1558,6 +2032,7 @@ mod tests {
             global_step: 5,
             first_step: 1,
             ordered_seeds: seeds.clone(),
+            reset_seed_by_boundary: BTreeMap::new(),
         });
 
         let state = create_state(&source, Arc::clone(&mining), &config);

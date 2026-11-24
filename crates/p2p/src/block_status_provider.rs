@@ -1,7 +1,7 @@
 use irys_domain::{BlockIndexReadGuard, BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{
     BlockHash, BlockIndexItem, H256,
-    block_provider::{BlockProvider, CanonicalVdfSnapshot},
+    block_provider::{BlockProvider, CanonicalBlockVdf, CanonicalVdfSnapshot},
 };
 use tracing::debug;
 #[cfg(test)]
@@ -69,8 +69,8 @@ pub struct BlockStatusProvider {
     /// (same height, different hash) is still treated as a potential reorg
     /// candidate rather than a pruned fork. Derived from `block_tree_depth`.
     max_reorg_depth: u64,
-    /// Confirmation depth (in blocks) past which a reset seed is treated as final by
-    /// the VDF reset-boundary gate. Equals `block_migration_depth`.
+    /// Confirmation depth used to bound the VDF loop's reset-seed checks.
+    /// Equals `block_migration_depth`.
     block_migration_depth: u64,
 }
 
@@ -465,8 +465,8 @@ impl BlockStatusProvider {
     }
 }
 
-impl BlockProvider for BlockStatusProvider {
-    fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+impl BlockStatusProvider {
+    fn vdf_snapshot(&self, step_number: u64, include_steps: bool) -> CanonicalVdfSnapshot {
         let binding = self.block_tree_read_guard.read();
         let tip = binding.get_latest_canonical_entry();
         let reset_seed_for_step = binding
@@ -475,12 +475,47 @@ impl BlockProvider for BlockStatusProvider {
             // If `step_number` predates the earliest cached canonical entry, preserve the prior
             // tip-seed fallback rather than synthesizing a new policy here.
             .unwrap_or(tip.header().vdf_limiter_info.next_seed);
-        Some(CanonicalVdfSnapshot {
+        let unconfirmed_blocks = binding
+            .unconfirmed_canonical_entries(self.block_migration_depth)
+            .iter()
+            .map(|entry| {
+                let info = &entry.header().vdf_limiter_info;
+                CanonicalBlockVdf {
+                    first_step: info.first_step_number(),
+                    last_step: info.global_step_number,
+                    seed: info.seed,
+                    // The buffer fast path trusts copied steps, so only fully valid
+                    // blocks may supply them. Other entries force recomputation.
+                    steps: (include_steps && binding.can_be_built_upon(&entry.header().block_hash))
+                        .then(|| info.steps.clone()),
+                }
+            })
+            .collect();
+        let confirmed_global_step_number =
+            binding.confirmed_canonical_step(self.block_migration_depth);
+        let confirmed_output = binding
+            .canonical_entry_at_or_below_step(confirmed_global_step_number)
+            .expect("confirmed block belongs to the canonical cache")
+            .header()
+            .vdf_limiter_info
+            .output;
+        CanonicalVdfSnapshot {
             vdf_info: tip.header().vdf_limiter_info.clone(),
-            confirmed_global_step_number: binding
-                .confirmed_canonical_step(self.block_migration_depth),
+            confirmed_global_step_number,
+            confirmed_output,
             reset_seed_for_step,
-        })
+            unconfirmed_blocks,
+        }
+    }
+}
+
+impl BlockProvider for BlockStatusProvider {
+    fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+        Some(self.vdf_snapshot(step_number, false))
+    }
+
+    fn canonical_vdf_snapshot_with_steps(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+        Some(self.vdf_snapshot(step_number, true))
     }
 }
 
@@ -523,6 +558,7 @@ mod tests {
             genesis.vdf_limiter_info.global_step_number
         );
         assert_eq!(snap.reset_seed_for_step, genesis.vdf_limiter_info.next_seed);
+        assert_eq!(snap.confirmed_output, genesis.vdf_limiter_info.output);
     }
 
     #[test]
@@ -583,18 +619,52 @@ mod tests {
         );
     }
 
+    /// The canonical snapshot lists only blocks on the tip's path, and only they can
+    /// supply steps for the VDF loop to copy. A validated block that is not the tip is
+    /// not listed, so the loop never copies steps of a block that is not canonical.
+    #[rstest]
+    #[case(ChainState::Validated(BlockState::ValidBlock))]
+    #[case(ChainState::Validated(BlockState::Unknown))]
+    #[case(ChainState::Validated(BlockState::ValidationScheduled))]
+    fn canonical_snapshot_copies_steps_only_on_the_tip_path(#[case] state: ChainState) {
+        let (provider, genesis, _tmp) = mock_provider();
+        let consensus = NodeConfig::testing().consensus_config();
+        let mut chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &consensus);
+        let block = &mut chain[0];
+        block.previous_cumulative_diff = genesis.cumulative_diff;
+        block.cumulative_diff = genesis.cumulative_diff + U256::from(1);
+        provider.add_block_mock_with_state(block, state);
+        let snapshot = provider.canonical_vdf_snapshot_with_steps(0).unwrap();
+        assert!(snapshot.unconfirmed_blocks.is_empty());
+
+        provider
+            .block_tree_read_guard
+            .write()
+            .mark_tip(&block.block_hash)
+            .unwrap();
+        let snapshot = provider.canonical_vdf_snapshot_with_steps(0).unwrap();
+        assert_eq!(snapshot.unconfirmed_blocks.len(), 1);
+        assert_eq!(
+            snapshot.unconfirmed_blocks[0].steps,
+            Some(block.vdf_limiter_info.steps.clone())
+        );
+        assert!(
+            provider
+                .canonical_vdf_snapshot(0)
+                .unwrap()
+                .unconfirmed_blocks[0]
+                .steps
+                .is_none()
+        );
+    }
+
     // Every `ChainState` variant that should resolve to `InTreePendingValidation`:
     //
     // - `NotOnchain(Unknown)`: default state after `BlockTree::add_block` —
     //   the canonical "in tree pending validation" state.
-    // - `Validated(Unknown)`: locally-produced blocks are inserted directly as
-    //   `ChainState::Validated(BlockState::Unknown)` (see `BlockTree::add_common`
-    //   call sites). `block_status` must still treat this as
-    //   `InTreePendingValidation` so children of a not-yet-fully-validated local
-    //   block don't enter the orphan re-pull path.
-    // - `Validated(ValidationScheduled)`: the state a locally produced block
-    //   transitions to once `mark_block_as_validation_scheduled` fires but
-    //   before validation completes.
+    // - `Validated(Unknown|ValidationScheduled)`: synthetic states exercised here
+    //   because the tree permits them. Pending parents must remain distinguishable
+    //   from absent blocks, regardless of their chain-state wrapper.
     #[rstest]
     #[case(ChainState::NotOnchain(BlockState::Unknown))]
     #[case(ChainState::NotOnchain(BlockState::ValidationScheduled))]

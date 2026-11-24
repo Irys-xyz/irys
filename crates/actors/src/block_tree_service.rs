@@ -2,7 +2,7 @@ use crate::{
     StorageModuleServiceMessage,
     block_migration_service::BlockMigrationService,
     block_validation::{
-        PreValidationError, build_fork_local_step_window, resolve_header_tree_or_db,
+        PreValidationError, build_fork_local_step_window_visiting, resolve_header_tree_or_db,
     },
     chunk_ingress_service::ChunkIngressMessage,
     mempool_service::MempoolServiceMessage,
@@ -28,12 +28,13 @@ use irys_types::{
 };
 use irys_vdf::{
     ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,
+    reset_seeds_folded_by_block,
     state::{VdfStateReadonly, calc_capacity},
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
     sync::{Arc, RwLock},
     time::SystemTime,
@@ -422,11 +423,10 @@ impl BlockTreeService {
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting BlockTree service");
 
-        // VDF re-anchor watchdog: the suspect buffer's message-driven retry
-        // sources all need an inbound canonical block, so on a quiet network a
-        // skipped heal would otherwise have no retry at all. Rationale, cure
-        // scope, and the never-clears-suspect rule live on
-        // `retry_vdf_reanchor_if_suspect`.
+        // Wake immediately when the VDF detects a lineage mismatch. The watchdog
+        // remains a backstop for skipped requests whose tip or live step changes.
+        let reanchor_signals = self.inner.service_senders.vdf_reanchor_signals.clone();
+        let mut handled_suspect_generation = None;
         let mut vdf_reanchor_watchdog = tokio::time::interval(VDF_REANCHOR_WATCHDOG_INTERVAL);
         vdf_reanchor_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -438,6 +438,13 @@ impl BlockTreeService {
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block tree service");
                     break;
+                }
+                generation = reanchor_signals.wait_for_suspect(handled_suspect_generation) => {
+                    // A completed heal starts a new episode even at the same tip and step.
+                    self.inner.vdf_reanchor_watchdog_last_sent = None;
+                    if self.inner.retry_vdf_reanchor_if_suspect() {
+                        handled_suspect_generation = Some(generation);
+                    }
                 }
                 // At most one tick per interval, so despite the biased order
                 // this cannot starve the message arm below.
@@ -1494,9 +1501,13 @@ impl BlockTreeServiceInner {
 
     /// Queue a VDF seed-buffer re-anchor after a deep reorg that may have
     /// crossed a divergent reset boundary. See
-    /// `design/docs/vdf-reset-seed-confirmation-gate.md`.
+    /// `design/docs/vdf-reset-seed-fork-handling.md`.
     fn maybe_reanchor_vdf_after_reorg(&self, canonical_tip: &IrysBlockHeader, reorg: &ReorgEvent) {
-        // Shallow reorgs stay inside the confirmation gate's safe window.
+        // A reorg within the migration depth only changes seeds of boundaries above
+        // the confirmed step. `run_vdf` checks those against the canonical chain
+        // itself and recomputes the steps after the first changed one: at most the
+        // steps above the confirmed step. A deeper reorg can change seeds below the
+        // confirmed step, which `run_vdf` does not check.
         let migration_depth = usize::try_from(self.config.consensus.block_migration_depth)
             .expect("block_migration_depth must fit in usize");
         if reorg.old_fork.len() <= migration_depth {
@@ -1555,8 +1566,21 @@ impl BlockTreeServiceInner {
         let want_start = c_step.saturating_sub(capacity.saturating_sub(1)).max(1);
         let block_tree_guard = BlockTreeReadGuard::new(Arc::clone(&self.cache));
         let resolve = |hash: &H256| resolve_header_tree_or_db(&block_tree_guard, &self.db, hash);
-        let Some(window) = build_fork_local_step_window(canonical_tip, want_start, c_step, resolve)
-        else {
+        let reset_frequency = self.config.consensus.vdf.reset_frequency as u64;
+        let mut reset_seed_by_boundary = BTreeMap::new();
+        let collect_reset_seeds = |header: &IrysBlockHeader| {
+            reset_seed_by_boundary.extend(
+                reset_seeds_folded_by_block(&header.vdf_limiter_info, reset_frequency)
+                    .filter(|(boundary, _)| *boundary + 1 >= want_start),
+            );
+        };
+        let Some(window) = build_fork_local_step_window_visiting(
+            canonical_tip,
+            want_start,
+            c_step,
+            resolve,
+            collect_reset_seeds,
+        ) else {
             warn!(
                 c_step,
                 want_start,
@@ -1571,6 +1595,7 @@ impl BlockTreeServiceInner {
             c_step,
             seed: canonical_tip.vdf_limiter_info.seed,
             next_seed: canonical_tip.vdf_limiter_info.next_seed,
+            reset_seed_by_boundary,
         };
         if self.service_senders.vdf_reanchor.try_send(request) {
             info!(c_step, "Queued a VDF seed-buffer re-anchor request");
@@ -1587,14 +1612,25 @@ impl BlockTreeServiceInner {
 
     /// While the buffer is suspect, re-send a re-anchor if tip/live-step inputs
     /// changed (quiet-network backstop; never clears suspect itself).
-    fn retry_vdf_reanchor_if_suspect(&mut self) {
+    /// Returns whether this suspect episode was handled, even if publication failed.
+    fn retry_vdf_reanchor_if_suspect(&mut self) -> bool {
         if !self
             .service_senders
             .vdf_reanchor_signals
             .is_buffer_suspect()
         {
             self.vdf_reanchor_watchdog_last_sent = None;
-            return;
+            return false;
+        }
+
+        // The VDF re-marks suspect when consuming a queued request. That repair
+        // already has its inputs; publishing again would feed another heal.
+        if self
+            .service_senders
+            .vdf_reanchor_signals
+            .is_recompute_in_progress()
+        {
+            return false;
         }
 
         // Drop the cache guard before send_reanchor_request takes its own reads.
@@ -1604,12 +1640,12 @@ impl BlockTreeServiceInner {
                 error!(
                     "block tree cache read lock poisoned in the VDF re-anchor watchdog; skipping tick"
                 );
-                return;
+                return true;
             }
         };
         let Some(canonical_tip) = canonical_tip else {
             error!("canonical tip missing from cache in the VDF re-anchor watchdog; skipping tick");
-            return;
+            return true;
         };
 
         let inputs = (canonical_tip.block_hash, self.vdf_state.current_step());
@@ -1619,18 +1655,19 @@ impl BlockTreeServiceInner {
                 live_step = inputs.1,
                 "VDF buffer still suspect; watchdog inputs unchanged, awaiting fresher state"
             );
-            return;
+            return true;
         }
 
         warn!(
             c_step = canonical_tip.vdf_limiter_info.global_step_number,
             live_step = inputs.1,
-            "VDF buffer suspect with no message-driven retry; watchdog re-firing the re-anchor request"
+            "VDF buffer suspect; publishing a re-anchor request for the current canonical tip"
         );
         metrics::record_vdf_reanchor_watchdog_retry();
         if self.send_reanchor_request(&canonical_tip) {
             self.vdf_reanchor_watchdog_last_sent = Some(inputs);
         }
+        true
     }
 
     /// Shared discard path for soft `InternalFailure` and `Invalid` results.
@@ -2941,6 +2978,57 @@ mod tests {
             "the seeded block must become the canonical tip"
         );
         tip
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn suspect_notification_publishes_reanchor_before_watchdog() {
+        use std::time::Duration;
+
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().block_migration_depth = 1;
+            c.consensus.get_mut().vdf.reset_frequency = 4;
+        });
+        let (tip, steps) = canonical_tip(20, H256::repeat_byte(0x99));
+        make_cache_tip(&mut h, tip, 6000);
+        let signals = h.inner.service_senders.vdf_reanchor_signals.clone();
+        let (shutdown_tx, shutdown) = reth::tasks::shutdown::signal();
+        let (_msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = BlockTreeService {
+            shutdown,
+            msg_rx,
+            inner: h.inner,
+        };
+        let handle = tokio::spawn(service.start());
+        // Consume the interval's immediate first tick while the buffer is healthy.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!h.vdf_reanchor_rx.has_changed().unwrap());
+        for _ in 0..2 {
+            signals.mark_buffer_suspect();
+            tokio::time::timeout(Duration::from_millis(100), h.vdf_reanchor_rx.changed())
+                .await
+                .expect("suspect notification must beat the watchdog")
+                .unwrap();
+            let request = h.vdf_reanchor_rx.borrow_and_update().clone().unwrap();
+            assert_eq!(request.c_step, 20);
+            assert_eq!(
+                request
+                    .canonical_seeds
+                    .iter()
+                    .map(|s| s.0)
+                    .collect::<Vec<_>>(),
+                steps
+            );
+            // Repeated marks in one episode must neither publish again nor spin.
+            signals.mark_buffer_suspect();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), h.vdf_reanchor_rx.changed())
+                    .await
+                    .is_err()
+            );
+            signals.test_record_heal_applied();
+        }
+        shutdown_tx.fire();
+        handle.await.unwrap().unwrap();
     }
 
     #[test]

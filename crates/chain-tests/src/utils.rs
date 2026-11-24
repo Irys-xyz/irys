@@ -326,16 +326,14 @@ pub async fn capacity_chunk_solution(
             sleep(Duration::from_millis(200)).await;
             tries += 1;
         }
-        // Never advance past the latest AVAILABLE VDF step. When the confirmation gate parks
-        // the VDF at a reset boundary, the step counter stops here; targeting the un-produced
-        // boundary step would make `get_steps` fail. Mining a solution at an available step still
-        // produces a block, which advances the confirmed step so the gate releases for the next
-        // block (exactly how a real node crosses a reset boundary).
+        // Never advance past the latest AVAILABLE VDF step: when the VDF is paused (sync,
+        // a pending re-anchor) the step counter stops here, and targeting an un-produced step
+        // would make `get_steps` fail.
         current_step = vdf_steps_guard.current_step();
     }
 
     // Fallback: if no valid solution found, return the best-effort solution for the latest step (may fail prevalidation)
-    // Use the latest AVAILABLE step — the gate may have parked the VDF at a reset boundary.
+    // Use the latest AVAILABLE step — the VDF may be paused.
     let current_step = vdf_steps_guard.current_step();
     let steps: H256List = vdf_steps_guard
         .read()

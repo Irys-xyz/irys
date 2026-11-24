@@ -2128,10 +2128,10 @@ mod tests {
         // The VDF thread re-anchors the buffer in place (steps 1..=3 rewritten onto
         // canonical seeds) and then broadcasts `Reanchored`.
         let corrected: Vec<H256> = (1..=3_u8).map(|n| H256::repeat_byte(0xB0 + n)).collect();
-        vdf_state
-            .write()
-            .unwrap()
-            .reanchor_seeds(corrected.iter().copied().map(Seed).collect());
+        vdf_state.write().unwrap().reanchor_seeds(
+            corrected.iter().copied().map(Seed).collect(),
+            Default::default(),
+        );
 
         inner.handle_reanchored();
         assert_eq!(
