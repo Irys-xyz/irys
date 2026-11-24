@@ -133,9 +133,9 @@ the active width.
 
   submodule-index-convert verify-rocks <submodule>/rocks <other>/rocks
 
-rocks-to-mdbx writes an MDBX schema v2 index for a 4.1.x node, which
-reads MDBX. This build opens RocksDB only. rocks-to-mdbx reads RocksDB v1
-only. Release 4.0.x cannot read the result. There is no rollback to 4.0.x.
+rocks-to-mdbx writes an MDBX schema v3 index, keyed by data commitment.
+Release 4.1.x reads schema v2 only, so it cannot read the result, and this
+build opens RocksDB only. rocks-to-mdbx reads RocksDB v1 only.
 
 verify, verify-rocks, and mdbx-to-rocks --verify exit 1 when a compared value
 differs or when a placement was skipped because the consensus database does not
