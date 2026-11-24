@@ -7,65 +7,35 @@ use super::super::util::{
 use crate::types::{GossipResponse, RejectionReason};
 use crate::wire_types::ChunkAnnouncement;
 use irys_database::db::DatabaseProviderCacheExt as _;
+use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-    DataTransactionMetadata, GossipCacheKey, GossipRequestV2, H256, PeerListItem, SendTraced as _,
-    TxChunkOffset, UnpackedChunk,
+    ChunkKey, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+    DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, DataTreeRoot, GossipCacheKey,
+    GossipRequestV2, H256, PeerListItem, SendTraced as _, TxChunkOffset, UnpackedChunk,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-/// A self-consistent one-chunk body of `chunk_size` bytes filled with `fill`.
+/// A self-consistent one-chunk body of `chunk_size` bytes filled with `fill`,
+/// built under the testing geometry with `chunk_size`-byte chunks.
 pub(super) fn valid_chunk(chunk_size: u64, fill: u8) -> UnpackedChunk {
+    let consensus = ConsensusConfig {
+        chunk_size,
+        ..ConsensusConfig::testing()
+    };
     let len = usize::try_from(chunk_size).expect("chunk size fits usize");
-    let bytes = vec![fill; len];
-    // clone: generate_leaves consumes the iterator item and the chunk keeps the body
-    let leaves =
-        irys_types::generate_leaves(std::iter::once(Ok(bytes.clone())), len).expect("leaves");
-    let root = irys_types::generate_data_root(leaves).expect("root");
-    let data_root = H256(root.id);
-    let proof = irys_types::resolve_proofs(root, None)
-        .expect("proofs")
+    let transaction = IrysSigner::random_signer(&consensus)
+        .create_transaction(vec![fill; len], H256::zero())
+        .expect("create transaction");
+    transaction
+        .data_chunks()
+        .expect("chunks")
         .into_iter()
         .next()
-        .expect("one proof");
-    UnpackedChunk {
-        data_root,
-        data_size: chunk_size,
-        data_path: proof.proof.into(),
-        bytes: bytes.into(),
-        tx_offset: TxChunkOffset::from(0),
-    }
-}
-
-/// The first chunk of a two-chunk root of `chunk_size`-byte chunks. Not
-/// rightmost, so its path proves it at any `data_size` past its range.
-fn first_of_two_chunks(chunk_size: u64, fill: u8) -> UnpackedChunk {
-    let len = usize::try_from(chunk_size).expect("chunk size fits usize");
-    let first = vec![fill; len];
-    // clone: generate_leaves consumes the bytes the chunk keeps
-    let leaves = irys_types::generate_leaves(
-        [Ok(first.clone()), Ok(vec![fill.wrapping_add(1); len])].into_iter(),
-        len,
-    )
-    .expect("leaves");
-    let root = irys_types::generate_data_root(leaves).expect("root");
-    let data_root = H256(root.id);
-    let proof = irys_types::resolve_proofs(root, None)
-        .expect("proofs")
-        .into_iter()
-        .next()
-        .expect("first proof");
-    UnpackedChunk {
-        data_root,
-        data_size: chunk_size * 2,
-        data_path: proof.proof.into(),
-        bytes: first.into(),
-        tx_offset: TxChunkOffset::from(0),
-    }
+        .expect("one chunk")
 }
 
 pub(super) fn chunk_size(fixture: &GossipServiceTestFixture) -> u64 {
@@ -76,24 +46,28 @@ pub(super) fn chunk_size(fixture: &GossipServiceTestFixture) -> u64 {
 pub(super) fn cache_root(fixture: &GossipServiceTestFixture, chunk: &UnpackedChunk) {
     let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
         tx: DataTransactionHeaderV1 {
-            data_root: chunk.data_root,
+            data_tree_root: chunk.data_tree_root,
             data_size: chunk.data_size,
             ..Default::default()
         },
         metadata: DataTransactionMetadata::new(),
     });
+    let geometry = fixture.config.data_tree_geometry();
     fixture
         .db
-        .update_cache_eyre(|tx| irys_database::cache_data_root(tx, &header, None).map(|_| ()))
+        .update_cache_eyre(|tx| {
+            irys_database::cache_data_root(tx, &header, None, &geometry).map(|_| ())
+        })
         .expect("cache data root");
 }
 
 /// Cache the root and the body, as a node that holds the chunk.
 pub(super) fn cache_body(fixture: &GossipServiceTestFixture, chunk: &UnpackedChunk) {
     cache_root(fixture, chunk);
+    let geometry = fixture.config.data_tree_geometry();
     fixture
         .db
-        .update_cache_eyre(|tx| irys_database::cache_chunk(tx, chunk).map(|_| ()))
+        .update_cache_eyre(|tx| irys_database::cache_chunk(tx, chunk, &geometry).map(|_| ()))
         .expect("cache chunk");
 }
 
@@ -175,9 +149,9 @@ pub(super) fn serving_fake(chunks: Vec<UnpackedChunk>) -> (FakeGossipServer, Arc
     fake.set_on_chunk_fetch(move |claim: ChunkAnnouncement| {
         counter.fetch_add(1, Ordering::SeqCst);
         let found = chunks.iter().find(|chunk| {
-            chunk.data_root == claim.data_root
+            chunk.data_tree_root == claim.data_tree_root
+                && chunk.data_size == claim.data_size
                 && chunk.tx_offset == claim.tx_offset
-                && chunk.chunk_path_hash() == claim.chunk_path_hash
         });
         GossipResponse::Accepted(found.cloned())
     });
@@ -195,11 +169,16 @@ pub(super) fn add_fake_peer(
     item
 }
 
-pub(super) fn held(fixture: &GossipServiceTestFixture, hash: &H256) -> bool {
+/// The key `fixture` caches `chunk` under.
+pub(super) fn key(fixture: &GossipServiceTestFixture, chunk: &UnpackedChunk) -> ChunkKey {
+    chunk.chunk_key(&fixture.config.data_tree_geometry())
+}
+
+pub(super) fn held(fixture: &GossipServiceTestFixture, chunk: &UnpackedChunk) -> bool {
     fixture
         .data_handler()
         .expect("handler after run_service")
-        .chunk_is_held(hash)
+        .chunk_is_held(&key(fixture, chunk))
 }
 
 #[tokio::test]
@@ -217,9 +196,9 @@ async fn valid_push_is_held_and_counted() -> eyre::Result<()> {
         data: chunk.clone(),
     };
     handler.handle_chunk(request).await?;
-    assert!(handler.chunk_is_held(&chunk.chunk_path_hash()));
+    assert!(handler.chunk_is_held(&key(&receiver, &chunk)));
     assert_eq!(handler.chunk_announce.stats().bodies_push, 1);
-    assert!(!handler.chunk_announce.is_arriving(&chunk.chunk_path_hash()));
+    assert!(!handler.chunk_announce.is_arriving(&key(&receiver, &chunk)));
     handle.stop().await?;
     Ok(())
 }
@@ -247,21 +226,23 @@ async fn truncated_push_is_rejected_and_not_recorded() -> eyre::Result<()> {
         matches!(error, crate::GossipError::InvalidData(_)),
         "got {error:?}"
     );
-    assert!(!handler.chunk_is_held(&chunk.chunk_path_hash()));
+    assert!(!handler.chunk_is_held(&key(&receiver, &chunk)));
     assert!(
         !handler
             .cache
-            .peers_that_have_seen(&irys_types::GossipCacheKey::Chunk(chunk.chunk_path_hash()))?
+            .peers_that_have_seen(&irys_types::GossipCacheKey::Chunk(key(&receiver, &chunk)))?
             .contains(&source)
     );
     assert_eq!(handler.chunk_announce.stats().bodies_push, 0);
-    assert!(!handler.chunk_announce.is_arriving(&chunk.chunk_path_hash()));
+    assert!(!handler.chunk_announce.is_arriving(&key(&receiver, &chunk)));
     handle.stop().await?;
     Ok(())
 }
 
+/// A fetch names the chunk by data tree root, `data_size` and index. The
+/// size is part of the commitment, so another size names another chunk.
 #[tokio::test]
-async fn chunk_fetch_serves_cached_body_with_local_size() -> eyre::Result<()> {
+async fn chunk_fetch_serves_the_cached_body_of_the_named_commitment() -> eyre::Result<()> {
     let mut server = GossipServiceTestFixture::new();
     let requester = GossipServiceTestFixture::new();
     server.add_peer(&requester);
@@ -271,9 +252,7 @@ async fn chunk_fetch_serves_cached_body_with_local_size() -> eyre::Result<()> {
     wait_until_listening(server.gossip_addr()).await;
     let from = requester.create_default_peer_entry();
 
-    let mut lying = ChunkAnnouncement::from(&chunk);
-    lying.data_size = 1;
-    match post_fetch(server.gossip_addr(), &from, lying).await {
+    match post_fetch(server.gossip_addr(), &from, ChunkAnnouncement::from(&chunk)).await {
         GossipResponse::Accepted(Some(served)) => {
             assert_eq!(served.data_size, chunk.data_size);
             assert_eq!(served.bytes, chunk.bytes);
@@ -281,10 +260,17 @@ async fn chunk_fetch_serves_cached_body_with_local_size() -> eyre::Result<()> {
         other => panic!("expected a served body, got {other:?}"),
     }
 
-    let mut wrong_hash = ChunkAnnouncement::from(&chunk);
-    wrong_hash.chunk_path_hash = H256::random();
+    let mut other_size = ChunkAnnouncement::from(&chunk);
+    other_size.data_size = 1;
     assert!(matches!(
-        post_fetch(server.gossip_addr(), &from, wrong_hash).await,
+        post_fetch(server.gossip_addr(), &from, other_size).await,
+        GossipResponse::Accepted(None)
+    ));
+
+    let mut other_root = ChunkAnnouncement::from(&chunk);
+    other_root.data_tree_root = DataTreeRoot(H256::random());
+    assert!(matches!(
+        post_fetch(server.gossip_addr(), &from, other_root).await,
         GossipResponse::Accepted(None)
     ));
     handle.stop().await?;
@@ -298,9 +284,12 @@ async fn chunk_fetch_omits_a_body_that_does_not_prove_the_cached_size() -> eyre:
     server.add_peer(&requester);
     let chunk = valid_chunk(chunk_size(&server), 5);
     cache_root(&server, &chunk);
+    let geometry = server.config.data_tree_geometry();
     server
         .db
-        .update_cache_eyre(|tx| irys_database::cache_chunk(tx, &truncated(&chunk)).map(|_| ()))
+        .update_cache_eyre(|tx| {
+            irys_database::cache_chunk(tx, &truncated(&chunk), &geometry).map(|_| ())
+        })
         .expect("cache truncated chunk");
     let (handle, _) = server.run_service();
     wait_until_listening(server.gossip_addr()).await;
@@ -409,7 +398,8 @@ async fn old_peer_gets_a_full_push_after_404() -> eyre::Result<()> {
     wait_until_listening(relay.gossip_addr()).await;
 
     bus.send_traced(
-        GossipBroadcastMessageV2::from(chunk).with_chunk_mode(ChunkBroadcastMode::Announce),
+        GossipBroadcastMessageV2::chunk(Arc::new(chunk), &relay.config.data_tree_geometry())
+            .with_chunk_mode(ChunkBroadcastMode::Announce),
     )
     .expect("send");
     poll_until(
@@ -441,7 +431,8 @@ async fn new_peer_gets_an_announcement_not_a_body() -> eyre::Result<()> {
     let handler = receiver.data_handler().expect("handler");
 
     bus.send_traced(
-        GossipBroadcastMessageV2::from(chunk).with_chunk_mode(ChunkBroadcastMode::Announce),
+        GossipBroadcastMessageV2::chunk(Arc::new(chunk), &relay.config.data_tree_geometry())
+            .with_chunk_mode(ChunkBroadcastMode::Announce),
     )
     .expect("send");
     poll_until(
@@ -482,7 +473,7 @@ async fn announcement_for_held_chunk_is_accepted_without_a_claim() -> eyre::Resu
     assert!(
         handler
             .cache
-            .peers_that_have_seen(&irys_types::GossipCacheKey::Chunk(chunk.chunk_path_hash()))?
+            .peers_that_have_seen(&irys_types::GossipCacheKey::Chunk(key(&receiver, &chunk)))?
             .contains(&from.peer_id)
     );
     handle.stop().await?;
@@ -559,7 +550,7 @@ async fn announcement_over_capacity_is_rate_limited_and_not_recorded() -> eyre::
     assert!(
         handler
             .cache
-            .peers_that_have_seen(&irys_types::GossipCacheKey::Chunk(chunk.chunk_path_hash()))?
+            .peers_that_have_seen(&irys_types::GossipCacheKey::Chunk(key(&receiver, &chunk)))?
             .is_empty()
     );
     handle.stop().await?;
@@ -626,7 +617,7 @@ async fn missing_origin_push_is_recovered_by_fetch() -> eyre::Result<()> {
         GossipResponse::Accepted(())
     ));
     poll_until(Duration::from_secs(10), "fetched body held", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     assert_eq!(handler.chunk_announce.stats().bodies_fetch, 1);
@@ -662,7 +653,7 @@ async fn invalid_first_source_falls_through_to_the_second() -> eyre::Result<()> 
     post_announce(receiver.gossip_addr(), &bad_peer, claim).await;
     post_announce(receiver.gossip_addr(), &good_peer, claim).await;
     poll_until(Duration::from_secs(10), "valid body held", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     assert!(
@@ -685,16 +676,16 @@ async fn invalid_first_source_falls_through_to_the_second() -> eyre::Result<()> 
     Ok(())
 }
 
-/// A served size that the body's own path cannot prove is bogus data.
+/// `data_size` is part of the commitment, so a body served at another size
+/// than the claim names another chunk: bogus data.
 #[tokio::test]
-async fn body_that_does_not_prove_its_data_size_is_rejected_before_ingest() -> eyre::Result<()> {
+async fn body_at_another_data_size_is_rejected_before_ingest() -> eyre::Result<()> {
     let chunk = valid_chunk(32, 23);
     let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
     let fake = FakeGossipServer::new();
     let served = chunk.clone();
     fake.set_on_chunk_fetch(move |_| {
         let mut other = served.clone();
-        // 32 bytes cannot be the whole of a 16-byte root.
         other.data_size = 16;
         GossipResponse::Accepted(Some(other))
     });
@@ -725,7 +716,7 @@ async fn body_that_does_not_prove_its_data_size_is_rejected_before_ingest() -> e
         receiver.mempool_chunks.read().expect("lock").is_empty(),
         "nothing reached ingest"
     );
-    assert!(!held(&receiver, &chunk.chunk_path_hash()));
+    assert!(!held(&receiver, &chunk));
     let score_after = receiver
         .peer_list
         .peer_by_id(&source.peer_id)
@@ -734,67 +725,7 @@ async fn body_that_does_not_prove_its_data_size_is_rejected_before_ingest() -> e
         .get();
     assert!(
         score_after < score_before,
-        "a body that does not prove its data_size scores the source down"
-    );
-    handle.stop().await?;
-    Ok(())
-}
-
-/// A later header can raise an unconfirmed root size after the announcement
-/// leaves, and the source then serves the larger size. A body that still
-/// proves itself is stale metadata, not bogus data: the source keeps its
-/// score and the body goes to ingest, which judges the size.
-#[tokio::test]
-async fn body_proved_at_an_inflated_data_size_does_not_score_the_source() -> eyre::Result<()> {
-    let chunk = first_of_two_chunks(32, 25);
-    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
-    let fake = FakeGossipServer::new();
-    let served = chunk.clone();
-    fake.set_on_chunk_fetch(move |_| {
-        let mut inflated = served.clone();
-        inflated.data_size = 96;
-        GossipResponse::Accepted(Some(inflated))
-    });
-    let source = add_fake_peer(&receiver, 0x65, spawn_fake(fake).await);
-    let handler = receiver.data_handler().expect("handler");
-    let score_before = receiver
-        .peer_list
-        .peer_by_id(&source.peer_id)
-        .expect("source")
-        .reputation_score
-        .get();
-
-    assert!(matches!(
-        post_announce(
-            receiver.gossip_addr(),
-            &source,
-            ChunkAnnouncement::from(&chunk)
-        )
-        .await,
-        GossipResponse::Accepted(())
-    ));
-    poll_until(Duration::from_secs(10), "claim released", || {
-        handler.chunk_announce.claim_count() == 0
-    })
-    .await?;
-    assert!(
-        receiver
-            .mempool_chunks
-            .read()
-            .expect("lock")
-            .iter()
-            .any(|ingested| ingested.data_size == 96),
-        "the body reached ingest"
-    );
-    let score_after = receiver
-        .peer_list
-        .peer_by_id(&source.peer_id)
-        .expect("source")
-        .reputation_score
-        .get();
-    assert!(
-        score_after >= score_before,
-        "an inflated size is not bogus data: {score_before} -> {score_after}"
+        "a body at another data_size scores the source down"
     );
     handle.stop().await?;
     Ok(())
@@ -828,7 +759,7 @@ async fn truncated_push_does_not_stop_a_later_fetch() -> eyre::Result<()> {
     )
     .await;
     poll_until(Duration::from_secs(10), "valid body fetched", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     assert_eq!(handler.chunk_announce.stats().bodies_fetch, 1);
@@ -875,7 +806,7 @@ async fn failed_push_during_a_fetch_resumes_from_saved_sources() -> eyre::Result
     })
     .await?;
     assert!(
-        handler.chunk_announce.is_arriving(&chunk.chunk_path_hash()),
+        handler.chunk_announce.is_arriving(&key(&receiver, &chunk)),
         "the arriving guard must cover ingress"
     );
 
@@ -907,11 +838,11 @@ async fn failed_push_during_a_fetch_resumes_from_saved_sources() -> eyre::Result
         matches!(error, crate::GossipError::Internal(_)),
         "got {error:?}"
     );
-    assert!(!handler.chunk_announce.is_arriving(&chunk.chunk_path_hash()));
+    assert!(!handler.chunk_announce.is_arriving(&key(&receiver, &chunk)));
     poll_until(
         Duration::from_secs(10),
         "fetched after the failed push",
-        || held(&receiver, &chunk.chunk_path_hash()),
+        || held(&receiver, &chunk),
     )
     .await?;
     assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -939,7 +870,7 @@ async fn wrong_first_claim_does_not_block_the_correct_one() -> eyre::Result<()> 
     )
     .await;
     poll_until(Duration::from_secs(10), "correct claim fetched", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     handle.stop().await?;
@@ -982,7 +913,7 @@ async fn a_backlog_announcer_takes_the_slot_of_a_failed_source() -> eyre::Result
     poll_until(
         Duration::from_secs(10),
         "fetched from the promoted announcer",
-        || held(&receiver, &chunk.chunk_path_hash()),
+        || held(&receiver, &chunk),
     )
     .await?;
     assert_eq!(a_requests.load(Ordering::SeqCst), 1);
@@ -1016,7 +947,7 @@ async fn parked_fetch_is_fetched_again_in_a_later_round() -> eyre::Result<()> {
     )
     .await;
     poll_until(Duration::from_secs(10), "held after the re-fetch", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     assert_eq!(
@@ -1074,7 +1005,7 @@ async fn claim_expiry_during_ingest_frees_capacity() -> eyre::Result<()> {
     )
     .await;
     poll_until(Duration::from_secs(5), "a later claim progresses", || {
-        held(&receiver, &second.chunk_path_hash())
+        held(&receiver, &second)
     })
     .await?;
     handle.stop().await?;
@@ -1138,7 +1069,7 @@ async fn open_breaker_does_not_stop_the_only_announcer_being_asked() -> eyre::Re
         GossipResponse::Accepted(())
     ));
     poll_until(Duration::from_secs(10), "fetched body held", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -1199,7 +1130,7 @@ async fn overloaded_ingest_is_retried_with_the_same_body() -> eyre::Result<()> {
     )
     .await;
     poll_until(Duration::from_secs(10), "held after one overload", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     assert_eq!(
@@ -1288,7 +1219,7 @@ async fn local_overload_recovers_without_another_announcement() -> eyre::Result<
     poll_until(
         Duration::from_secs(5),
         "body held after sustained local overload",
-        || held(&receiver, &chunk.chunk_path_hash()),
+        || held(&receiver, &chunk),
     )
     .await?;
     assert_eq!(handler.chunk_announce.stats().announcements_received, 1);
@@ -1340,7 +1271,7 @@ async fn queue_wait_does_not_consume_fetch_budget() -> eyre::Result<()> {
     assert_eq!(requests.load(Ordering::SeqCst), 0);
     drop(occupied);
     poll_until(Duration::from_secs(5), "queued claim delivered", || {
-        held(&receiver, &chunk.chunk_path_hash())
+        held(&receiver, &chunk)
     })
     .await?;
     assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -1412,10 +1343,10 @@ async fn ingest_timeout_releases_capacity_while_retaining_recovery(
     poll_until(
         Duration::from_secs(3),
         "another claim progresses during cooldown",
-        || held(&receiver, &second.chunk_path_hash()),
+        || held(&receiver, &second),
     )
     .await?;
-    assert!(!held(&receiver, &first.chunk_path_hash()));
+    assert!(!held(&receiver, &first));
     if late_commit {
         // The original timed-out ingress can still commit while the claim is cooling down.
         cache_body(&receiver, &first);
@@ -1423,7 +1354,7 @@ async fn ingest_timeout_releases_capacity_while_retaining_recovery(
     poll_until(
         Duration::from_secs(10),
         "recovery completed and claims released",
-        || held(&receiver, &first.chunk_path_hash()) && handler.chunk_announce.claim_count() == 0,
+        || held(&receiver, &first) && handler.chunk_announce.claim_count() == 0,
     )
     .await?;
     assert_eq!(
@@ -1681,7 +1612,7 @@ async fn in_flight_storage_write_accepts_the_second_push_once() -> eyre::Result<
     storage_module.force_sync_pending_chunks()?;
     let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
         tx: DataTransactionHeaderV1 {
-            data_root: chunk.data_root,
+            data_tree_root: chunk.data_tree_root,
             data_size: chunk.data_size,
             ..Default::default()
         },
@@ -1724,12 +1655,15 @@ async fn in_flight_storage_write_accepts_the_second_push_once() -> eyre::Result<
     wait_until_listening(sender_b.gossip_addr()).await;
 
     let handler = receiver.data_handler().expect("handler");
-    let seen_key = GossipCacheKey::Chunk(chunk.chunk_path_hash());
+    let seen_key = GossipCacheKey::Chunk(key(&receiver, &chunk));
     let sender_b_id = sender_b.config.peer_id();
 
     // clone: sender A keeps its own broadcast body
     sender_a_bus
-        .send_traced(GossipBroadcastMessageV2::from(chunk.clone()))
+        .send_traced(GossipBroadcastMessageV2::chunk(
+            Arc::new(chunk.clone()),
+            &sender_a.config.data_tree_geometry(),
+        ))
         .expect("send the first push");
     assert!(
         storage_module.ingress_occupy_hold_arrived_for_test(Duration::from_secs(2)),
@@ -1742,7 +1676,10 @@ async fn in_flight_storage_write_accepts_the_second_push_once() -> eyre::Result<
     );
 
     sender_b_bus
-        .send_traced(GossipBroadcastMessageV2::from(chunk.clone()))
+        .send_traced(GossipBroadcastMessageV2::chunk(
+            Arc::new(chunk.clone()),
+            &sender_b.config.data_tree_geometry(),
+        ))
         .expect("send the second push");
     poll_until(
         Duration::from_secs(2),
@@ -1800,7 +1737,8 @@ async fn announce_only_reaches_a_new_peer_as_an_announcement() -> eyre::Result<(
     let handler = receiver.data_handler().expect("handler");
 
     bus.send_traced(
-        GossipBroadcastMessageV2::from(chunk).with_chunk_mode(ChunkBroadcastMode::AnnounceOnly),
+        GossipBroadcastMessageV2::chunk(Arc::new(chunk), &relay.config.data_tree_geometry())
+            .with_chunk_mode(ChunkBroadcastMode::AnnounceOnly),
     )
     .expect("send");
     poll_until(
@@ -1836,7 +1774,8 @@ async fn announce_only_sends_no_body_to_an_old_peer() -> eyre::Result<()> {
     let client = relay.data_handler().expect("handler").gossip_client.clone();
 
     bus.send_traced(
-        GossipBroadcastMessageV2::from(chunk).with_chunk_mode(ChunkBroadcastMode::AnnounceOnly),
+        GossipBroadcastMessageV2::chunk(Arc::new(chunk), &relay.config.data_tree_geometry())
+            .with_chunk_mode(ChunkBroadcastMode::AnnounceOnly),
     )
     .expect("send");
     poll_until(

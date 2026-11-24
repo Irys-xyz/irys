@@ -179,15 +179,15 @@ pub(crate) fn keep_first_per_address<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{H256, IrysAddress};
+    use irys_types::{DataCommitment, H256, IrysAddress};
 
     #[test]
     fn selector_keeps_only_same_chain_proof_for_data_root() {
         let chain_id = 1_270;
-        let data_root = H256::repeat_byte(9);
+        let data_commitment = DataCommitment(H256::repeat_byte(9));
         let cached_proof = |address, proof_chain_id| {
             let mut proof = irys_types::IngressProof::default();
-            proof.data_root = data_root;
+            proof.data_commitment = data_commitment;
             proof.chain_id = proof_chain_id;
             CompactCachedIngressProof(CachedIngressProof { address, proof })
         };
@@ -198,6 +198,6 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].0, same_chain.0);
-        assert_eq!(selected[0].proof.data_root, data_root);
+        assert_eq!(selected[0].proof.data_commitment, data_commitment);
     }
 }

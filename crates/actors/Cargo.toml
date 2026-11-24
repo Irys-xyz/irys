@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+irys-data-tree.workspace = true
 irys-types.workspace = true
 irys-utils.workspace = true
 irys-database.workspace = true

@@ -10,7 +10,7 @@ use irys_database::{
     walk_all,
 };
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, DataLedger, NodeConfig, SendTraced as _, TxChunkOffset, UnpackedChunk};
+use irys_types::{DataLedger, NodeConfig, SendTraced as _};
 use std::time::Duration;
 use tracing::info;
 
@@ -95,7 +95,9 @@ async fn heavy_epoch_pruning_keeps_bodies_on_a_live_publish_slot() -> eyre::Resu
         )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
-    let published_root = tx.header.data_root;
+    let published_commitment = tx
+        .header
+        .data_commitment(&node.node_ctx.config.data_tree_geometry());
 
     // post data tx
     let resp = client
@@ -110,23 +112,7 @@ async fn heavy_epoch_pruning_keeps_bodies_on_a_live_publish_slot() -> eyre::Resu
     assert_eq!(node.get_canonical_chain_height().await, 2_u64);
 
     // upload chunk(s)
-    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-        let data_root = tx.header.data_root;
-        let data_size = tx.header.data_size;
-        let min = chunk_node.min_byte_range;
-        let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
-
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size,
-            data_path,
-            bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(
-                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
-            ),
-        };
-
+    for chunk in tx.data_chunks()? {
         // Make a POST request with JSON payload
         let resp = client
             .post(format!("{}/v1/chunk", http_url))
@@ -138,7 +124,8 @@ async fn heavy_epoch_pruning_keeps_bodies_on_a_live_publish_slot() -> eyre::Resu
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
-    let expected_cached = u64::try_from(tx.chunks.len()).expect("chunk count fits u64");
+    let expected_cached =
+        u64::try_from(tx.data_chunks().unwrap().len()).expect("chunk count fits u64");
     node.wait_for_chunk_cache_count(expected_cached, 10).await?;
 
     // confirm that we have the right number of CachedChunks in mdbx table
@@ -226,8 +213,8 @@ async fn heavy_epoch_pruning_keeps_bodies_on_a_live_publish_slot() -> eyre::Resu
     // Submit expiry must not remove custody of a body on a live Publish slot.
     node.wait_for_chunk_cache_count(1, 10).await?;
     node.node_ctx.db.view_cache_eyre(|rtx| {
-        assert!(rtx.get::<CachedDataRoots>(published_root)?.is_some());
-        assert!(rtx.get::<IngressProofs>(published_root)?.is_none());
+        assert!(rtx.get::<CachedDataRoots>(published_commitment)?.is_some());
+        assert!(rtx.get::<IngressProofs>(published_commitment)?.is_none());
         Ok(())
     })?;
 

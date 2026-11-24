@@ -168,7 +168,8 @@ mod tests {
     };
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        IrysAddress, IrysBlockHeader, IrysPeerId, PeerAddress, PeerListItem, PeerScore,
+        DataCommitment, IrysAddress, IrysBlockHeader, IrysPeerId, PeerAddress, PeerListItem,
+        PeerScore,
     };
     use reth_db::cursor::DbCursorRO as _;
     use reth_db::mdbx::DatabaseArguments;
@@ -272,7 +273,9 @@ mod tests {
                 .create_and_track_tables_for::<crate::tables::CacheTables>()
                 .expect("create legacy cache tables");
             src_db
-                .update(|tx| tx.put::<CachedDataRoots>(block_hash, Default::default()))
+                .update(|tx| {
+                    tx.put::<CachedDataRoots>(DataCommitment(block_hash), Default::default())
+                })
                 .expect("open legacy cache write")
                 .expect("seed legacy cache");
         }
@@ -324,7 +327,7 @@ mod tests {
         if legacy_cache {
             let tx = copy_db.tx().expect("read copied legacy cache");
             assert_eq!(
-                tx.get::<CachedDataRoots>(block_hash)
+                tx.get::<CachedDataRoots>(DataCommitment(block_hash))
                     .expect("read cached root")
                     .is_some(),
                 include_caches,

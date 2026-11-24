@@ -1876,7 +1876,7 @@ impl IrysNode {
             Some(supply_state.clone()),
             Arc::clone(&reward_curve),
             config.consensus.difficulty_adjustment.block_time,
-            config.consensus.chunk_size,
+            config.data_tree_geometry(),
             config.consensus.epoch.num_blocks_in_epoch,
             config.consensus.block_tree_depth,
             u64::from(config.consensus.block_migration_depth),

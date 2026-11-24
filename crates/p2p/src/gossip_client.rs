@@ -4937,12 +4937,11 @@ mod tests {
             let (peer_list, peer_id, peer, initial_score) =
                 peer_aimed_at(8, SocketAddr::from(([127, 0, 0, 1], server.port())));
             let cache = Arc::new(GossipCache::new());
-            let key = GossipCacheKey::Chunk(H256::zero());
+            let key = GossipCacheKey::Chunk(irys_types::ChunkKey(H256::zero()));
             let announcement = wire_types::ChunkAnnouncement {
-                data_root: H256::zero(),
+                data_tree_root: irys_types::DataTreeRoot(H256::zero()),
                 data_size: 32,
                 tx_offset: irys_types::TxChunkOffset::from(0),
-                chunk_path_hash: H256::zero(),
             };
 
             client.send_chunk_announcement_detached(
@@ -4997,7 +4996,7 @@ mod tests {
             );
             let (peer_list, peer_id, peer, _) = peer_aimed_at(6, server.addr);
             let cache = Arc::new(GossipCache::new());
-            let key = GossipCacheKey::Chunk(H256::zero());
+            let key = GossipCacheKey::Chunk(irys_types::ChunkKey(H256::zero()));
             client.circuit_breaker.record_failure(&peer_id);
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert!(
@@ -5007,10 +5006,9 @@ mod tests {
             assert_eq!(client.circuit_breaker.metrics().half_open_count, 0);
 
             let announcement = wire_types::ChunkAnnouncement {
-                data_root: H256::zero(),
+                data_tree_root: irys_types::DataTreeRoot(H256::zero()),
                 data_size: 32,
                 tx_offset: irys_types::TxChunkOffset::from(0),
-                chunk_path_hash: H256::zero(),
             };
             client.send_chunk_announcement_detached(
                 (&peer_id, &peer),
@@ -5059,7 +5057,7 @@ mod tests {
             let client = client_with_one_push_trial_left();
             let (peer_list, peer_id, peer, initial_score) = peer_aimed_at(7, server.addr);
             let cache = Arc::new(GossipCache::new());
-            let key = GossipCacheKey::Chunk(H256::zero());
+            let key = GossipCacheKey::Chunk(irys_types::ChunkKey(H256::zero()));
             client.circuit_breaker.record_failure(&peer_id);
             wait_out_open_cooldown().await;
             assert!(client.circuit_breaker.begin_probe(&peer_id));
@@ -5069,10 +5067,9 @@ mod tests {
             );
 
             let announcement = wire_types::ChunkAnnouncement {
-                data_root: H256::zero(),
+                data_tree_root: irys_types::DataTreeRoot(H256::zero()),
                 data_size: 32,
                 tx_offset: irys_types::TxChunkOffset::from(0),
-                chunk_path_hash: H256::zero(),
             };
             client.send_chunk_announcement_detached(
                 (&peer_id, &peer),
@@ -5130,12 +5127,11 @@ mod tests {
             let client = production_client();
             let (peer_list, peer_id, peer, _) = peer_aimed_at(9, server.addr);
             let cache = Arc::new(GossipCache::new());
-            let key = GossipCacheKey::Chunk(H256::zero());
+            let key = GossipCacheKey::Chunk(irys_types::ChunkKey(H256::zero()));
             let announcement = wire_types::ChunkAnnouncement {
-                data_root: H256::zero(),
+                data_tree_root: irys_types::DataTreeRoot(H256::zero()),
                 data_size: 32,
                 tx_offset: irys_types::TxChunkOffset::from(0),
-                chunk_path_hash: H256::zero(),
             };
 
             client.send_chunk_announcement_detached(
@@ -5572,7 +5568,7 @@ mod tests {
         #[test]
         fn pull_kind_label_covers_all_variants() {
             use irys_types::v2::GossipDataRequestV2;
-            use irys_types::{BlockHash, ChunkPathHash, H256};
+            use irys_types::{BlockHash, ChunkKey, H256};
             use reth::revm::primitives::B256;
 
             assert_eq!(
@@ -5588,7 +5584,7 @@ mod tests {
                 "payload"
             );
             assert_eq!(
-                pull_kind_label(&GossipDataRequestV2::Chunk(ChunkPathHash::default())),
+                pull_kind_label(&GossipDataRequestV2::Chunk(ChunkKey::default())),
                 "chunk"
             );
             assert_eq!(
@@ -6000,9 +5996,10 @@ mod tests {
             let config = ConsensusConfig::testing();
             let signer = IrysSigner::random_signer(&config);
             let signed = signer
-                .sign_transaction(DataTransaction {
-                    header: DataTransactionHeader::new(&config),
-                    ..Default::default()
+                .sign_transaction({
+                    let mut tx = DataTransaction::default();
+                    tx.header = DataTransactionHeader::new(&config);
+                    tx
                 })
                 .expect("sign the data transaction");
             let tx_id = signed.header.id;

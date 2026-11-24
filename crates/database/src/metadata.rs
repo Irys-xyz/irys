@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum MetadataKey {
-    /// Raw schema text. The same bytes as the `SCHEMA` file. Not SCALE.
+    /// Raw schema text. Not SCALE. On RocksDB the row names the data key
+    /// layout and the `SCHEMA` file keeps the RocksDB v1 text.
     DBSchemaVersion = 1,
     /// Raw byte `01` while a reset is clearing the index. Absent when the
     /// reset is finished. Not a schema version. Not SCALE.

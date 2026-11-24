@@ -8,7 +8,7 @@
 use crate::wire_types::ChunkAnnouncement;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use irys_types::{ChunkPathHash, H256, IrysPeerId};
+use irys_types::{ChunkKey, DataTreeRoot, IrysPeerId};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -39,7 +39,7 @@ pub struct ChunkAnnounceLimits {
     pub ingest_timeout: Duration,
     /// Sleeps between ingest retries on local `Overloaded`.
     pub overload_backoff: [Duration; 3],
-    /// Poll interval while a push for the hash is arriving.
+    /// Poll interval while a push for the chunk is arriving.
     pub arriving_poll: Duration,
 }
 
@@ -89,19 +89,17 @@ pub(crate) enum AnnounceDecision {
 /// hashed without depending on `TxChunkOffset`'s manual `Hash` impl.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ClaimKey {
-    data_root: H256,
+    data_tree_root: DataTreeRoot,
     data_size: u64,
     tx_offset: u32,
-    chunk_path_hash: ChunkPathHash,
 }
 
 impl From<&ChunkAnnouncement> for ClaimKey {
     fn from(announcement: &ChunkAnnouncement) -> Self {
         Self {
-            data_root: announcement.data_root,
+            data_tree_root: announcement.data_tree_root,
             data_size: announcement.data_size,
             tx_offset: announcement.tx_offset.0,
-            chunk_path_hash: announcement.chunk_path_hash,
         }
     }
 }
@@ -118,7 +116,7 @@ struct Claim {
 #[derive(Debug)]
 pub struct ChunkAnnounceState {
     limits: ChunkAnnounceLimits,
-    arriving: DashMap<ChunkPathHash, usize>,
+    arriving: DashMap<ChunkKey, usize>,
     claims: DashMap<ClaimKey, Claim>,
     claim_count: AtomicUsize,
     per_peer: DashMap<IrysPeerId, usize>,
@@ -311,14 +309,17 @@ impl ChunkAnnounceState {
         self.claim_count.load(Ordering::Acquire)
     }
 
-    pub(crate) fn is_arriving(&self, hash: &ChunkPathHash) -> bool {
-        self.arriving.contains_key(hash)
+    pub(crate) fn is_arriving(&self, chunk_key: &ChunkKey) -> bool {
+        self.arriving.contains_key(chunk_key)
     }
 
     /// Count a push as inside `handle_chunk` until the guard drops.
-    pub(crate) fn begin_arriving(&self, hash: ChunkPathHash) -> ArrivingGuard<'_> {
-        *self.arriving.entry(hash).or_insert(0) += 1;
-        ArrivingGuard { state: self, hash }
+    pub(crate) fn begin_arriving(&self, chunk_key: ChunkKey) -> ArrivingGuard<'_> {
+        *self.arriving.entry(chunk_key).or_insert(0) += 1;
+        ArrivingGuard {
+            state: self,
+            chunk_key,
+        }
     }
 
     pub(crate) fn record_push_body(&self) {
@@ -401,12 +402,12 @@ impl ChunkAnnounceState {
 
 pub(crate) struct ArrivingGuard<'a> {
     state: &'a ChunkAnnounceState,
-    hash: ChunkPathHash,
+    chunk_key: ChunkKey,
 }
 
 impl Drop for ArrivingGuard<'_> {
     fn drop(&mut self) {
-        if let Entry::Occupied(mut entry) = self.state.arriving.entry(self.hash) {
+        if let Entry::Occupied(mut entry) = self.state.arriving.entry(self.chunk_key) {
             let count = entry.get_mut();
             *count = count.saturating_sub(1);
             if *count == 0 {
@@ -451,14 +452,13 @@ impl Drop for ClaimGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{IrysAddress, TxChunkOffset};
+    use irys_types::{H256, IrysAddress, TxChunkOffset};
 
-    fn claim(hash: H256, tx_offset: u32) -> ChunkAnnouncement {
+    fn claim(data_tree_root: H256, tx_offset: u32) -> ChunkAnnouncement {
         ChunkAnnouncement {
-            data_root: H256::repeat_byte(1),
+            data_tree_root: DataTreeRoot(data_tree_root),
             data_size: 64,
             tx_offset: TxChunkOffset::from(tx_offset),
-            chunk_path_hash: hash,
         }
     }
 
@@ -588,11 +588,11 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_identity_for_one_hash_is_a_separate_claim() {
+    fn conflicting_identity_for_one_root_is_a_separate_claim() {
         let state = ChunkAnnounceState::with_limits(limits(10, 10, 4));
-        let hash = H256::random();
-        let wrong = claim(hash, 7);
-        let right = claim(hash, 0);
+        let root = H256::random();
+        let wrong = claim(root, 7);
+        let right = claim(root, 0);
         assert_eq!(state.admit(&wrong, peer(1)), AnnounceDecision::StartFetch);
         assert_eq!(state.admit(&right, peer(2)), AnnounceDecision::StartFetch);
         assert_eq!(state.sources(&wrong), vec![peer(1)]);
@@ -660,16 +660,16 @@ mod tests {
     #[test]
     fn arriving_is_reference_counted() {
         let state = ChunkAnnounceState::new();
-        let hash = H256::random();
-        let first = state.begin_arriving(hash);
-        let second = state.begin_arriving(hash);
+        let chunk_key = ChunkKey(H256::random());
+        let first = state.begin_arriving(chunk_key);
+        let second = state.begin_arriving(chunk_key);
         drop(first);
         assert!(
-            state.is_arriving(&hash),
+            state.is_arriving(&chunk_key),
             "one push still inside handle_chunk"
         );
         drop(second);
-        assert!(!state.is_arriving(&hash));
+        assert!(!state.is_arriving(&chunk_key));
     }
 
     #[test]

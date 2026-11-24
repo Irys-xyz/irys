@@ -211,8 +211,9 @@ static UNPACK_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4
 
 /// One chunk of `GET /internal/chunks`, unpacked. `bytes` and `proof` serialise as JSON integer
 /// arrays (plain `Vec<u8>`), NOT the node's usual `Base64` strings — the gateway decodes them as
-/// `Vec<u8>`. `proof` is the chunk's `data_path`, which gateway consumers `validate_path` against
-/// the transaction's `data_root`.
+/// `Vec<u8>`. `proof` is the chunk's `data_path`: a data tree v2 chunk proof, which gateway
+/// consumers check with `verify_chunk` against the commitment of the transaction's data tree root
+/// (JSON `dataRoot`) and `data_size`.
 #[derive(Debug, Serialize)]
 struct ChunkRead {
     ledger_id: u32,

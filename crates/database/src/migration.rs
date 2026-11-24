@@ -499,6 +499,7 @@ mod v1_to_v2 {
 
 mod v2_to_v3 {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
@@ -533,7 +534,7 @@ mod v2_to_v3 {
                 id: v2_header.id,
                 anchor: v2_header.anchor,
                 signer: v2_header.signer,
-                data_root: v2_header.data_root,
+                data_tree_root: DataTreeRoot(v2_header.data_root),
                 data_size: v2_header.data_size,
                 // Historical on-disk field `header_size` is the new `prefix_size`.
                 prefix_size: v2_header.header_size,
@@ -600,18 +601,20 @@ mod v2_to_v3 {
 }
 
 /// Checks the database schema version on startup and either:
-/// - Migrates forward from V0/V1/V2/V3 through to CURRENT
+/// - Migrates forward from V0/V1/V2/V3/V4 through to CURRENT
 /// - Returns an error if either DB version is newer than the binary (rollback not supported)
 /// - No-ops if both versions match
 ///
 /// A consensus database without a version stamp is treated as V0 (the versioning system
 /// didn't exist yet). The V0→V1 transition is purely "add the stamp" — no data
-/// format change — so we unconditionally stamp V1 and then run V1→V2, V2→V3, V3→V4.
+/// format change — so we unconditionally stamp V1 and then run V1→V2, V2→V3, V3→V4,
+/// V4→V5.
 /// On a truly fresh (empty) database the per-step migrations are no-ops.
 ///
 /// The V3→V4 migration moves cache tables from the consensus env to the separate cache env.
-/// A missing cache version stamp after consensus is at V4 is acceptable: the operator may
-/// have intentionally deleted the cache database.
+/// The V4→V5 migration clears the data cache tables in the cache env, because from V5 they
+/// are keyed by the `data_commitment`. A missing cache version stamp after consensus is at
+/// CURRENT is acceptable: the operator may have intentionally deleted the cache database.
 pub fn ensure_db_version_compatible(
     consensus: &DatabaseEnv,
     cache: &DatabaseEnv,
@@ -632,7 +635,7 @@ pub fn ensure_db_version_compatible(
         );
     }
 
-    // -- consensus side: drive forward through V1/V2/V3/V4 --
+    // -- consensus side: drive forward through V1/V2/V3/V4/V5 --
     let raw_consensus = consensus.view(crate::database_schema_version)??;
 
     // No version stamp → V0 database (or brand-new). Stamp V1 so the
@@ -696,6 +699,11 @@ pub fn ensure_db_version_compatible(
                 v3_to_v4::migrate(consensus, cache)?;
                 version = DatabaseVersion::V4;
             }
+            DatabaseVersion::V4 => {
+                debug!("Applying migration from V4 to V5: data cache keyed by data_commitment");
+                v4_to_v5::migrate(consensus, cache)?;
+                version = DatabaseVersion::V5;
+            }
             DatabaseVersion::CURRENT => {
                 debug!(
                     "Consensus database schema is up-to-date (V{})",
@@ -706,8 +714,8 @@ pub fn ensure_db_version_compatible(
         }
     }
 
-    // -- cache side: stamp V4 if missing; reject newer versions --
-    // A missing cache stamp after consensus reaches V4 is not an error: the
+    // -- cache side: stamp CURRENT if missing; reject newer versions --
+    // A missing cache stamp after consensus reaches CURRENT is not an error: the
     // operator may have intentionally deleted the cache database.
     let raw_cache = cache.view(crate::cache_database_schema_version)??;
     match raw_cache {
@@ -727,18 +735,20 @@ pub fn ensure_db_version_compatible(
                 DatabaseVersion::V0
                 | DatabaseVersion::V1
                 | DatabaseVersion::V2
-                | DatabaseVersion::V3,
+                | DatabaseVersion::V3
+                | DatabaseVersion::V4,
             ) => {
                 // Consensus has already reached CURRENT (the loop above returns
                 // only then). An older cache stamp is a partial earlier run or a
-                // cache env that never took a cache-side step; there is none for
-                // these versions, so stamp CURRENT.
+                // cache env from an older binary. Its data cache rows, if any, use
+                // the keys from before V5, so clear them before stamping CURRENT.
                 debug!(
-                    "Cache DB at V{}, advancing to V{}",
+                    "Cache DB at V{}, clearing the data cache tables and advancing to V{}",
                     raw,
                     u32::from(DatabaseVersion::CURRENT)
                 );
                 cache.update_eyre(|tx| {
+                    v4_to_v5::clear_data_cache_tables(tx)?;
                     crate::set_cache_database_schema_version(tx, DatabaseVersion::CURRENT)?;
                     Ok(())
                 })?;
@@ -762,41 +772,41 @@ pub fn ensure_db_version_compatible(
 /// Moves the five cache tables out of the consensus env into the cache env.
 /// Idempotent and resumable: copies rows not yet in cache, then clears the
 /// consensus side. Stamps both envs V4 before returning.
+///
+/// Rows are copied as raw bytes. This binary's cache types use the V5 layout,
+/// which cannot decode a V3 row, and V4→V5 clears the copied rows.
 mod v3_to_v4 {
     use super::*;
     use crate::db::sync_mdbx_env;
-    use crate::db_cache::CachedChunk;
     use crate::tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves, IngressProofs,
     };
     use reth_db::cursor::DbCursorRO as _;
     use reth_db::mdbx::Error as MdbxError;
     use reth_db::transaction::{DbTx as _, DbTxMut as _};
+    use reth_db_api::tables::{RawDupSort, RawKey, RawTable, RawValue};
 
-    /// Cap on decoded rows held in one copy batch. Metadata tables hit this
-    /// first; `CachedChunks` is usually stopped earlier by [`BATCH_MAX_BYTES`].
+    /// Cap on rows held in one copy batch. Metadata tables hit this first;
+    /// `CachedChunks` is usually stopped earlier by [`BATCH_MAX_BYTES`].
     const BATCH_MAX_ROWS: usize = 10_000;
-    /// Cap on decoded payload bytes in one copy batch. 10 000 × 256 KiB bodies
-    /// would be ~2.5 GiB; 64 MiB keeps the upgrade path inside operator RAM.
+    /// Cap on value bytes in one copy batch. 10 000 × 256 KiB bodies would be
+    /// ~2.5 GiB; 64 MiB keeps the upgrade path inside operator RAM.
     const BATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-    fn metadata_row_bytes<V>(_: &V) -> usize {
-        256
-    }
+    /// Undecoded `(key, value)` rows of table `T`.
+    type RawRows<T> = Vec<(
+        RawKey<<T as reth_db::table::Table>::Key>,
+        RawValue<<T as reth_db::table::Table>::Value>,
+    )>;
 
-    fn cached_chunk_row_bytes(chunk: &CachedChunk) -> usize {
-        chunk
-            .chunk
-            .as_ref()
-            .map(irys_types::Base64::len)
-            .unwrap_or(0)
-            .saturating_add(chunk.data_path.len())
+    fn raw_row_bytes<V: reth_db_api::table::Value>(value: &RawValue<V>) -> usize {
+        value.raw_value().len()
     }
 
     pub(super) fn migrate(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<()> {
-        copy_and_clear_table::<CachedDataRoots, _>(consensus, cache, metadata_row_bytes)?;
+        copy_and_clear_table::<CachedDataRoots, _>(consensus, cache, raw_row_bytes)?;
         copy_and_clear_dup::<CachedChunksIndex>(consensus, cache)?;
-        copy_and_clear_table::<CachedChunks, _>(consensus, cache, cached_chunk_row_bytes)?;
+        copy_and_clear_table::<CachedChunks, _>(consensus, cache, raw_row_bytes)?;
         copy_and_clear_dup::<CachedIngressLeaves>(consensus, cache)?;
         copy_and_clear_dup::<IngressProofs>(consensus, cache)?;
 
@@ -824,7 +834,7 @@ mod v3_to_v4 {
     where
         T: reth_db::table::Table + 'static,
         T::Key: Clone,
-        F: Fn(&T::Value) -> usize,
+        F: Fn(&RawValue<T::Value>) -> usize,
     {
         copy_table::<T, F>(consensus, cache, payload_bytes)?;
         sync_mdbx_env(cache)?;
@@ -855,7 +865,7 @@ mod v3_to_v4 {
     where
         T: reth_db::table::Table + 'static,
         T::Key: Clone,
-        F: Fn(&T::Value) -> usize,
+        F: Fn(&RawValue<T::Value>) -> usize,
     {
         copy_table_limited::<T, F>(
             consensus,
@@ -876,13 +886,13 @@ mod v3_to_v4 {
     where
         T: reth_db::table::Table + 'static,
         T::Key: Clone,
-        F: Fn(&T::Value) -> usize,
+        F: Fn(&RawValue<T::Value>) -> usize,
     {
         let mut total = 0_usize;
-        let mut last_key: Option<T::Key> = None;
+        let mut last_key: Option<RawKey<T::Key>> = None;
         loop {
-            let batch_result: eyre::Result<Vec<(T::Key, T::Value)>> = consensus.view_eyre(|tx| {
-                let mut cursor = tx.cursor_read::<T>()?;
+            let batch_result: eyre::Result<RawRows<T>> = consensus.view_eyre(|tx| {
+                let mut cursor = tx.cursor_read::<RawTable<T>>()?;
                 let mut walker = match last_key.clone() {
                     Some(ref k) => cursor.walk(Some(k.clone()))?,
                     None => cursor.walk(None)?,
@@ -936,10 +946,10 @@ mod v3_to_v4 {
             cache.update_eyre(|tx| {
                 for (k, v) in batch {
                     // Skip if already present (idempotent on resume).
-                    if tx.get::<T>(k.clone())?.is_some() {
+                    if tx.get::<RawTable<T>>(k.clone())?.is_some() {
                         continue;
                     }
-                    tx.put::<T>(k, v)?;
+                    tx.put::<RawTable<T>>(k, v)?;
                 }
                 Ok(())
             })?;
@@ -969,8 +979,8 @@ mod v3_to_v4 {
         T::Key: Clone,
         T::Value: Clone,
     {
-        let all_rows_result: eyre::Result<Vec<(T::Key, T::Value)>> = consensus.view_eyre(|tx| {
-            let mut cursor = tx.cursor_dup_read::<T>()?;
+        let all_rows_result: eyre::Result<RawRows<T>> = consensus.view_eyre(|tx| {
+            let mut cursor = tx.cursor_dup_read::<RawDupSort<T>>()?;
             let walker = cursor.walk(None)?;
             walker
                 .map(|r| r.map_err(eyre::Error::from))
@@ -994,7 +1004,7 @@ mod v3_to_v4 {
         cache.update_eyre(|tx| {
             for (k, v) in all_rows {
                 // MDBX UPSERT: re-inserting an existing exact (key, value) is a no-op.
-                tx.put::<T>(k, v)?;
+                tx.put::<RawDupSort<T>>(k, v)?;
             }
             Ok(())
         })?;
@@ -1024,6 +1034,48 @@ mod v3_to_v4 {
                 matches!(db_err, DatabaseError::Open(info) if *info == MdbxError::NotFound.into())
             })
         })
+    }
+}
+
+/// V4 → V5: data keyed by `data_commitment`.
+///
+/// Clears the data cache tables in the cache env, whose rows are keyed by the
+/// data root. From V5 those tables are keyed by the `data_commitment`, so an
+/// old row is unreachable or wrong. The V5 `CachedDataRoot` row also has no
+/// size confirmation flag, and the V5 `CachedChunk` row adds the commitment and
+/// the chunk index; the clear covers those layout changes too. The consensus
+/// env gets only its stamp. `clear` drops rows without decoding them.
+mod v4_to_v5 {
+    use super::*;
+    use crate::tables::{
+        CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves, IngressProofs,
+    };
+
+    /// Clears the five data cache tables of a cache env transaction.
+    pub(super) fn clear_data_cache_tables<TX: DbTxMut>(tx: &TX) -> Result<(), DatabaseError> {
+        tx.clear::<CachedDataRoots>()?;
+        tx.clear::<CachedChunksIndex>()?;
+        tx.clear::<CachedChunks>()?;
+        tx.clear::<CachedIngressLeaves>()?;
+        tx.clear::<IngressProofs>()?;
+        Ok(())
+    }
+
+    /// The cache env is cleared and stamped in one transaction before the
+    /// consensus stamp, so a crash between the two re-runs the clear, which is
+    /// idempotent.
+    pub(super) fn migrate(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<()> {
+        cache.update_eyre(|tx| {
+            clear_data_cache_tables(tx)?;
+            crate::set_cache_database_schema_version(tx, DatabaseVersion::V5)?;
+            Ok(())
+        })?;
+        consensus.update_eyre(|tx| {
+            crate::set_database_schema_version(tx, DatabaseVersion::V5)?;
+            Ok(())
+        })?;
+        debug!("V4 → V5 migration complete");
+        Ok(())
     }
 }
 
@@ -1492,6 +1544,122 @@ mod tests {
     }
 
     #[test]
+    fn v4_to_v5_clears_only_the_data_cache_tables() -> eyre::Result<()> {
+        use crate::db_cache::{
+            CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf,
+            CachedIngressLeafKey,
+        };
+        use crate::tables::{
+            CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves,
+            CompactCachedIngressProof, IngressProofs, IrysBlockIndexItems, IrysCommitments,
+            MigratedBlockHashes,
+        };
+        use irys_types::ingress::CachedIngressProof;
+        use irys_types::{
+            BlockIndexItem, CommitmentTransaction, ConsensusConfig, DataCommitment, DataLedger,
+            DataTransactionHeader, IrysAddress, LedgerIndexItem, TxChunkOffset,
+        };
+
+        let consensus_path = TempDirBuilder::new().build();
+        let consensus = open_or_create_db(
+            consensus_path.path(),
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let (cache, _cache_dir) = open_test_cache_db();
+
+        let config = ConsensusConfig::testing();
+        let header = DataTransactionHeader::new(&config);
+        let commitment_tx = CommitmentTransaction::new_stake(&config, H256::from([3_u8; 32]));
+        let block_index_item = BlockIndexItem {
+            block_hash: H256::from([4_u8; 32]),
+            num_ledgers: 1,
+            ledgers: vec![LedgerIndexItem {
+                total_chunks: 0,
+                tx_root: H256::zero(),
+                ledger: DataLedger::Publish,
+            }],
+        };
+        let cache_key = DataCommitment(H256::from([5_u8; 32]));
+        let chunk_key = irys_types::ChunkKey(H256::from([6_u8; 32]));
+        let address = IrysAddress::from_slice(&[7_u8; 20]);
+
+        {
+            let write_tx = consensus.tx_mut()?;
+            crate::set_database_schema_version(&write_tx, DatabaseVersion::V4)?;
+            crate::insert_tx_header(&write_tx, &header)?;
+            crate::insert_commitment_tx(&write_tx, &commitment_tx)?;
+            crate::insert_block_index_item(&write_tx, 0, &block_index_item)?;
+            write_tx.commit()?;
+        }
+        {
+            let write_tx = cache.tx_mut()?;
+            crate::set_cache_database_schema_version(&write_tx, DatabaseVersion::V4)?;
+            write_tx.put::<CachedDataRoots>(cache_key, CachedDataRoot::default())?;
+            write_tx.put::<CachedChunksIndex>(cache_key, CachedChunkIndexEntry::default())?;
+            write_tx.put::<CachedChunks>(chunk_key, CachedChunk::default())?;
+            write_tx.put::<CachedIngressLeaves>(
+                CachedIngressLeafKey {
+                    data_commitment: cache_key,
+                    address,
+                },
+                CachedIngressLeaf {
+                    tx_offset: TxChunkOffset(0),
+                    ingress_data_hash: H256::from([8_u8; 32]),
+                },
+            )?;
+            write_tx.put::<IngressProofs>(
+                cache_key,
+                CompactCachedIngressProof(CachedIngressProof {
+                    address,
+                    ..Default::default()
+                }),
+            )?;
+            write_tx.commit()?;
+        }
+
+        crate::migration::ensure_db_version_compatible(&consensus, &cache)?;
+
+        assert_eq!(
+            crate::database_schema_version(&mut consensus.tx()?)?,
+            Some(DatabaseVersion::V5 as u32)
+        );
+        assert_eq!(
+            crate::cache_database_schema_version(&mut cache.tx()?)?,
+            Some(DatabaseVersion::V5 as u32)
+        );
+        let cache_tx = cache.tx()?;
+        assert_eq!(cache_tx.entries::<CachedDataRoots>()?, 0);
+        assert_eq!(cache_tx.entries::<CachedChunksIndex>()?, 0);
+        assert_eq!(cache_tx.entries::<CachedChunks>()?, 0);
+        assert_eq!(cache_tx.entries::<CachedIngressLeaves>()?, 0);
+        assert_eq!(cache_tx.entries::<IngressProofs>()?, 0);
+
+        let read_tx = consensus.tx()?;
+        assert!(
+            crate::tx_header_by_txid(&read_tx, &header.id)?
+                .is_some_and(|stored| stored.eq(&header))
+        );
+        assert_eq!(
+            read_tx
+                .get::<IrysCommitments>(commitment_tx.id())?
+                .map(|stored| stored.0),
+            Some(commitment_tx)
+        );
+        assert_eq!(
+            read_tx.get::<MigratedBlockHashes>(0)?,
+            Some(block_index_item.block_hash)
+        );
+        assert_eq!(
+            read_tx
+                .get::<IrysBlockIndexItems>(0)?
+                .map(|stored| stored.0),
+            Some(block_index_item.ledgers[0].clone())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_fresh_db_gets_current_version_stamped() {
         use crate::migration::ensure_db_version_compatible;
         let dir = TempDirBuilder::new().build();
@@ -1581,7 +1749,7 @@ mod tests {
         .unwrap();
 
         // No schema version set — simulates a V0 / fresh database.
-        // Should stamp V1 then migrate V1 → V2 → V3 → V4.
+        // Should stamp V1 then migrate V1 → V2 → V3 → V4 → V5.
         let (cache, _cache_dir) = open_test_cache_db();
         ensure_db_version_compatible(&db, &cache).unwrap();
 
@@ -1632,7 +1800,7 @@ mod tests {
         .unwrap();
 
         // Should stamp V1 then migrate V1 → V2 (tx header rewrite + metadata back-fill)
-        // then V2 → V3 → V4 (no-ops on this DB).
+        // then V2 → V3 → V4 → V5 (no-ops on this DB).
         let (cache, _cache_dir) = open_test_cache_db();
         ensure_db_version_compatible(&db, &cache).unwrap();
 
@@ -1723,8 +1891,107 @@ mod tests {
             (consensus, cache, c_dir, k_dir)
         }
 
+        /// A V3 node holds data-cache rows in the old layout. No current type
+        /// decodes those bytes, so V3→V4 must move them without decoding and
+        /// V4→V5 must drop them without decoding. The rows are written raw, in
+        /// each table's own key width, and the other tables stay as they were.
         #[test]
-        fn fresh_install_stamps_both_v4() {
+        fn v3_rows_in_the_old_layout_are_dropped_without_decoding() -> eyre::Result<()> {
+            use crate::db_cache::{
+                CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf,
+            };
+            use crate::tables::{
+                CachedChunks, CachedChunksIndex, CachedIngressLeaves, CompactCachedIngressProof,
+                IngressProofs, IrysCommitments,
+            };
+            use irys_types::{CommitmentTransaction, ConsensusConfig, DataTransactionHeader};
+            use reth_db_api::table::Decompress;
+            use reth_db_api::tables::{RawDupSort, RawKey, RawTable, RawValue};
+
+            /// True when the current value type reads `bytes` without an error or a panic.
+            fn decodes<V: Decompress>(bytes: &[u8]) -> bool {
+                matches!(std::panic::catch_unwind(|| V::decompress(bytes)), Ok(Ok(_)))
+            }
+
+            // A value that no current type decodes stands in for an old-layout
+            // row: a flags byte and no fields.
+            let old_value = vec![0xFF_u8];
+            assert!(!decodes::<CachedDataRoot>(&old_value));
+            assert!(!decodes::<CachedChunkIndexEntry>(&old_value));
+            assert!(!decodes::<CachedChunk>(&old_value));
+            assert!(!decodes::<CachedIngressLeaf>(&old_value));
+            assert!(!decodes::<CompactCachedIngressProof>(&old_value));
+            // A V3 row is keyed by the data root: 32 bytes. The leaf key adds the
+            // 20-byte address.
+            let data_root_key = vec![5_u8; 32];
+            let leaf_key = vec![5_u8; 32 + 20];
+
+            let (consensus, cache, _c, _k) = open_v3_pair();
+            let config = ConsensusConfig::testing();
+            let header = DataTransactionHeader::new(&config);
+            let commitment_tx =
+                CommitmentTransaction::new_stake(&config, irys_types::H256::from([3_u8; 32]));
+            {
+                let write_tx = consensus.tx_mut()?;
+                crate::set_database_schema_version(&write_tx, DatabaseVersion::V3)?;
+                crate::insert_tx_header(&write_tx, &header)?;
+                crate::insert_commitment_tx(&write_tx, &commitment_tx)?;
+                write_tx.put::<RawTable<CachedDataRoots>>(
+                    RawKey::from_vec(data_root_key.clone()),
+                    RawValue::from_vec(old_value.clone()),
+                )?;
+                write_tx.put::<RawDupSort<CachedChunksIndex>>(
+                    RawKey::from_vec(data_root_key.clone()),
+                    RawValue::from_vec(old_value.clone()),
+                )?;
+                write_tx.put::<RawTable<CachedChunks>>(
+                    RawKey::from_vec(data_root_key.clone()),
+                    RawValue::from_vec(old_value.clone()),
+                )?;
+                write_tx.put::<RawDupSort<CachedIngressLeaves>>(
+                    RawKey::from_vec(leaf_key),
+                    RawValue::from_vec(old_value.clone()),
+                )?;
+                write_tx.put::<RawDupSort<IngressProofs>>(
+                    RawKey::from_vec(data_root_key),
+                    RawValue::from_vec(old_value),
+                )?;
+                write_tx.commit()?;
+            }
+
+            ensure_db_version_compatible(&consensus, &cache)?;
+
+            assert_eq!(
+                crate::database_schema_version(&mut consensus.tx()?)?,
+                Some(DatabaseVersion::V5 as u32)
+            );
+            assert_eq!(
+                crate::cache_database_schema_version(&mut cache.tx()?)?,
+                Some(DatabaseVersion::V5 as u32)
+            );
+            for tx in [consensus.tx()?, cache.tx()?] {
+                assert_eq!(tx.entries::<CachedDataRoots>()?, 0);
+                assert_eq!(tx.entries::<CachedChunksIndex>()?, 0);
+                assert_eq!(tx.entries::<CachedChunks>()?, 0);
+                assert_eq!(tx.entries::<CachedIngressLeaves>()?, 0);
+                assert_eq!(tx.entries::<IngressProofs>()?, 0);
+            }
+            let read_tx = consensus.tx()?;
+            assert!(
+                crate::tx_header_by_txid(&read_tx, &header.id)?
+                    .is_some_and(|stored| stored.eq(&header))
+            );
+            assert_eq!(
+                read_tx
+                    .get::<IrysCommitments>(commitment_tx.id())?
+                    .map(|stored| stored.0),
+                Some(commitment_tx)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn fresh_install_stamps_both_current() {
             let dir = TempDirBuilder::new().build();
             let consensus = open_or_create_db(
                 dir.path(),
@@ -1743,10 +2010,12 @@ mod tests {
                 .view(|tx| crate::cache_database_schema_version(tx).unwrap())
                 .unwrap()
                 .unwrap();
-            assert_eq!(cv, DatabaseVersion::V4 as u32);
-            assert_eq!(kv, DatabaseVersion::V4 as u32);
+            assert_eq!(cv, DatabaseVersion::CURRENT as u32);
+            assert_eq!(kv, DatabaseVersion::CURRENT as u32);
         }
 
+        /// The V3→V4 step alone, run directly: through
+        /// `ensure_db_version_compatible` the V4→V5 step clears the moved rows.
         #[test]
         fn v3_consensus_with_cache_rows_migrates_to_v4() {
             use crate::db_cache::CachedDataRoot;
@@ -1758,17 +2027,17 @@ mod tests {
                 .update_eyre(|tx| {
                     crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
                     tx.put::<CachedDataRoots>(
-                        irys_types::H256::from([1_u8; 32]),
+                        irys_types::DataCommitment(irys_types::H256::from([1_u8; 32])),
                         CachedDataRoot::default(),
                     )?;
                     Ok(())
                 })
                 .unwrap();
 
-            ensure_db_version_compatible(&consensus, &cache).unwrap();
+            super::super::v3_to_v4::migrate(&consensus, &cache).unwrap();
 
             // Cache now has the row.
-            let key1 = irys_types::H256::from([1_u8; 32]);
+            let key1 = irys_types::DataCommitment(irys_types::H256::from([1_u8; 32]));
             let got = cache
                 .view(|tx| tx.get::<CachedDataRoots>(key1))
                 .unwrap()
@@ -1806,7 +2075,7 @@ mod tests {
 
             let (consensus, cache, _c, _k) = open_v3_pair();
             let key = CachedIngressLeafKey {
-                data_root: irys_types::H256::from([2_u8; 32]),
+                data_commitment: irys_types::DataCommitment(irys_types::H256::from([2_u8; 32])),
                 address: irys_types::IrysAddress::from([3_u8; 20]),
             };
             // Two dup values under one key, so the DupSort copy path is exercised.
@@ -1831,7 +2100,7 @@ mod tests {
                 })
                 .unwrap();
 
-            ensure_db_version_compatible(&consensus, &cache).unwrap();
+            super::super::v3_to_v4::migrate(&consensus, &cache).unwrap();
 
             let migrated = cache
                 .view(|tx| {
@@ -1868,15 +2137,15 @@ mod tests {
                 .update_eyre(|tx| {
                     crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
                     tx.put::<CachedDataRoots>(
-                        irys_types::H256::from([1_u8; 32]),
+                        irys_types::DataCommitment(irys_types::H256::from([1_u8; 32])),
                         CachedDataRoot::default(),
                     )?;
                     Ok(())
                 })
                 .unwrap();
-            ensure_db_version_compatible(&consensus, &cache).unwrap();
+            super::super::v3_to_v4::migrate(&consensus, &cache).unwrap();
             // Run again — must not error and counts must remain stable.
-            ensure_db_version_compatible(&consensus, &cache).unwrap();
+            super::super::v3_to_v4::migrate(&consensus, &cache).unwrap();
 
             let cache_count = cache
                 .view(|tx| tx.entries::<CachedDataRoots>())
@@ -1915,7 +2184,7 @@ mod tests {
         }
 
         #[test]
-        fn v4_consensus_with_missing_cache_stamp_is_accepted() {
+        fn current_consensus_with_missing_cache_stamp_is_accepted() {
             use crate::db::IrysDatabaseExt as _;
 
             let dir = TempDirBuilder::new().build();
@@ -1925,10 +2194,10 @@ mod tests {
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
-            // Stamp consensus V4 (already at current).
+            // Stamp consensus CURRENT.
             consensus
                 .update_eyre(|tx| {
-                    crate::set_database_schema_version(tx, DatabaseVersion::V4)?;
+                    crate::set_database_schema_version(tx, DatabaseVersion::CURRENT)?;
                     Ok(())
                 })
                 .unwrap();
@@ -1937,12 +2206,12 @@ mod tests {
 
             ensure_db_version_compatible(&consensus, &cache).unwrap();
 
-            // Cache should now be stamped V4.
+            // Cache should now be stamped CURRENT.
             let kv = cache
                 .view(|tx| crate::cache_database_schema_version(tx).unwrap())
                 .unwrap()
                 .unwrap();
-            assert_eq!(kv, DatabaseVersion::V4 as u32);
+            assert_eq!(kv, DatabaseVersion::CURRENT as u32);
         }
 
         #[test]
@@ -1950,8 +2219,8 @@ mod tests {
             use crate::db_cache::CachedDataRoot;
 
             let (consensus, cache, _c, _k) = open_v3_pair();
-            let keys: Vec<irys_types::H256> = (1_u8..=5)
-                .map(|b| irys_types::H256::from([b; 32]))
+            let keys: Vec<irys_types::DataCommitment> = (1_u8..=5)
+                .map(|b| irys_types::DataCommitment(irys_types::H256::from([b; 32])))
                 .collect();
             consensus
                 .update_eyre(|tx| {
@@ -1989,7 +2258,7 @@ mod tests {
 
             let (consensus, cache, _c, _k) = open_v3_pair();
             let key = CachedIngressLeafKey {
-                data_root: irys_types::H256::from([2_u8; 32]),
+                data_commitment: irys_types::DataCommitment(irys_types::H256::from([2_u8; 32])),
                 address: irys_types::IrysAddress::from([3_u8; 20]),
             };
             let leaves = [
@@ -2012,8 +2281,8 @@ mod tests {
                 })
                 .unwrap();
 
-            ensure_db_version_compatible(&consensus, &cache).unwrap();
-            ensure_db_version_compatible(&consensus, &cache).unwrap();
+            super::super::v3_to_v4::migrate(&consensus, &cache).unwrap();
+            super::super::v3_to_v4::migrate(&consensus, &cache).unwrap();
 
             let cache_count = cache
                 .view(|tx| tx.entries::<CachedIngressLeaves>())

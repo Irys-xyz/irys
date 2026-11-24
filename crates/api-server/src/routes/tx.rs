@@ -16,8 +16,8 @@ use irys_actors::{
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_domain::EpochSnapshot;
 use irys_types::{
-    CommitmentTransaction, DataLedger, DataTransactionHeader, H256, IrysTransactionResponse,
-    UnixTimestamp, option_u64_stringify, u64_stringify,
+    CommitmentTransaction, DataLedger, DataTransactionHeader, DataTreeRoot, H256,
+    IrysTransactionResponse, UnixTimestamp, option_u64_stringify, u64_stringify,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -241,10 +241,10 @@ pub async fn get_tx_local_start_offset(
         err: String::from("invalid ledger id"),
     })?;
 
-    match state
-        .chunk_provider
-        .get_ledger_offsets_for_data_root(ledger, tx_header.data_root)
-    {
+    match state.chunk_provider.get_ledger_offsets_for_commitment(
+        ledger,
+        tx_header.data_commitment(&state.config.data_tree_geometry()),
+    ) {
         Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
         }),
@@ -334,14 +334,15 @@ pub async fn get_tx_promotion_status(
 /// from `proofs.assigned`. A configured assignee count of 0, or a clamp to 0
 /// because no eligible proof was assigned, waives that gate.
 ///
-/// Counts are this node's stored proofs for the data root, deduplicated by
+/// Counts are this node's stored proofs for the data commitment, deduplicated by
 /// the stored signer. Heights are decimal strings. Counts are JSON numbers.
 /// Null fields are present.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IngressStatus {
     pub tx_id: H256,
-    pub data_root: H256,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
     #[serde(with = "u64_stringify")]
     pub as_of_block_height: u64,
     pub as_of_block_hash: H256,
@@ -527,7 +528,7 @@ fn promoted_ingress_status(
 ) -> IngressStatus {
     IngressStatus {
         tx_id: header.id,
-        data_root: header.data_root,
+        data_tree_root: header.data_tree_root,
         as_of_block_height: tip.height,
         as_of_block_hash: tip.hash,
         promotion_height: Some(promotion_height),
@@ -545,7 +546,7 @@ fn unpromoted_ingress_status(
 ) -> IngressStatus {
     IngressStatus {
         tx_id: header.id,
-        data_root: header.data_root,
+        data_tree_root: header.data_tree_root,
         as_of_block_height: tip.height,
         as_of_block_hash: tip.hash,
         promotion_height: None,
@@ -642,7 +643,7 @@ mod tests {
         DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: u32::from(DataLedger::Submit),
                 ..Default::default()
             },

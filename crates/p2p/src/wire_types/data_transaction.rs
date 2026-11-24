@@ -1,4 +1,4 @@
-use irys_types::{BoundedFee, H256, IrysAddress, IrysSignature};
+use irys_types::{BoundedFee, DataTreeRoot, H256, IrysAddress, IrysSignature};
 use serde::{Deserialize, Serialize};
 
 use super::{impl_json_version_tagged_serde, impl_versioned_tx_from};
@@ -10,7 +10,8 @@ pub struct DataTransactionHeaderV1Inner {
     pub id: H256,
     pub anchor: H256,
     pub signer: IrysAddress,
-    pub data_root: H256,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
     #[serde(with = "irys_types::string_u64")]
     pub data_size: u64,
     #[serde(with = "irys_types::string_u64")]
@@ -44,7 +45,7 @@ impl_versioned_tx_from!(
             meta: irys_types::DataTransactionHeaderV1WithMetadata,
             tx: irys_types::DataTransactionHeaderV1,
             fields {
-                id, anchor, signer, data_root, data_size, prefix_size, prefix_hash,
+                id, anchor, signer, data_tree_root, data_size, prefix_size, prefix_hash,
                 term_fee, ledger_id, chain_id, signature, metadata_format, perm_fee,
             }
         },

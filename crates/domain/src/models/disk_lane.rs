@@ -1552,7 +1552,12 @@ impl StorageModule {
         }
         let partition_offsets = match super::index_read_metrics::trace_index_read(
             super::index_read_metrics::PLACEMENT,
-            || self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset),
+            || {
+                self.partition_offsets_for_commitment_chunk(
+                    chunk.data_commitment(&self.config.data_tree_geometry()),
+                    chunk.tx_offset,
+                )
+            },
         ) {
             Ok(Some(offsets)) => offsets,
             Ok(None) => {
@@ -1591,10 +1596,11 @@ impl StorageModule {
                 return Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused));
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
-            // Same funding math as `partition_offsets_for_data_root_chunk`,
+            // Same funding math as `partition_offsets_for_commitment_chunk`,
             // read again under this lock. It uses data-root rows only, so a
             // short test path is not parsed. Reset clears those rows before
             // a later entropy write can take `pending`.
+            let data_commitment = chunk.data_commitment(&self.config.data_tree_geometry());
             let still_funded = (|| -> eyre::Result<HashSet<PartitionChunkOffset>> {
                 let raw_tx_offset = u32::from(chunk.tx_offset);
                 let chunk_byte_offset = u64::from(raw_tx_offset)
@@ -1604,7 +1610,7 @@ impl StorageModule {
                 for (_, submodule) in self.submodules.iter() {
                     let Some(infos) = submodule
                         .db
-                        .view(|tx| tx.get_data_root_infos_for_data_root(chunk.data_root))?
+                        .view(|tx| tx.get_data_root_infos_for_commitment(data_commitment))?
                     else {
                         continue;
                     };
@@ -2509,7 +2515,7 @@ impl StorageModule {
     /// clipped to this partition. `None` when the offset is not indexed.
     fn tx_range_end(&self, offset: PartitionChunkOffset) -> Option<u32> {
         let placement = self.data_root_and_tx_offset_span(offset, offset).ok()?;
-        let (_root, tx_offset, data_size) = placement.into_iter().next().flatten()?;
+        let (_commitment, _root, tx_offset, data_size) = placement.into_iter().next().flatten()?;
         let chunk = self.config.consensus.chunk_size.max(1);
         let chunks = data_size.div_ceil(chunk);
         if chunks == 0 {
@@ -4006,6 +4012,7 @@ fn clone_error(error: &WriteDataChunkError) -> WriteDataChunkError {
 
 #[cfg(test)]
 mod tests {
+    use irys_types::DataTreeRoot;
     use std::{
         sync::{
             Arc,
@@ -5055,7 +5062,7 @@ mod tests {
         let data_root = H256::repeat_byte(0x42);
         let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 32,
                 ..Default::default()
             },
@@ -5068,7 +5075,7 @@ mod tests {
             0,
         )?;
         Ok(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 32,
             data_path: vec![4, 3, 2, 1].into(),
             bytes: vec![0x01; 32].into(),
@@ -6377,7 +6384,7 @@ mod tests {
         let path = vec![root_byte, 3, 2, 1];
         let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 32,
                 ..Default::default()
             },
@@ -6390,7 +6397,7 @@ mod tests {
             0,
         )?;
         Ok(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 32,
             data_path: path.into(),
             bytes: vec![body; 32].into(),

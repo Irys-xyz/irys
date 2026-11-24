@@ -136,7 +136,10 @@ async fn sync_partition_data_remote_test() -> Result<()> {
     let data_tx = match post_data_transaction(&clients[0], genesis_signer, data_size).await {
         Ok(tx) => {
             info!("✓ Successfully posted data transaction: {:?}", tx.header.id);
-            info!("  Transaction contains {} merkle nodes", tx.chunks.len());
+            info!(
+                "  Transaction contains {} merkle nodes",
+                tx.data_chunks().unwrap().len()
+            );
             Some(tx)
         }
         Err(e) => {
@@ -638,7 +641,10 @@ async fn sync_partition_data_remote_test() -> Result<()> {
     info!("Slot replica verification completed");
 
     if let Some(ref tx) = data_tx {
-        info!("Transaction posted with {} chunks", tx.chunks.len());
+        info!(
+            "Transaction posted with {} chunks",
+            tx.data_chunks().unwrap().len()
+        );
 
         match wait_for_ingress_proofs(&clients[0], vec![tx.header.id], 30).await {
             Ok(_) => info!("Transaction has ingress proofs and is promoted!"),

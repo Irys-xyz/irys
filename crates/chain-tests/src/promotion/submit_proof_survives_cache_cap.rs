@@ -6,33 +6,33 @@ use irys_database::DatabaseProvider;
 use irys_database::db::{DatabaseProviderCacheExt as _, IrysDupCursorExt as _};
 use irys_database::tables::{CachedChunksIndex, CompactCachedIngressProof};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{DataLedger, DataRoot, H256, IrysAddress, NodeConfig, irys::IrysSigner};
+use irys_types::{DataCommitment, DataLedger, H256, IrysAddress, NodeConfig, irys::IrysSigner};
 use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 
-fn cached_chunk_count(db: &DatabaseProvider, data_root: DataRoot) -> eyre::Result<u32> {
+fn cached_chunk_count(db: &DatabaseProvider, data_commitment: DataCommitment) -> eyre::Result<u32> {
     db.view_cache_eyre(|tx| {
         let mut cursor = tx.inner().cursor_dup_read::<CachedChunksIndex>()?;
-        Ok(cursor.dup_count(data_root)?.unwrap_or(0))
+        Ok(cursor.dup_count(data_commitment)?.unwrap_or(0))
     })
 }
 
 fn local_proof(
     db: &DatabaseProvider,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
     db.view_cache_eyre(|tx| {
-        irys_database::ingress_proof_by_data_root_address(tx, data_root, address)
+        irys_database::ingress_proof_by_commitment_address(tx, data_commitment, address)
     })
 }
 
 fn local_anchor(
     db: &DatabaseProvider,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
 ) -> eyre::Result<Option<H256>> {
-    Ok(local_proof(db, data_root, address)?.map(|compact| compact.0.proof.anchor))
+    Ok(local_proof(db, data_commitment, address)?.map(|compact| compact.0.proof.anchor))
 }
 
 /// Mine one block at a time, up to `max_blocks`, until `done` holds. The cache
@@ -148,7 +148,9 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         price.term_fee.into(),
     )?;
     let tx = signer.sign_transaction(tx)?;
-    let data_root = tx.header.data_root;
+    let data_commitment = tx
+        .header
+        .data_commitment(&node.node_ctx.config.data_tree_geometry());
     node.post_data_tx_raw(&tx.header).await;
     node.wait_for_mempool(tx.header.id, 20).await?;
     node.mine_blocks(2).await?;
@@ -158,23 +160,26 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
     }
     node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
         .await?;
-    assert!(local_proof(&db, data_root, local_address)?.is_some());
+    assert!(local_proof(&db, data_commitment, local_address)?.is_some());
 
     // Age the bodies, then mine until the capacity prune has reclaimed every
     // one. It reclaims only bodies the Submit module reports as persisted.
     tokio::time::sleep(Duration::from_secs(min_chunk_age_secs + 2)).await;
-    let reclaimed = mine_until(&node, 10, || Ok(cached_chunk_count(&db, data_root)? == 0)).await?;
+    let reclaimed = mine_until(&node, 10, || {
+        Ok(cached_chunk_count(&db, data_commitment)? == 0)
+    })
+    .await?;
     assert!(reclaimed, "persisted chunk bodies were never reclaimed");
 
     // Mine past the anchor expiry. With no cached body left, the stored
     // Submit copy is what keeps the proof; it must be reanchored, not deleted.
     let first_anchor =
-        local_anchor(&db, data_root, local_address)?.expect("local proof before expiry");
+        local_anchor(&db, data_commitment, local_address)?.expect("local proof before expiry");
     let blocks = usize::from(anchor_expiry_depth) * 3;
     // A reanchor replaces the row in one write transaction, so a missing row
     // means the prune deleted it.
     let reanchored = mine_until(&node, blocks, || {
-        let anchor = local_anchor(&db, data_root, local_address)?;
+        let anchor = local_anchor(&db, data_commitment, local_address)?;
         eyre::ensure!(
             anchor.is_some(),
             "the local proof was deleted after expiry at cache capacity"
@@ -190,17 +195,17 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         !node.get_is_promoted(&tx.header.id).await?,
         "one proof must not promote the tx"
     );
-    assert_eq!(cached_chunk_count(&db, data_root)?, 0);
+    assert_eq!(cached_chunk_count(&db, data_commitment)?, 0);
 
     // A node that already lost the row gets it back from the restore sweep.
-    let current = local_proof(&db, data_root, local_address)?.expect("reanchored proof");
+    let current = local_proof(&db, data_commitment, local_address)?.expect("reanchored proof");
     let deleted = db.update_cache_eyre(|tx| {
-        irys_database::delete_ingress_proof_if_unchanged(tx, data_root, current)
+        irys_database::delete_ingress_proof_if_unchanged(tx, data_commitment, current)
     })?;
     assert!(deleted);
-    assert!(local_proof(&db, data_root, local_address)?.is_none());
+    assert!(local_proof(&db, data_commitment, local_address)?.is_none());
     let restored = mine_until(&node, 5, || {
-        Ok(local_proof(&db, data_root, local_address)?.is_some())
+        Ok(local_proof(&db, data_commitment, local_address)?.is_some())
     })
     .await?;
     assert!(

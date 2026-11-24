@@ -1792,7 +1792,10 @@ impl NodeConfig {
         IrysSigner {
             signer: self.mining_key.clone(),
             chain_id: self.consensus_config().chain_id,
-            chunk_size: self.consensus_config().chunk_size,
+            data_tree_geometry: self
+                .consensus_config()
+                .data_tree_geometry()
+                .expect("data tree geometry is validated at load"),
         }
     }
 
@@ -2024,7 +2027,7 @@ impl NodeConfig {
         let signer = IrysSigner {
             signer: mining_key,
             chain_id: 0,
-            chunk_size: 0,
+            data_tree_geometry: crate::data_tree::Geometry::TESTING,
         };
 
         Self::testing_with_signer(&signer)
@@ -2041,7 +2044,9 @@ impl NodeConfig {
         let signer = IrysSigner {
             signer: mining_key,
             chain_id: consensus.chain_id,
-            chunk_size: consensus.chunk_size,
+            data_tree_geometry: consensus
+                .data_tree_geometry()
+                .expect("the testnet data tree geometry is valid"),
         };
 
         let mining_key = signer.signer.clone();

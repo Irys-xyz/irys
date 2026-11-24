@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use irys_types::{H256, PartitionChunkOffset, RelativeChunkOffset};
+use irys_types::{DataCommitment, DataTreeRoot, H256, RelativeChunkOffset};
 
 use super::tables::{OffsetMeta, PendingBodyMigration};
 
@@ -20,11 +20,12 @@ const OFFSET_FLAG_CRC_PRESENT: u8 = 0x02;
 /// Encode one offset row: proof bytes (when stored), then a trailer of the
 /// CRC32C (little-endian, when the flag is set), the flags byte, and
 /// [`OFFSET_META_FORMAT`]. A stored CRC of zero is a real checksum; unknown
-/// is the flag being unset. The leaf is the last 64 bytes of the proof, not
-/// of this value.
+/// is the flag being unset. The proof is a data chunk proof: a non-zero
+/// multiple of 32 bytes, siblings leaf to root, then the size witness. A
+/// one-chunk upload's proof is the 32-byte witness alone.
 ///
-/// The trailer follows the proof so LZ4 sees the shared upper branches of
-/// neighbouring proofs at the start of each value. A measured checksum prefix
+/// The trailer follows the proof so LZ4 sees the upper siblings and the
+/// size witness that neighbouring proofs share. A measured checksum prefix
 /// costs more bytes on that shape. Values are length-delimited, so the format
 /// byte can sit last. The schema marker names the layout.
 pub fn encode_offset_meta(meta: &OffsetMeta) -> eyre::Result<Vec<u8>> {
@@ -97,12 +98,14 @@ pub fn decode_offset_meta(bytes: &[u8]) -> eyre::Result<OffsetMeta> {
     Ok(OffsetMeta { crc, proof })
 }
 
-pub(super) const PLACEMENT_LEN: usize = 64;
+/// Fixed placement fields (64 bytes), then the `data_commitment` (32 bytes).
+pub(super) const PLACEMENT_LEN: usize = 96;
 pub(super) const DATA_ROOT_KEY_LEN: usize = 36;
-/// `content_hash` (32 bytes) then partition offset (u32 big-endian).
-pub(super) const CONTENT_KEY_LEN: usize = 36;
-pub(super) const DATA_ROOT_VALUE_LEN: usize = 16;
-pub(super) const PENDING_LEN: usize = 56;
+/// End, tx start and `data_size` (16 bytes), then the data tree root (32 bytes).
+pub(super) const DATA_ROOT_VALUE_LEN: usize = 48;
+/// Commitment (32), size (8), tx start (4), height (8), attempts (4), then the
+/// data tree root (32).
+pub(super) const PENDING_LEN: usize = 88;
 /// Stored when the writer did not name a ledger, a height, or a tx index.
 pub(super) const UNSET_U32: u32 = u32::MAX;
 pub(super) const UNSET_U64: u64 = u64::MAX;
@@ -123,6 +126,9 @@ pub(super) struct PlacementOrigin {
 }
 
 /// Inclusive placement stored under its start offset.
+///
+/// `data_root` is the tx's data tree root, from its tx leaf binding.
+/// `data_commitment` keys the placement's data-root row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PlacementRecord {
     pub end: u32,
@@ -132,6 +138,7 @@ pub(super) struct PlacementRecord {
     pub ledger: u32,
     pub block_height: u64,
     pub tx_index: u32,
+    pub data_commitment: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +152,7 @@ pub(super) struct DataRootPlacement {
     pub end: u32,
     pub tx_start: i32,
     pub data_size: u64,
+    pub data_tree_root: [u8; 32],
 }
 
 pub(super) fn encode_placement(value: &PlacementRecord) -> [u8; PLACEMENT_LEN] {
@@ -156,6 +164,7 @@ pub(super) fn encode_placement(value: &PlacementRecord) -> [u8; PLACEMENT_LEN] {
     out[48..52].copy_from_slice(&value.ledger.to_be_bytes());
     out[52..60].copy_from_slice(&value.block_height.to_be_bytes());
     out[60..64].copy_from_slice(&value.tx_index.to_be_bytes());
+    out[64..96].copy_from_slice(&value.data_commitment);
     out
 }
 
@@ -174,44 +183,32 @@ pub(super) fn decode_placement(bytes: &[u8]) -> eyre::Result<PlacementRecord> {
         ledger: u32::from_be_bytes(bytes[48..52].try_into().expect("4")),
         block_height: u64::from_be_bytes(bytes[52..60].try_into().expect("8")),
         tx_index: u32::from_be_bytes(bytes[60..64].try_into().expect("4")),
+        data_commitment: bytes[64..96].try_into().expect("32"),
     })
 }
 
-pub(super) fn data_root_key(data_root: &H256, start: u32) -> [u8; DATA_ROOT_KEY_LEN] {
+/// Data-root row key: the placement's `data_commitment`, then its start.
+pub(super) fn data_root_key(
+    data_commitment: &DataCommitment,
+    start: u32,
+) -> [u8; DATA_ROOT_KEY_LEN] {
     let mut key = [0_u8; DATA_ROOT_KEY_LEN];
-    key[..32].copy_from_slice(&data_root.0);
+    key[..32].copy_from_slice(&data_commitment.0.0);
     key[32..].copy_from_slice(&start.to_be_bytes());
     key
 }
 
-pub(super) fn content_key(hash: &H256, offset: PartitionChunkOffset) -> [u8; CONTENT_KEY_LEN] {
-    let mut key = [0_u8; CONTENT_KEY_LEN];
-    key[..32].copy_from_slice(&hash.0);
-    key[32..].copy_from_slice(&offset.0.to_be_bytes());
-    key
-}
-
-pub(super) fn decode_content_key(bytes: &[u8]) -> Option<(H256, PartitionChunkOffset)> {
-    if bytes.len() != CONTENT_KEY_LEN {
-        return None;
-    }
-    let mut hash = [0_u8; 32];
-    hash.copy_from_slice(&bytes[..32]);
-    let offset = u32::from_be_bytes(bytes[32..].try_into().expect("4"));
-    Some((H256(hash), PartitionChunkOffset(offset)))
-}
-
-pub(super) fn decode_data_root_key(bytes: &[u8]) -> eyre::Result<(H256, u32)> {
+pub(super) fn decode_data_root_key(bytes: &[u8]) -> eyre::Result<(DataCommitment, u32)> {
     if bytes.len() != DATA_ROOT_KEY_LEN {
         eyre::bail!(
             "data-root placement key is {} bytes, expected {DATA_ROOT_KEY_LEN}",
             bytes.len()
         );
     }
-    let mut root = [0_u8; 32];
-    root.copy_from_slice(&bytes[..32]);
+    let mut commitment = [0_u8; 32];
+    commitment.copy_from_slice(&bytes[..32]);
     let start = u32::from_be_bytes(bytes[32..].try_into().expect("4"));
-    Ok((H256(root), start))
+    Ok((DataCommitment(H256(commitment)), start))
 }
 
 pub(super) fn encode_data_root(value: &DataRootPlacement) -> [u8; DATA_ROOT_VALUE_LEN] {
@@ -219,6 +216,7 @@ pub(super) fn encode_data_root(value: &DataRootPlacement) -> [u8; DATA_ROOT_VALU
     out[0..4].copy_from_slice(&value.end.to_be_bytes());
     out[4..8].copy_from_slice(&value.tx_start.to_be_bytes());
     out[8..16].copy_from_slice(&value.data_size.to_be_bytes());
+    out[16..48].copy_from_slice(&value.data_tree_root);
     out
 }
 
@@ -233,16 +231,18 @@ pub(super) fn decode_data_root(bytes: &[u8]) -> eyre::Result<DataRootPlacement> 
         end: u32::from_be_bytes(bytes[0..4].try_into().expect("4")),
         tx_start: i32::from_be_bytes(bytes[4..8].try_into().expect("4")),
         data_size: u64::from_be_bytes(bytes[8..16].try_into().expect("8")),
+        data_tree_root: bytes[16..48].try_into().expect("32"),
     })
 }
 
 pub(super) fn encode_pending(job: &PendingBodyMigration) -> [u8; PENDING_LEN] {
     let mut out = [0_u8; PENDING_LEN];
-    out[0..32].copy_from_slice(&job.data_root.0);
+    out[0..32].copy_from_slice(&job.data_commitment.0.0);
     out[32..40].copy_from_slice(&job.data_size.to_be_bytes());
     out[40..44].copy_from_slice(&job.start_offset.0.to_be_bytes());
     out[44..52].copy_from_slice(&job.block_height.to_be_bytes());
     out[52..56].copy_from_slice(&job.attempts.to_be_bytes());
+    out[56..88].copy_from_slice(&job.data_tree_root.0.0);
     out
 }
 
@@ -253,20 +253,22 @@ pub(super) fn decode_pending(bytes: &[u8]) -> eyre::Result<PendingBodyMigration>
             bytes.len()
         );
     }
-    let mut data_root = [0_u8; 32];
-    data_root.copy_from_slice(&bytes[..32]);
+    let mut data_commitment = [0_u8; 32];
+    data_commitment.copy_from_slice(&bytes[..32]);
     Ok(PendingBodyMigration {
-        data_root: H256(data_root),
+        data_commitment: DataCommitment(H256(data_commitment)),
         data_size: u64::from_be_bytes(bytes[32..40].try_into().expect("8")),
         start_offset: RelativeChunkOffset(i32::from_be_bytes(bytes[40..44].try_into().expect("4"))),
         block_height: u64::from_be_bytes(bytes[44..52].try_into().expect("8")),
         attempts: u32::from_be_bytes(bytes[52..56].try_into().expect("4")),
+        data_tree_root: DataTreeRoot(H256(bytes[56..88].try_into().expect("32"))),
     })
 }
 
 pub(super) fn fresh_placement(
     end: u32,
     data_root: H256,
+    data_commitment: DataCommitment,
     origin: Option<PlacementOrigin>,
 ) -> PlacementRecord {
     let (ledger, block_height, tx_index) = match origin {
@@ -281,6 +283,7 @@ pub(super) fn fresh_placement(
         ledger,
         block_height,
         tx_index,
+        data_commitment: data_commitment.0.0,
     }
 }
 
@@ -291,6 +294,7 @@ pub(super) fn awaits_info(value: &PlacementRecord) -> bool {
 
 pub(super) fn same_identity(left: &PlacementRecord, right: &PlacementRecord) -> bool {
     left.data_root == right.data_root
+        && left.data_commitment == right.data_commitment
         && left.tx_start == right.tx_start
         && left.data_size == right.data_size
         && left.ledger == right.ledger
@@ -449,6 +453,7 @@ mod tests {
             ledger: 1,
             block_height: 4,
             tx_index: 2,
+            data_commitment: [byte; 32],
         }
     }
 
@@ -462,8 +467,23 @@ mod tests {
             ledger: 20,
             block_height: 1_000,
             tx_index: 4,
+            data_commitment: [8; 32],
         };
         assert_eq!(decode_placement(&encode_placement(&value)).unwrap(), value);
+    }
+
+    /// Two sizes of one root are two commitments: adjacent rows stay apart.
+    #[test]
+    fn a_different_data_commitment_does_not_merge() {
+        let left = PlacementSpan {
+            start: 0,
+            value: placed(4, 1, 10),
+        };
+        let mut right = placed(0, 1, 10);
+        right.data_commitment = [9; 32];
+        let (_delete, put) = plan_placement(&[left], 5, 9, Some(right));
+        assert_eq!(put.len(), 1);
+        assert_eq!(put[0].start, 5);
     }
 
     #[test]
@@ -525,7 +545,8 @@ mod tests {
     #[test]
     fn pending_bytes_round_trip() {
         let job = PendingBodyMigration {
-            data_root: H256::repeat_byte(3),
+            data_commitment: DataCommitment(H256::repeat_byte(3)),
+            data_tree_root: DataTreeRoot(H256::repeat_byte(3)),
             data_size: 64,
             start_offset: RelativeChunkOffset(-2),
             block_height: 8,

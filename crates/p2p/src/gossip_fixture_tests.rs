@@ -375,7 +375,7 @@ fixture_tests! {
     v1_data_request_block =>
         wire::GossipDataRequestV1::Block(test_h256(0xBB)),
     v1_data_request_chunk =>
-        wire::GossipDataRequestV1::Chunk(test_h256(0xCC)),
+        wire::GossipDataRequestV1::Chunk(irys_types::ChunkKey(test_h256(0xCC))),
     v1_data_request_transaction =>
         wire::GossipDataRequestV1::Transaction(test_h256(0xDD)),
 
@@ -423,7 +423,7 @@ fixture_tests! {
     v2_data_request_block_body =>
         wire::GossipDataRequestV2::BlockBody(test_h256(0xBB)),
     v2_data_request_chunk =>
-        wire::GossipDataRequestV2::Chunk(test_h256(0xCC)),
+        wire::GossipDataRequestV2::Chunk(irys_types::ChunkKey(test_h256(0xCC))),
     v2_data_request_transaction =>
         wire::GossipDataRequestV2::Transaction(test_h256(0xDD)),
 

@@ -53,7 +53,8 @@ missing blocks. Recover by hand, for the submodule the error names:
 submodule-index-convert mdbx-to-rocks --allow-unresolved \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <active slot width> --chunk-size <bytes> \
+  --chunks-per-partition <active slot width> \
+  --config <node>/config.toml \
   <submodule>/db <submodule>/rocks
 ```
 
@@ -74,12 +75,14 @@ The converter places each row at `slot * partition_chunks + offset`. The
 start uses the active slot width from the epoch snapshot, which a
 partition resize makes smaller than the genesis `num_chunks_in_partition`.
 
-A schema v1 `db/` (release 4.0.8) converts directly. The converter reads
-it and does not change it. A schema row that still starts with
-`irys-submodule-index migrate-v1 ` is a v1 to v2 in-place migration that
-an earlier release did not finish. The start finishes that migration in
-`db/` (the same step that release runs on open), then converts. Copy `db/`
-before the upgrade if you want to keep it as it is.
+A schema v1 `db/` (release 4.0.8) with no data rows converts. The converter
+reads it and does not change it. A schema v1 `db/` with data rows is
+refused: those rows are keyed by the data root, and the network must reset.
+A schema row `irys-submodule-index 2` (data keyed by the data root), or a
+row that still starts with `irys-submodule-index migrate-v1 `, goes through
+the same open the node uses. An empty index is upgraded to commitment keys,
+then converted. An index with data rows is refused: the network must reset.
+Copy `db/` before that open if you want to keep it as it is.
 
 Every storage module, and every submodule inside it, converts on its own
 thread, so the disks work in parallel. Memory pinned to warm the MDBX
@@ -162,11 +165,12 @@ does not create a missing family. Restore the directory or reset the
 storage module. A new directory, and a converter target, still create
 the families.
 
-RocksDB v1 stores the placement, the offset row in `ChunkMetaByOffset`,
-and `ChunkOffsetsByContentHash` (the 32-byte leaf hash, then the
-partition offset, with an empty value). The offset row is the data proof
-when one is stored, and the CRC32C of the packed chunk when one was
-written. A checksum with no proof is an entropy row. It is not a data
+RocksDB v1 stores the placement and the offset row in
+`ChunkMetaByOffset`. The offset row is the data proof when one is stored,
+and the CRC32C of the packed chunk when one was written. The data proof
+is a data tree v2 chunk proof: 32-byte hashes, the siblings leaf to root,
+then the size witness. It holds no chunk hash. `ChunkOffsetsByContentHash`
+is retired: it stays empty (see below). A checksum with no proof is an entropy row. It is not a data
 chunk.
 
 RocksDB v1 metadata values are raw. The packing value is 41 bytes:
@@ -178,9 +182,9 @@ byte `01`. `mdbx-to-rocks` writes the packing record when
 The node writes it on open when they are not.
 
 The checksum, a flags byte and a format byte are a trailer after
-the proof, not a header: neighbouring proofs share their upper branches,
-and block compression keeps more of that sharing when each value starts
-with the proof (measured at 1–3 bytes per chunk less than a header; see
+the proof, not a header: neighbouring proofs share their upper siblings
+and the size witness, and block compression keeps more of that sharing
+when each value starts with the proof (measured at 1–3 bytes per chunk less than a header; see
 `encode_offset_meta`). RocksDB v1 does not store the tx path. Mining
 derives that path from the consensus database. MDBX keeps
 `ChunkDataPathByOffset` and stores only the proof.
@@ -255,12 +259,14 @@ No prefix extractor. Bloom is off unless every family has a bloom.
 
 ### ChunkOffsetsByContentHash
 
-Key: leaf content hash, 32 bytes, then the partition offset `u32`. 36
-bytes. The hash is the leaf in the last 64 bytes of the proof. A shorter
-proof has no row. A checksum-only row has no row. The checksum is not
-part of the key.
+Retired. A data tree v2 chunk proof holds no chunk hash, so nothing
+writes or reads this family. It is still opened with the options below,
+so an existing directory keeps its layout and opens. `audit_index`
+reports any row in it as a finding.
 
-Value: empty. A non-empty value is a finding.
+Key: content hash, 32 bytes, then the partition offset `u32`. 36 bytes.
+
+Value: empty.
 
 Prefix extractor `rocksdb.FixedPrefix.32`. Memtable prefix bloom ratio
 0.1. `whole_key_filtering` is false. The bloom is always on, 10 bits per
@@ -336,15 +342,26 @@ are the fields in `<submodule>/packing_params.toml`.
 That file also records `entropy_packing_iterations` and `chunk_size`.
 A file that omits them is filled from the current consensus when the
 node opens the module, then written back.
-`chunk-size` comes from the chain config. `chunks-per-partition` is the
-active slot width: the consensus `num_chunks_in_partition`, or the
-`partition_chunks` of `[hardforks.fission]` once that resize is active.
-Mainnet chunk size is 262144. The tool derives the tx path at that ledger
-offset and requires the stored bytes to be identical. A mismatch aborts
-and names the partition offset.
+`--config` is the `config.toml` of the node that wrote this index. The tool
+takes the chunk size and the data tree geometry from its consensus config.
+The geometry derives each tx's data commitment, and a stored placement with
+another commitment is a mismatch. The default slot width is that config's
+`num_chunks_in_partition`. After `[hardforks.fission]` is active, pass
+`--chunks-per-partition` as the resized `partition_chunks`: the tool has no
+epoch snapshot, so it cannot see the active width itself. Every node of one
+chain has the same consensus config, so any node's config of that chain
+works. A config for another chain or preset, or another custom consensus
+file, gives false mismatches. When `consensus` in that file is a `Path`, a
+relative path resolves from the current directory: run the tool from the
+node's working directory or use an absolute path. Mainnet chunk size is
+262144. The tool derives the tx path at that ledger offset and requires the
+stored bytes to be identical. A mismatch aborts and names the partition
+offset.
 
-The converter never modifies its source. It reads a schema v1 or v2
-`db/` and writes RocksDB v1 to the target. The completion marker is
+The converter never modifies its source. It reads a commitment-keyed
+schema v3 `db/`, or a schema v1 `db/` with no data rows, and writes
+RocksDB v1 to the target. A source with data rows keyed by the data
+root is refused: the network must reset. The completion marker is
 written last. `rocks/SCHEMA` is the RocksDB marker. The MDBX marker is
 the schema row. A crash leaves no marker and leaves `CONVERTING`. The
 node refuses that directory. Run the same command again with
@@ -368,15 +385,17 @@ trailer.
 ## Move MDBX to RocksDB v1 by hand
 
 The node does this when it starts. To do it before the upgrade, stop the
-node and run, for each submodule directory. `--chunks-per-partition` is the
-active slot width: after a partition resize it is the resized width, not
-the genesis `num_chunks_in_partition`.
+node and run, for each submodule directory. `--config` supplies the chunk
+size, the data tree geometry, and the default slot width. Add
+`--chunks-per-partition` when a partition resize has changed the active
+width. That width is the resized `partition_chunks`, not the genesis
+`num_chunks_in_partition`.
 
 ```sh
 submodule-index-convert mdbx-to-rocks --verify \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
+  --config <node>/config.toml \
   <submodule>/db <submodule>/rocks
 ```
 
@@ -403,12 +422,12 @@ after the move, so do not use it as the rollback index.
 submodule-index-convert rocks-to-mdbx \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
+  --config <node>/config.toml \
   <submodule>/rocks <new-db-dir>
 submodule-index-convert verify --rollback \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
+  --config <node>/config.toml \
   <new-db-dir> <submodule>/rocks
 ```
 

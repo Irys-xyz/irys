@@ -1,11 +1,9 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
 use crate::Base64;
-use crate::ChunkBytes;
 use crate::H256;
 use crate::IrysAddress;
 use crate::TxChunkOffset;
-use crate::chunked::ChunkedIterator;
 use borsh::BorshDeserialize as _;
 use borsh_derive::BorshDeserialize;
 use eyre::Error;
@@ -55,58 +53,28 @@ pub fn expected_chunk_byte_range(
     Ok((min, max))
 }
 
-/// Check that an unpacked chunk is self-consistent: its data path proves
-/// `data_root` at `tx_offset`, the body length matches the proven range,
-/// and the body hashes to the proven leaf. Ingress can return `Ok` without
-/// this check (a recent-chunk hit keys only the path hash, and a wrong
-/// length returns `Ok` before the leaf hash is compared), so peer-supplied
-/// bodies must pass it first.
-pub fn validate_unpacked_chunk(chunk: &crate::UnpackedChunk, chunk_size: u64) -> eyre::Result<()> {
-    let (min_byte, max_byte) =
-        expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
-            .map_err(|error| eyre!("peer chunk data path range: {error}"))?;
-    let target = u128::from(max_byte - 1);
-    let path = validate_path(chunk.data_root.0, &chunk.data_path, target)
-        .map_err(|error| eyre!("peer chunk data path: {error}"))?;
-    let chunk_len =
-        u64::try_from(chunk.bytes.len()).map_err(|_| eyre!("peer chunk length exceeds u64"))?;
-    let expected_len = max_byte - min_byte;
-    eyre::ensure!(
-        chunk_len == expected_len,
-        "peer chunk length {chunk_len} does not match the data path range {expected_len}"
-    );
-    validate_path_byte_range(&path, (min_byte, max_byte))
-        .map_err(|error| eyre!("peer chunk data path range: {error}"))?;
-    let hash = hash_sha256(&chunk.bytes.0);
-    eyre::ensure!(
-        path.leaf_hash == hash,
-        "peer chunk hash does not match the data path leaf"
-    );
-    Ok(())
-}
-
-/// Verifies that a validated Merkle path identifies exactly the expected chunk
-/// range. Rightmost status is checked separately because provisional
-/// transaction metadata may understate the size committed by the data root.
-pub fn validate_path_byte_range(
-    path: &ValidatePathResult,
-    expected: (u64, u64),
-) -> Result<(), Error> {
-    let actual = (
-        u64::try_from(path.min_byte_range)
-            .map_err(|_| eyre!("validated chunk start boundary exceeds u64"))?,
-        u64::try_from(path.max_byte_range)
-            .map_err(|_| eyre!("validated chunk end boundary exceeds u64"))?,
-    );
-    eyre::ensure!(
-        actual == expected,
-        "data path range {}..{} does not match expected range {}..{}",
-        actual.0,
-        actual.1,
-        expected.0,
-        expected.1
-    );
-    Ok(())
+/// Check that an unpacked chunk is self-consistent: its data path opens
+/// chunk `tx_offset` of the commitment its own `data_tree_root` and
+/// `data_size` give under `geometry`. Ingress can return `Ok` without this
+/// check (a recent-chunk hit keys only the chunk key, not the body), so
+/// peer-supplied bodies must pass it first.
+///
+/// The commitment comes from the chunk message, so a pass is only a filter:
+/// an anchored check against a signature-checked header must follow before
+/// the chunk is trusted.
+pub fn validate_unpacked_chunk(
+    chunk: &crate::UnpackedChunk,
+    geometry: &crate::data_tree::Geometry,
+) -> eyre::Result<()> {
+    crate::data_tree::verify_data_chunk(
+        geometry,
+        chunk.data_commitment(geometry),
+        chunk.data_size,
+        chunk.tx_offset,
+        &chunk.bytes.0,
+        &chunk.data_path.0,
+    )
+    .map_err(|error| eyre!("peer chunk failed verification: {error}"))
 }
 
 /// Concatenated ids and max byte ranges for full set of nodes for an original data chunk, starting with the root.
@@ -167,8 +135,6 @@ impl ProofDeserialize<Self> for BranchProof {
     }
 }
 
-pub const MAX_CHUNK_SIZE: usize = 256 * 1024;
-pub const MIN_CHUNK_SIZE: usize = 32 * 1024;
 pub const HASH_SIZE: usize = 32;
 const NOTE_SIZE: usize = 32;
 
@@ -221,26 +187,6 @@ pub fn ensure_proof_layout(path_buff: &[u8]) -> Result<usize, Error> {
         "Invalid proof: misaligned branch length"
     );
     Ok(branches_len)
-}
-
-/// Returns true when any proof node in `path_buff` has a non-zero notepad.
-///
-/// [`validate_path`] never reads the notepad bytes. Honest proof producers always
-/// write zeros, so requiring zero notepads gives each proof one byte encoding.
-/// A path with a malformed layout returns false: layout, hashes and ranges are
-/// checked by [`validate_path`].
-pub fn has_non_zero_notepad(path_buff: &[u8]) -> bool {
-    let Ok(branches_len) = ensure_proof_layout(path_buff) else {
-        return false;
-    };
-    let (branches, leaf) = path_buff.split_at(branches_len);
-    let branch_notepads = branches
-        .chunks(BRANCH_PROOF_LEN)
-        .map(|branch| &branch[2 * HASH_SIZE..BRANCH_PROOF_LEN - 8]);
-    let leaf_notepad = &leaf[HASH_SIZE..LEAF_PROOF_LEN - 8];
-    branch_notepads
-        .chain(std::iter::once(leaf_notepad))
-        .any(|notepad| notepad.iter().any(|byte| *byte != 0))
 }
 
 pub fn validate_path(
@@ -402,137 +348,13 @@ pub fn print_debug(
     Ok((leaf_proof.data_hash, min_byte_range, max_byte_range))
 }
 
-/// (is_rightmost_chunk, max_byte_range)
-pub type ChunkInfo = (bool, u64);
-
-/// Validates chunk of data against provided [`Proof`].
-/// Returns a [ChunkInfo] if successful `(is_rightmost_chunk, max_byte_range)`
-pub fn validate_chunk(
-    mut root_id: [u8; HASH_SIZE],
-    chunk_node: &Node,
-    proof: &Proof,
-) -> Result<ChunkInfo, Error> {
-    let mut is_rightmost_chunk = true;
-    let max_byte_range_result: u64;
-
-    match chunk_node {
-        Node {
-            data_hash: Some(data_hash),
-            max_byte_range,
-            ..
-        } => {
-            // Validate that proof has sufficient length to avoid arithmetic underflow
-            let min_required_length = HASH_SIZE + NOTE_SIZE;
-            if proof.proof.len() < min_required_length {
-                return Err(eyre!(
-                    "Invalid proof buffer: length {} is less than the minimum required length {}",
-                    proof.proof.len(),
-                    min_required_length
-                ));
-            }
-
-            // Split proof into branches and leaf. Leaf is at the end and branches are ordered
-            // from root to leaf.
-            let (branches, leaf) = proof
-                .proof
-                .split_at(proof.proof.len() - HASH_SIZE - NOTE_SIZE);
-
-            // Deserialize proof.
-            let branch_proofs: Vec<BranchProof> = branches
-                .chunks(HASH_SIZE * 2 + NOTE_SIZE)
-                .map(BranchProof::try_from_proof_slice)
-                .collect::<Result<_, _>>()?;
-            let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
-
-            // Validate branches.
-            for branch_proof in branch_proofs.iter() {
-                // Calculate the id from the proof.
-                let id = hash_all_sha256(vec![
-                    &branch_proof.left_id,
-                    &branch_proof.right_id,
-                    &branch_proof.offset().to_note_vec(),
-                ]);
-
-                // Ensure calculated id correct.
-                if id != root_id {
-                    return Err(eyre!("Invalid Branch Proof"));
-                }
-
-                // If the max_byte_range from the proof is greater than the max_byte_range in the data chunk,
-                // then the next id to validate against is from the left.
-                root_id = if max_byte_range > &branch_proof.offset() {
-                    branch_proof.right_id
-                } else {
-                    is_rightmost_chunk = false;
-                    branch_proof.left_id
-                }
-            }
-
-            // Validate leaf data_hash is correct
-            if data_hash != &leaf_proof.data_hash {
-                return Err(eyre!("Invalid Leaf Proof: hash mismatch"));
-            }
-
-            // Validate leaf root id is correct
-            let id = hash_all_sha256(vec![data_hash, &max_byte_range.to_note_vec()]);
-            if id != root_id {
-                return Err(eyre!("Invalid Leaf Proof: root mismatch"));
-            }
-
-            max_byte_range_result = (*max_byte_range).try_into().unwrap();
-        }
-        _ => {
-            unreachable!()
-        }
-    }
-    Ok((is_rightmost_chunk, max_byte_range_result))
-}
-
-/// Generates data chunks from which the calculation of root id starts.
-/// does NOT need to be passed in correctly sized data chunks
-pub fn generate_leaves(
-    data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
-    chunk_size: usize,
-) -> Result<Vec<Node>, Error> {
-    let data_chunks = ChunkedIterator::new(data, chunk_size);
-    generate_leaves_from_chunks(data_chunks)
-}
-
-/// Generates merkle leaves from chunks
-pub fn generate_leaves_from_chunks(
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
-) -> Result<Vec<Node>, Error> {
-    let mut leaves = Vec::<Node>::new();
-    let mut min_byte_range = 0;
-    for chunk in chunks {
-        let chunk = chunk?;
-        let data_hash = hash_sha256(&chunk);
-        let max_byte_range = min_byte_range + chunk.len();
-        let max_byte_range_bytes = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_hash, &max_byte_range_bytes]);
-
-        leaves.push(Node {
-            id,
-            data_hash: Some(data_hash),
-            min_byte_range,
-            max_byte_range,
-            left_child: None,
-            right_child: None,
-        });
-        min_byte_range += &chunk.len();
-    }
-    Ok(leaves)
-}
-
-/// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
-/// and_regular can be set to re-use the chunk iterator to produce the "standard" leaves, as well as the ingress proof specific ones for when we validate ingress proofs
+/// Generates the address-bound ingress leaves: each chunk's data hash
+/// interleaves the provided address.
 pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
     chunks: impl Iterator<Item = eyre::Result<C>>,
     address: IrysAddress,
-    and_regular: bool,
-) -> Result<(Vec<Node>, Option<Vec<Node>>), Error> {
+) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
-    let mut regular_leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for chunk in chunks {
         let chunk = chunk?;
@@ -545,7 +367,6 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
                 .try_into()
                 .map_err(|_| eyre!("ingress leaf byte range exceeds u64"))?,
         )?;
-        let max_byte_range_bytes = max_byte_range.to_note_vec();
 
         leaves.push(Node {
             id: compact_leaf.id.0,
@@ -556,22 +377,9 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
             right_child: None,
         });
 
-        if and_regular {
-            let data_hash = hash_sha256(bytes);
-            let id = hash_all_sha256(vec![&data_hash, &max_byte_range_bytes]);
-            regular_leaves.push(Node {
-                id,
-                data_hash: Some(data_hash),
-                min_byte_range,
-                max_byte_range,
-                left_child: None,
-                right_child: None,
-            });
-        }
-
         min_byte_range += bytes.len();
     }
-    Ok((leaves, and_regular.then_some(regular_leaves)))
+    Ok(leaves)
 }
 
 /// Computes the miner-specific hash that cannot be reconstructed after the
@@ -795,64 +603,6 @@ mod tests {
         assert!(expected_chunk_byte_range(TxChunkOffset::from(3), 71, 32).is_err());
     }
 
-    /// Proof for chunk 0 of two chunks: one branch node then the leaf node.
-    fn two_chunk_proof() -> (H256, Vec<u8>) {
-        let chunks = vec![Ok(vec![1_u8; 32]), Ok(vec![2_u8; 32])];
-        let leaves = generate_leaves(chunks.into_iter(), 32).unwrap();
-        let root = generate_data_root(leaves).unwrap();
-        let data_root = H256(root.id);
-        let proof = resolve_proofs(root, None).unwrap().remove(0);
-        (data_root, proof.proof)
-    }
-
-    #[test]
-    fn zero_notepads_pass_and_validate_path_is_unchanged() {
-        let (data_root, proof) = two_chunk_proof();
-        assert_eq!(proof.len(), BRANCH_PROOF_LEN + LEAF_PROOF_LEN);
-        assert!(!has_non_zero_notepad(&proof));
-        assert!(validate_path(data_root.0, &Base64(proof), 0).is_ok());
-    }
-
-    #[test]
-    fn non_zero_leaf_notepad_fails_check_but_still_validates() {
-        let (data_root, mut proof) = two_chunk_proof();
-        // leaf layout: data_hash(32) | notepad(24) | offset(8)
-        proof[BRANCH_PROOF_LEN + HASH_SIZE] = 1;
-        assert!(has_non_zero_notepad(&proof));
-        assert!(validate_path(data_root.0, &Base64(proof), 0).is_ok());
-    }
-
-    #[test]
-    fn non_zero_branch_notepad_fails_check_but_still_validates() {
-        let (data_root, mut proof) = two_chunk_proof();
-        // branch layout: left_id(32) | right_id(32) | notepad(24) | offset(8)
-        proof[2 * HASH_SIZE + 23] = 1;
-        assert!(has_non_zero_notepad(&proof));
-        assert!(validate_path(data_root.0, &Base64(proof), 0).is_ok());
-    }
-
-    #[test]
-    fn notepad_check_ignores_bad_layout() {
-        assert!(!has_non_zero_notepad(&[1_u8; 5]));
-    }
-
-    #[test]
-    fn path_range_must_match_chunk_position_exactly() {
-        let mut path = ValidatePathResult {
-            leaf_hash: [0; HASH_SIZE],
-            min_byte_range: 64,
-            max_byte_range: 71,
-            is_rightmost_chunk: true,
-        };
-        assert!(validate_path_byte_range(&path, (64, 71)).is_ok());
-
-        path.min_byte_range = 63;
-        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
-        path.min_byte_range = 64;
-        path.max_byte_range = 70;
-        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
-    }
-
     #[test]
     fn validate_is_rightmost_chunk() {
         // Build a minimal two-leaf tree and verify parent node metadata and proof encoding semantics.
@@ -1016,49 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn should_return_error_if_proof_is_too_short() {
-        let root_id = [0_u8; HASH_SIZE];
-        let chunk_node = Node {
-            id: root_id,
-            data_hash: Some([1_u8; HASH_SIZE]),
-            min_byte_range: 0,
-            max_byte_range: 100,
-            left_child: None,
-            right_child: None,
-        };
-        let proof = Proof {
-            last_byte_index: 0,
-            proof: vec![0; HASH_SIZE - 1], // Intentionally too short
-        };
-        let result = validate_chunk(root_id, &chunk_node, &proof);
-        let err_text = result
-            .expect_err("expected error for too short proof")
-            .to_string();
-        assert_eq!(
-            &err_text,
-            "Invalid proof buffer: length 31 is less than the minimum required length 64"
-        );
-    }
-
-    #[test]
-    fn should_return_error_if_branch_region_is_not_a_multiple_of_branch_size() {
-        let root_id = [0_u8; HASH_SIZE];
-        let chunk_node = Node {
-            id: root_id,
-            data_hash: Some([1_u8; HASH_SIZE]),
-            min_byte_range: 0,
-            max_byte_range: 100,
-            left_child: None,
-            right_child: None,
-        };
-        let proof = Proof {
-            last_byte_index: 0,
-            proof: vec![0; HASH_SIZE * 2 + NOTE_SIZE + 10], // 10 stray bytes before the leaf
-        };
-        assert!(validate_chunk(root_id, &chunk_node, &proof).is_err());
-    }
-
-    #[test]
     fn validate_path_accepts_in_bounds_edges() {
         // Build a simple two-leaf tree: left size = 5 bytes, right size = 7 bytes
         // So the branch pivot is 5, and the right leaf's max_byte_range is 12.
@@ -1175,44 +882,40 @@ mod tests {
         );
     }
 
-    fn single_chunk(bytes: Vec<u8>) -> crate::UnpackedChunk {
-        let chunk_size = bytes.len();
-        let leaves =
-            generate_leaves(std::iter::once(Ok(bytes.clone())), chunk_size).expect("leaves");
-        let root = generate_data_root(leaves).expect("root");
-        let data_root = H256(root.id);
-        let proof = resolve_proofs(root, None)
-            .expect("proofs")
+    fn single_chunk(bytes: Vec<u8>) -> (crate::UnpackedChunk, crate::data_tree::Geometry) {
+        let config = crate::ConsensusConfig::testing();
+        let geometry = config.data_tree_geometry().expect("testing geometry");
+        let signer = crate::irys::IrysSigner::random_signer(&config);
+        let tx = signer
+            .create_transaction(bytes, H256::zero())
+            .expect("transaction");
+        let chunk = tx
+            .data_chunks()
+            .expect("chunks")
             .into_iter()
             .next()
-            .expect("one proof");
-        crate::UnpackedChunk {
-            data_root,
-            data_size: u64::try_from(chunk_size).expect("chunk length fits u64"),
-            data_path: proof.proof.into(),
-            bytes: bytes.into(),
-            tx_offset: TxChunkOffset::from(0),
-        }
+            .expect("one chunk");
+        (chunk, geometry)
     }
 
     #[test]
     fn validate_unpacked_chunk_accepts_a_consistent_chunk() {
-        let chunk = single_chunk(vec![7_u8; 32]);
-        validate_unpacked_chunk(&chunk, 32).expect("valid chunk");
+        let (chunk, geometry) = single_chunk(vec![7_u8; 32]);
+        validate_unpacked_chunk(&chunk, &geometry).expect("valid chunk");
     }
 
     #[test]
     fn validate_unpacked_chunk_rejects_a_wrong_length_body() {
-        let mut chunk = single_chunk(vec![7_u8; 32]);
+        let (mut chunk, geometry) = single_chunk(vec![7_u8; 32]);
         chunk.bytes = vec![7_u8; 31].into();
-        assert!(validate_unpacked_chunk(&chunk, 32).is_err());
+        assert!(validate_unpacked_chunk(&chunk, &geometry).is_err());
     }
 
     #[test]
     fn validate_unpacked_chunk_rejects_a_body_that_does_not_hash_to_the_leaf() {
-        let mut chunk = single_chunk(vec![7_u8; 32]);
+        let (mut chunk, geometry) = single_chunk(vec![7_u8; 32]);
         chunk.bytes = vec![8_u8; 32].into();
-        assert!(validate_unpacked_chunk(&chunk, 32).is_err());
+        assert!(validate_unpacked_chunk(&chunk, &geometry).is_err());
     }
 }
 

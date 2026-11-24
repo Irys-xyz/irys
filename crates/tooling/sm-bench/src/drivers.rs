@@ -5,8 +5,9 @@
 //! `write_data_chunk_queued`. Migration deposits with `deposit_data_chunks`.
 //! Serve uses `read_chunks`.
 //!
-//! The write path does not check chunk merkle proofs. Payloads are synthetic:
-//! a 64-byte data path and a repeated `0x5A` body. `index_transaction_data`
+//! The write path does not check chunk proofs. Payloads are synthetic: a
+//! 64-byte data path (the shape of a two-hash v2 chunk proof) and a repeated
+//! `0x5A` body. `index_transaction_data`
 //! also inserts a body-migration row; the driver that indexed the tx settles
 //! that row after every chunk of the tx is durable.
 //!
@@ -24,6 +25,7 @@
 //! next commit while those chunks are paced. Production indexes on the chunk
 //! migration service and writes bodies on another task.
 
+use irys_types::{DataCommitment, DataTreeRoot};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -333,7 +335,7 @@ struct Settle {
     io: Arc<BenchIo>,
     kind: Kind,
     key: PartitionChunkOffset,
-    root: H256,
+    data_commitment: DataCommitment,
 }
 
 impl Drop for Settle {
@@ -343,9 +345,9 @@ impl Drop for Settle {
             return;
         }
         let started = std::time::Instant::now();
-        let settled = self
-            .module
-            .settle_pending_body_migration(self.key, self.root, BLOCK_HEIGHT);
+        let settled =
+            self.module
+                .settle_pending_body_migration(self.key, self.data_commitment, BLOCK_HEIGHT);
         record_phase(&self.io, self.kind, PhaseName::Settle, started.elapsed());
         match settled {
             Ok(true) => {}
@@ -694,11 +696,21 @@ struct BuiltTx {
     range: LedgerChunkRange,
 }
 
+/// The key the module writes for a bench tx: its root and size under the
+/// module geometry.
+fn bench_commitment(io: &BenchIo, root: H256, data_size: u64) -> DataCommitment {
+    irys_types::data_tree::data_commitment(
+        &io.module.config.data_tree_geometry(),
+        DataTreeRoot(root),
+        data_size,
+    )
+}
+
 fn build_tx(tag: &[u8], start: u32, chunks: u32, chunk_size: u64) -> BuiltTx {
     let root = keyed(tag, u64::from(start));
     let data_size = u64::from(chunks).saturating_mul(chunk_size);
     let mut header = DataTransactionHeader::default();
-    header.data_root = root;
+    header.data_tree_root = DataTreeRoot(root);
     header.data_size = data_size;
     header.prefix_hash = H256::zero();
     let path_hash = keyed(b"tx-path", u64::from(start));
@@ -807,10 +819,14 @@ async fn undo_prefetch(io: &BenchIo, task: Prefetch) {
     };
     let module = Arc::clone(&io.module);
     let key = PartitionChunkOffset::from(prepared.start);
-    let root = prepared.root;
+    let data_commitment = bench_commitment(
+        io,
+        prepared.root,
+        u64::from(prepared.chunks).saturating_mul(io.chunk_size),
+    );
     let started = std::time::Instant::now();
     let settled = tokio::task::spawn_blocking(move || {
-        module.settle_pending_body_migration(key, root, BLOCK_HEIGHT)
+        module.settle_pending_body_migration(key, data_commitment, BLOCK_HEIGHT)
     })
     .await;
     record_phase(io, Kind::Ingest, PhaseName::Settle, started.elapsed());
@@ -847,12 +863,15 @@ impl Drop for PermitLease {
 }
 
 fn unpacked(root: H256, data_size: u64, tx_offset: u32, chunk_size: u64) -> UnpackedChunk {
-    let mut data_path = Vec::with_capacity(68);
+    // The shape of a v2 chunk proof with one sibling: two 32-byte hashes.
+    // The sibling differs per chunk; the root stands in for the size witness.
+    let mut keyed = root.0.to_vec();
+    keyed.extend_from_slice(&tx_offset.to_be_bytes());
+    let mut data_path = Vec::with_capacity(64);
+    data_path.extend_from_slice(&hash_sha256(&keyed));
     data_path.extend_from_slice(&root.0);
-    data_path.extend_from_slice(&root.0);
-    data_path.extend_from_slice(&tx_offset.to_le_bytes());
     UnpackedChunk {
-        data_root: root,
+        data_tree_root: DataTreeRoot(root),
         data_size,
         data_path: Base64(data_path),
         bytes: Base64(vec![0x5A; usize::try_from(chunk_size).unwrap_or(0)]),
@@ -1251,7 +1270,18 @@ async fn write_tx(
                 .map_err(|error| eyre!("deposit task panicked: {error}"))?
                 .map_err(|error| eyre!("deposit failed: {error}"))?;
             record_phase(io, kind, PhaseName::Enqueue, enqueued_at.elapsed());
-            if !spawn_migration_waits(io, kind, &failed, &left, start, root, n, was_data, items)? {
+            let data_commitment = bench_commitment(io, root, data_size);
+            if !spawn_migration_waits(
+                io,
+                kind,
+                &failed,
+                &left,
+                start,
+                data_commitment,
+                n,
+                was_data,
+                items,
+            )? {
                 failed.store(true, Ordering::Release);
                 break;
             }
@@ -1280,7 +1310,7 @@ async fn write_tx(
                 Arc::clone(&failed),
                 Arc::clone(&left),
                 start,
-                root,
+                bench_commitment(io, root, data_size),
                 part,
                 chunk,
             );
@@ -1296,7 +1326,7 @@ fn spawn_migration_waits(
     failed: &Arc<AtomicBool>,
     left: &Arc<AtomicU32>,
     key: u32,
-    root: H256,
+    data_commitment: DataCommitment,
     expected: u32,
     was_data: Vec<bool>,
     items: Vec<BatchEnqueueItem>,
@@ -1348,7 +1378,7 @@ fn spawn_migration_waits(
                 io: Arc::clone(&io),
                 kind: Kind::Migration,
                 key: PartitionChunkOffset::from(key),
-                root,
+                data_commitment,
             };
             let started = std::time::Instant::now();
             if let Err(error) = wait_durable(&io.module, offset).await {
@@ -1375,7 +1405,7 @@ fn spawn_ingest_wait(
     failed: Arc<AtomicBool>,
     left: Arc<AtomicU32>,
     key: u32,
-    root: H256,
+    data_commitment: DataCommitment,
     offset: PartitionChunkOffset,
     chunk: UnpackedChunk,
 ) {
@@ -1390,7 +1420,7 @@ fn spawn_ingest_wait(
             io: Arc::clone(&io),
             kind,
             key: PartitionChunkOffset::from(key),
-            root,
+            data_commitment,
         };
         let started = std::time::Instant::now();
         // Occupy returns success when the offset is already Data. Count the

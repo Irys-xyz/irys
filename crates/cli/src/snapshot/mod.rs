@@ -33,7 +33,8 @@ mod round_trip_tests {
     use irys_database::{IrysDatabaseArgs as _, insert_peer_list_item, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        IrysAddress, IrysBlockHeader, IrysPeerId, PeerAddress, PeerListItem, PeerScore,
+        DataCommitment, IrysAddress, IrysBlockHeader, IrysPeerId, PeerAddress, PeerListItem,
+        PeerScore,
     };
     use reth_node_core::version::default_client_version;
     use std::path::{Path, PathBuf};
@@ -100,7 +101,7 @@ mod round_trip_tests {
                     tx,
                     irys_types::DatabaseVersion::CURRENT,
                 )?;
-                tx.put::<CachedDataRoots>(block.block_hash, Default::default())?;
+                tx.put::<CachedDataRoots>(DataCommitment(block.block_hash), Default::default())?;
                 Ok(())
             })
             .expect("cache write")
@@ -236,7 +237,7 @@ mod round_trip_tests {
                 cache
                     .tx()
                     .expect("cache read")
-                    .get::<CachedDataRoots>(block_hash)
+                    .get::<CachedDataRoots>(DataCommitment(block_hash))
                     .expect("read imported cached root")
                     .is_some(),
                 "cached root carried over"

@@ -77,9 +77,6 @@ impl From<ChunkIngressError> for GossipError {
                 CriticalChunkIngressError::InvalidProof => {
                     Self::InvalidData(InvalidDataError::ChunkInvalidProof)
                 }
-                CriticalChunkIngressError::InvalidDataHash => {
-                    Self::InvalidData(InvalidDataError::ChunkInvalidDataHash)
-                }
                 CriticalChunkIngressError::InvalidChunkSize => {
                     Self::InvalidData(InvalidDataError::ChunkInvalidChunkSize)
                 }
@@ -111,7 +108,6 @@ impl From<ChunkIngressError> for GossipError {
                 | AdvisoryChunkIngressError::PreHeaderOversizedDataPath
                 | AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap
                 | AdvisoryChunkIngressError::PreHeaderInvalidOffset(_)
-                | AdvisoryChunkIngressError::UnconfirmedChunkSizeMismatch
                 | AdvisoryChunkIngressError::Other(_)) => {
                     Self::Advisory(AdvisoryGossipError::ChunkIngress(other))
                 }
@@ -246,8 +242,6 @@ pub enum InvalidDataError {
     TransactionDataSizeExceedsMax(irys_types::H256),
     #[error("Invalid chunk proof")]
     ChunkInvalidProof,
-    #[error("Invalid chunk data hash")]
-    ChunkInvalidDataHash,
     #[error("Invalid chunk size")]
     ChunkInvalidChunkSize,
     #[error("Invalid chunk data size")]
