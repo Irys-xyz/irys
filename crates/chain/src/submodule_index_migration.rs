@@ -245,7 +245,7 @@ pub(crate) mod tests {
         Ok(Arc::new(env))
     }
 
-    /// Schema v2 MDBX index with no placement.
+    /// Current MDBX index with no placement. Open stamps the commitment-key schema.
     pub(crate) fn seed_empty_mdbx(config: &Config, submodule: &Path) -> eyre::Result<()> {
         let dir = submodule.join(MDBX_INDEX_DIR);
         std::fs::create_dir_all(&dir)?;
@@ -258,7 +258,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Schema v2 MDBX index with one placement interval.
+    /// Current MDBX index with one placement interval and no ledger.
     pub(crate) fn seed_placed_mdbx(config: &Config, submodule: &Path) -> eyre::Result<()> {
         seed_empty_mdbx(config, submodule)?;
         let env = open_or_create_db(
@@ -274,6 +274,52 @@ pub(crate) mod tests {
                 tx_path_hash: H256::repeat_byte(9),
             },
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Schema row of an MDBX index that keys data by the data root.
+    const DATA_ROOT_KEYED_SCHEMA: &[u8] = b"irys-submodule-index 2\n";
+
+    /// Data-root-keyed MDBX index with no data rows.
+    pub(crate) fn seed_empty_schema2_mdbx(config: &Config, submodule: &Path) -> eyre::Result<()> {
+        write_data_root_keyed_schema(config, submodule, false)
+    }
+
+    /// Data-root-keyed MDBX index with one placement interval.
+    pub(crate) fn seed_schema2_with_data_mdbx(
+        config: &Config,
+        submodule: &Path,
+    ) -> eyre::Result<()> {
+        write_data_root_keyed_schema(config, submodule, true)
+    }
+
+    fn write_data_root_keyed_schema(
+        config: &Config,
+        submodule: &Path,
+        with_interval: bool,
+    ) -> eyre::Result<()> {
+        let dir = submodule.join(MDBX_INDEX_DIR);
+        std::fs::create_dir_all(&dir)?;
+        let env = open_or_create_db(
+            &dir,
+            SubmoduleTables::ALL,
+            submodule_db_args(&config.node_config.database)?,
+        )?;
+        let tx = env.tx_mut()?;
+        tx.put::<Metadata>(
+            irys_database::metadata::MetadataKey::DBSchemaVersion,
+            DATA_ROOT_KEYED_SCHEMA.to_vec(),
+        )?;
+        if with_interval {
+            tx.put::<TxPathIntervalByStart>(
+                PartitionChunkOffset(0),
+                TxPathInterval {
+                    end: PartitionChunkOffset(3),
+                    tx_path_hash: H256::repeat_byte(9),
+                },
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }

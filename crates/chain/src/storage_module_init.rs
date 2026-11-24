@@ -147,7 +147,8 @@ mod tests {
 
     use super::{migrate_submodule_indexes, open_storage_modules};
     use crate::submodule_index_migration::tests::{
-        assert_moved, config, consensus, seed_empty_mdbx, seed_foreign_mdbx, seed_placed_mdbx,
+        assert_moved, config, consensus, seed_empty_mdbx, seed_empty_schema2_mdbx,
+        seed_foreign_mdbx, seed_placed_mdbx, seed_schema2_with_data_mdbx,
     };
 
     const CHUNKS: u32 = 10;
@@ -326,6 +327,58 @@ mod tests {
             assert!(base.join(name).join("db").join("mdbx.dat").is_file());
             assert!(!base.join(name).join("rocks").exists());
         }
+        Ok(())
+    }
+
+    /// A data-root-keyed index with a placement cannot be re-keyed. Node
+    /// start names the module and leaves `db/` in place.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_data_root_keyed_index_with_rows_refuses_to_open() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("sm-schema2-data").build();
+        let base = tmp.path();
+        let config = config(base);
+        let consensus = consensus(&config)?;
+        seed_schema2_with_data_mdbx(&config, &base.join("kept"))?;
+        let err = open_storage_modules(
+            &config,
+            vec![info(4, "kept")],
+            consensus,
+            u64::from(CHUNKS),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("data rows keyed by the data root must reset");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("network must reset")
+                && text.contains("storage module 4")
+                && text.contains("kept"),
+            "{text}"
+        );
+        assert!(base.join("kept").join("db").join("mdbx.dat").is_file());
+        assert!(!base.join("kept").join("rocks").exists());
+        Ok(())
+    }
+
+    /// A data-root-keyed index with no data rows upgrades and moves to RocksDB.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_data_root_keyed_index_upgrades_on_open() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("sm-schema2-empty").build();
+        let base = tmp.path();
+        let config = config(base);
+        let consensus = consensus(&config)?;
+        seed_empty_schema2_mdbx(&config, &base.join("empty"))?;
+        drop(
+            open_storage_modules(
+                &config,
+                vec![info(4, "empty")],
+                consensus,
+                u64::from(CHUNKS),
+                Duration::ZERO,
+            )
+            .await?,
+        );
+        assert_moved(&base.join("empty"));
         Ok(())
     }
 }
