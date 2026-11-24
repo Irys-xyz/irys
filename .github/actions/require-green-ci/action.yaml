@@ -4,8 +4,10 @@ description: >-
   this to gate a release on the release/<major>.x merge-base — the substantive
   upstream code being shipped — having passed CI, as defense-in-depth on top of
   branch protection. Core CI is the required correctness lane (Rust Checks and
-  any other non-excluded workflows). Benchmarks and Coverage do not gate: they
-  may be failed, cancelled, or still running. A commit is "core-green" when:
+  any other workflow not listed in non-core-workflows). Non-core workflows
+  (Benchmarks, Coverage and the scheduled nightly Flaky Test Detection and
+  Heavy Nightly Specs runs by default) do not gate: they may be failed,
+  cancelled, or still running. A commit is "core-green" when:
     - it has at least one successful core check run (or a green combined commit
       status), proving CI actually ran. A green skip-controller check does not
       count: it proves only that CI decided whether to run; AND
@@ -17,6 +19,10 @@ description: >-
   matching GitHub's own required-status-check semantics. Check runs of the
   calling workflow (this run and its earlier runs on the same commit) are
   ignored: they are not CI, and this run's own jobs never settle while it waits.
+  When `branch` is set and that branch has workflow runs on the commit, only
+  those runs' check runs are gated on (see the `branch` input).
+  Every reported check links its job, failures print the `gh run rerun`
+  commands that retry them, and a per-check table is written to the job summary.
   The caller must pass a token with actions:read, checks:read and statuses:read.
 
 inputs:
@@ -33,14 +39,44 @@ inputs:
       still running is an immediate failure. A positive value polls until every
       core check has settled (or the timeout elapses). A commit that concludes
       with a real core failure/cancellation fails immediately regardless of this
-      value — only in-progress core checks are waited on. Benchmarks and Coverage
-      are never waited on.
+      value — only in-progress core checks are waited on. Non-core workflows are
+      never waited on.
     required: false
     default: "0"
   poll-interval-seconds:
     description: "Seconds to sleep between polls while waiting for in-progress CI."
     required: false
     default: "30"
+  branch:
+    description: >-
+      Branch whose CI to gate on (e.g. release/5.x). The same SHA pushed to
+      several branches gets one workflow run per push; when this is set and at
+      least one core workflow run on the commit was for this branch, check runs
+      from workflow runs on other branches are ignored, so a flaky red job on an
+      unrelated branch does not block. If no core workflow run on the commit is
+      for this branch (e.g. it only got CI as part of a master push), every
+      branch's runs are gated on, as when this is empty. Check runs not made by
+      GitHub Actions and legacy commit statuses carry no branch and always count.
+      Empty (the default) gates on every branch's runs.
+    required: false
+    default: ""
+  non-core-workflows:
+    description: >-
+      Whitespace- or comma-separated workflow file names (e.g. coverage.yml)
+      whose check runs never gate: they are not waited on, their failures are
+      ignored, and their successes do not count as proof that CI ran. Matched on
+      the workflow file, not job or display names, so renaming a job cannot turn
+      a telemetry workflow into a blocking one.
+    required: false
+    default: "bench.yml coverage.yml flaky.yml heavy-nightly.yml"
+  report-only:
+    description: >-
+      "true": evaluate and report exactly as normal, but never fail the step.
+      Anything that would block is emitted as a warning prefixed [report-only].
+      Used by release dry runs so they show whether the real release would be
+      blocked.
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -53,16 +89,97 @@ runs:
         SHA: ${{ inputs.commit }}
         WAIT_TIMEOUT: ${{ inputs.wait-timeout-seconds }}
         POLL_INTERVAL: ${{ inputs.poll-interval-seconds }}
+        GATE_BRANCH: ${{ inputs.branch }}
+        NON_CORE_WORKFLOWS: ${{ inputs.non-core-workflows }}
+        REPORT_ONLY: ${{ inputs.report-only }}
       run: |
         set -euo pipefail
-        if [ -z "${SHA}" ]; then
-          echo "::error::require-green-ci: empty commit input"
-          exit 1
-        fi
+
+        # In report-only mode every would-block condition is a warning and the
+        # step exits 0; otherwise it is an error and the step fails.
+        if [ "${REPORT_ONLY}" = "true" ]; then annot=warning; else annot=error; fi
 
         # Link to GitHub's checks view for this commit so the log has a clickable
         # jump to the live CI runs being gated on.
         CHECKS_URL="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/commit/${SHA}/checks"
+
+        # --- Job summary -------------------------------------------------------
+        # Rows describe the most recent poll; the EXIT trap writes them, with the
+        # outcome, to the job summary on every exit path (pass, block, timeout,
+        # API error), so what blocked is visible without opening the log.
+        gate_outcome=""
+        summary_rows=""
+        rerun_ids=""
+        branch_filter=0
+        write_summary() {
+          local rc=$? outcome
+          [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
+          if [ -n "${gate_outcome}" ]; then
+            outcome="${gate_outcome}"
+          elif [ "${rc}" -eq 0 ]; then
+            outcome="✅ passed"
+          else
+            outcome="❌ errored before evaluating CI (see the step log)"
+          fi
+          {
+            echo "### Release CI gate"
+            echo
+            echo "- **Commit:** [\`${SHA:0:12}\`](${CHECKS_URL})"
+            if [ "${REPORT_ONLY}" = "true" ]; then
+              echo "- **Mode:** report-only (never fails the step)"
+            fi
+            if [ -z "${GATE_BRANCH}" ]; then
+              echo "- **Branch filter:** off (all branches' runs gate)"
+            elif [ "${branch_filter}" -eq 1 ]; then
+              echo "- **Branch filter:** only runs on \`${GATE_BRANCH}\` gate"
+            else
+              echo "- **Branch filter:** no core runs on \`${GATE_BRANCH}\` for this commit, so all branches' runs gate"
+            fi
+            echo "- **Outcome:** ${outcome}"
+            if [ -n "${summary_rows}" ]; then
+              echo
+              echo "| Check | Workflow | Branch | Result | Gate | Job |"
+              echo "|---|---|---|---|---|---|"
+              printf '%s' "${summary_rows}"
+            fi
+            if [ -n "${rerun_ids}" ]; then
+              echo
+              echo "Re-run the failed jobs, then dispatch the release again:"
+              echo
+              echo '```sh'
+              for id in ${rerun_ids}; do
+                echo "gh run rerun ${id} --failed -R ${REPO}"
+              done
+              echo '```'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}" || true
+          return 0
+        }
+        trap write_summary EXIT
+
+        # add_row <name> <workflow> <branch> <result> <gate verdict> <url>
+        add_row() {
+          local name="${1//|/\\|}"
+          summary_rows+="| ${name} | ${2:--} | ${3:--} | ${4:--} | ${5} | ${6:+[job](${6})} |"$'\n'
+        }
+
+        # Terminal would-block outcome: fail the step, or in report-only mode warn
+        # and pass.
+        gate_fail() {
+          if [ "${REPORT_ONLY}" = "true" ]; then
+            echo "::warning::[report-only] would block release: $1"
+            gate_outcome="⚠️ would block the release: $1"
+            exit 0
+          fi
+          echo "::error::$1"
+          gate_outcome="❌ blocked: $1"
+          exit 1
+        }
+
+        if [ -z "${SHA}" ]; then
+          gate_fail "require-green-ci: empty commit input"
+        fi
+
         echo "Gating release on CI for ${SHA}"
         echo "  checks: ${CHECKS_URL}"
 
@@ -122,24 +239,28 @@ runs:
         # checks:read / statuses:read. Waiting cannot fix a configuration error, so
         # surface it immediately instead of burning the whole wait window first.
         fail_nonretryable_api() {
-          echo "::error::GitHub API returned a non-retryable error reading CI status for ${SHA} (e.g. HTTP 404 bad SHA, or a token missing checks:read/statuses:read). Cannot gate the release (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
-          exit 1
+          gate_fail "GitHub API returned a non-retryable error reading CI status for ${SHA} (e.g. HTTP 404 bad SHA, or a token missing checks:read/statuses:read). Cannot gate the release (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
         }
 
-        # Benchmarks and Coverage are telemetry, not a release correctness gate.
-        # Match the job names those workflows publish as check runs (unprefixed
-        # today; "Workflow / job" if GitHub starts using that form). A pending or
-        # failed bench/coverage run must not block release and must not count as
-        # the required successful CI result.
-        is_non_core_check() {
-          case "$1" in
-            coverage|"benchmarks gate"|"cargo bench"|"cleanup branch benchmark data")
-              return 0
-              ;;
-            "Benchmarks / "*|"Coverage / "*)
-              return 0
-              ;;
-          esac
+        # Benchmarks and Coverage are telemetry, and the nightly Flaky Test
+        # Detection / Heavy Nightly Specs runs are scheduled master health
+        # signals (flaky detection exists to surface flakes), not a release
+        # correctness gate. A pending or failed run of a non-core workflow must not
+        # block release and must not count as the required successful CI result.
+        # Matched on the
+        # workflow file (path basename) of the check run's workflow run, so job
+        # renames inside those workflows cannot make them blocking. A workflow
+        # run's path can carry an @<ref> suffix (e.g. coverage.yml@refs/heads/x);
+        # it is stripped so the file name still matches.
+        read -ra non_core_workflows <<< "$(tr ',\n' '  ' <<< "${NON_CORE_WORKFLOWS}")"
+        is_non_core_workflow() {
+          local base w
+          [ -n "$1" ] || return 1
+          base="${1%%@*}"
+          base="${base##*/}"
+          for w in "${non_core_workflows[@]}"; do
+            [ "${base}" = "${w##*/}" ] && return 0
+          done
           return 1
         }
 
@@ -156,6 +277,16 @@ runs:
           return 1
         }
 
+        # Remember a failing check's workflow run so the gate can print the exact
+        # `gh run rerun` command for it.
+        note_rerun() {
+          [ -n "$1" ] || return 0
+          case " ${rerun_ids} " in
+            *" $1 "*) ;;
+            *) rerun_ids="${rerun_ids:+${rerun_ids} }$1" ;;
+          esac
+        }
+
         # The calling workflow's own check runs are on SHA when it was dispatched
         # from a ref whose head is SHA (e.g. a release dispatched from master
         # right after the release branch is cut). Its own in-progress jobs would
@@ -167,9 +298,15 @@ runs:
         else
           rc=$?
           if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
-          echo "::error::Could not read the workflow of run ${GITHUB_RUN_ID} from the GitHub API after retries."
-          exit 1
+          gate_fail "Could not read the workflow of run ${GITHUB_RUN_ID} from the GitHub API after retries."
         fi
+
+        # check suite id -> workflow file path / head branch / workflow run id /
+        # run status / run conclusion, the suites with a still-running or a
+        # blocking check run this poll, and
+        # the set of this workflow's own suites. Refreshed on every poll.
+        declare -A suite_path=() suite_branch=() suite_run=() suite_status=() suite_conclusion=() suite_pending=() suite_failed=() own_suite=()
+        prev_branch_filter=""
 
         # SECONDS is bash's monotonic elapsed-seconds counter since shell start;
         # the poll loop below waits until SECONDS exceeds this deadline.
@@ -177,16 +314,27 @@ runs:
 
         while true; do
           api_error=0    # a read failed after its retries (transient API error)
+          summary_rows=""
+          rerun_ids=""
 
-          # Read per poll: a run of this workflow queued after the gate started
-          # also adds check runs to SHA.
-          if own_suites=$(gh_api --paginate \
-            "repos/${REPO}/actions/workflows/${own_workflow_id}/runs?head_sha=${SHA}&per_page=100" \
-            -q '.workflow_runs[].check_suite_id'); then
+          # Workflow runs on SHA, read *before* the check runs: a run seen here as
+          # completed has already created every job, so the check-run snapshot
+          # below contains all of its jobs' final results (read the other way
+          # round, a run could create and finish a job between the two reads and
+          # be treated as complete without it). Maps each suite to its workflow
+          # file, branch, run and status, and identifies this workflow's own
+          # suites (a run of it queued after the gate started also adds check runs
+          # to SHA). Without this map, own/non-core/other-branch check runs cannot
+          # be told apart, so do not evaluate check runs on this poll (api_error
+          # re-polls).
+          wf_tsv=""
+          if wf_tsv=$(gh_api --paginate \
+            "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
+            -q '.workflow_runs[] | [.check_suite_id, .workflow_id, .id, .status, (.conclusion // "-"), .path, (.head_branch // "")] | @tsv'); then
             :
           else
             rc=$?
-            own_suites=""
+            wf_tsv=""
             if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
             api_error=1
           fi
@@ -194,22 +342,68 @@ runs:
           # GitHub Actions jobs surface as "check runs"; external CI / bots surface
           # as legacy "commit statuses". A passing core CI result must satisfy both.
           # filter=latest (the API default) collapses re-runs to the most recent run
-          # per check name, so a red run that was later re-run green is not counted.
-          # Without the own-suite list, this workflow's check runs cannot be told
-          # apart, so do not read check runs on this poll (api_error re-polls).
+          # per check name *within a check suite* (one workflow run), so a red job
+          # that was later re-run green is not counted. It does not collapse across
+          # suites: when the same SHA is pushed to several branches, each push's
+          # workflow run is its own suite (see the branch filter below).
+          # The URL is the first non-empty of the job page (details_url, set for
+          # Actions checks) and the check run page (html_url), so a blocking check
+          # can be opened straight from the gate's log; "-" if neither is set.
           # Only the last field may be empty: `read` with IFS=tab merges adjacent
           # tabs, so an empty field before it would shift the later fields left.
           runs_tsv=""
           if [ "${api_error}" -eq 0 ]; then
             if runs_tsv=$(gh_api --paginate \
               "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
-              -q '.check_runs[] | [.check_suite.id, .name, .status, (.conclusion // "")] | @tsv'); then
+              -q '.check_runs[] | [.check_suite.id, .name, .status, (.app.slug // "-"), ([.details_url, .html_url] | map(select(. != null and . != "")) | .[0] // "-"), (.conclusion // "")] | @tsv'); then
               :
             else
               rc=$?
               runs_tsv=""
               if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
               api_error=1
+            fi
+          fi
+
+          suite_path=() suite_branch=() suite_run=() suite_status=() suite_conclusion=() suite_pending=() suite_failed=() own_suite=()
+          gated_branch_suites=0
+          if [ -n "${wf_tsv}" ]; then
+            while IFS=$'\t' read -r s_id wf_id run_id run_status run_conclusion path head_branch; do
+              [ -z "${s_id}" ] && continue
+              if [ "${wf_id}" = "${own_workflow_id}" ]; then
+                own_suite[${s_id}]=1
+                continue
+              fi
+              path="${path%%@*}"
+              suite_path[${s_id}]="${path}"
+              suite_status[${s_id}]="${run_status}"
+              suite_conclusion[${s_id}]="${run_conclusion}"
+              suite_branch[${s_id}]="${head_branch}"
+              suite_run[${s_id}]="${run_id}"
+              if [ -n "${GATE_BRANCH}" ] && [ "${head_branch}" = "${GATE_BRANCH}" ] \
+                 && ! is_non_core_workflow "${path}"; then
+                gated_branch_suites=$((gated_branch_suites + 1))
+              fi
+            done <<< "${wf_tsv}"
+          fi
+
+          # Branch filter: gate only on the gated branch's own workflow runs when it
+          # has any core ones on SHA. Otherwise (it never got its own run, e.g. the
+          # commit only reached CI via a master push) fall back to every branch, so
+          # the gate never passes on an absence of results.
+          if [ "${api_error}" -eq 0 ]; then
+            if [ -n "${GATE_BRANCH}" ] && [ "${gated_branch_suites}" -gt 0 ]; then
+              branch_filter=1
+            else
+              branch_filter=0
+            fi
+            if [ -n "${GATE_BRANCH}" ] && [ "${branch_filter}" != "${prev_branch_filter}" ]; then
+              if [ "${branch_filter}" -eq 1 ]; then
+                echo "Gating only on workflow runs for branch ${GATE_BRANCH}; check runs from other branches' runs of ${SHA} are ignored."
+              else
+                echo "No core workflow run for branch ${GATE_BRANCH} on ${SHA} (yet); gating on every branch's runs."
+              fi
+              prev_branch_filter="${branch_filter}"
             fi
           fi
 
@@ -221,22 +415,58 @@ runs:
           check_successes=0
           total_runs=0
           if [ -n "${runs_tsv}" ]; then
-            while IFS=$'\t' read -r suite_id name status conclusion; do
+            while IFS=$'\t' read -r suite_id name status app url conclusion; do
               [ -z "${name}" ] && continue
-              if grep -qxF "${suite_id}" <<< "${own_suites}"; then
+              if [ -n "${own_suite[${suite_id}]:-}" ]; then
                 continue
               fi
-              if is_non_core_check "${name}"; then
+              path="${suite_path[${suite_id}]:-}"
+              # An Actions job (app github-actions; the URL alone is not proof, an
+              # external app can link anywhere) whose workflow run is not in this
+              # poll's run list: the run started between the two reads. Its
+              # workflow and branch are unknown until the next poll, so it is
+              # neither passed nor failed yet.
+              if [ -z "${path}" ] && [ "${app}" = "github-actions" ]; then
+                echo "Check '${name}' belongs to a workflow run not yet listed on ${SHA}; re-polling: ${url}"
+                pending=$((pending + 1))
+                pending_names="${pending_names:+${pending_names}, }${name} [unlisted run] ${url}"
+                add_row "${name}" "?" "?" "${status}" "⏳ waiting (run not yet listed)" "${url}"
+                continue
+              fi
+              # Empty path otherwise: not a GitHub Actions check (an external check
+              # app), so it has no workflow or branch and is always core.
+              head_branch="${suite_branch[${suite_id}]:-}"
+              workflow="${path##*/}"
+              [ -n "${path}" ] || workflow="(external)"
+              where="${workflow}${head_branch:+ @ ${head_branch}}"
+              result="${status}"
+              [ "${status}" = "completed" ] && result="${conclusion}"
+
+              if is_non_core_workflow "${path}"; then
                 if [ "${status}" = "completed" ]; then
                   case "${conclusion}" in
                     success|skipped|neutral) ;;
                     *)
-                      echo "Ignoring non-core check '${name}' (conclusion=${conclusion}) on ${SHA}."
+                      echo "Ignoring non-core check '${name}' (${where}, conclusion=${conclusion}) on ${SHA}: ${url}"
                       ;;
                   esac
                 fi
+                add_row "${name}" "${workflow}" "${head_branch}" "${result}" "ignored (non-core)" "${url}"
                 continue
               fi
+              if [ "${branch_filter}" -eq 1 ] && [ -n "${path}" ] && [ "${head_branch}" != "${GATE_BRANCH}" ]; then
+                if [ "${status}" = "completed" ]; then
+                  case "${conclusion}" in
+                    success|skipped|neutral) ;;
+                    *)
+                      echo "Ignoring check '${name}' from another branch (${where}, conclusion=${conclusion}) on ${SHA}: ${url}"
+                      ;;
+                  esac
+                fi
+                add_row "${name}" "${workflow}" "${head_branch}" "${result}" "ignored (other branch)" "${url}"
+                continue
+              fi
+
               # A skip controller still blocks, but is not counted as one of the
               # core results that prove CI ran.
               qualifying=1
@@ -246,9 +476,11 @@ runs:
                 total_runs=$((total_runs + 1))
               fi
               if [ "${status}" != "completed" ]; then
-                echo "Check '${name}' is still running (status=${status}) on ${SHA}."
+                echo "Check '${name}' (${where}) is still running (status=${status}) on ${SHA}: ${url}"
                 pending=$((pending + 1))
-                pending_names="${pending_names:+${pending_names}, }${name}"
+                pending_names="${pending_names:+${pending_names}, }${name} [${where}] ${url}"
+                add_row "${name}" "${workflow}" "${head_branch}" "${result}" "⏳ waiting" "${url}"
+                suite_pending[${suite_id}]=1
                 continue
               fi
               case "${conclusion}" in
@@ -256,29 +488,79 @@ runs:
                   if [ "${qualifying}" -eq 1 ]; then
                     successes=$((successes + 1))
                     check_successes=$((check_successes + 1))
+                    add_row "${name}" "${workflow}" "${head_branch}" "${result}" "✅ pass" "${url}"
+                  else
+                    add_row "${name}" "${workflow}" "${head_branch}" "${result}" "✅ pass (skip controller; not proof CI ran)" "${url}"
                   fi
                   ;;
                 skipped|neutral)
                   # Non-blocking, mirrors GitHub's required-status-check semantics.
+                  add_row "${name}" "${workflow}" "${head_branch}" "${result}" "non-blocking" "${url}"
                   ;;
                 *)
-                  echo "::error::Check '${name}' did not pass (conclusion=${conclusion}) on ${SHA}."
+                  echo "::${annot}::Check '${name}' (${where}) did not pass (conclusion=${conclusion}) on ${SHA}: ${url}"
+                  add_row "${name}" "${workflow}" "${head_branch}" "${result}" "❌ **blocking**" "${url}"
+                  note_rerun "${suite_run[${suite_id}]:-}"
+                  suite_failed[${suite_id}]=1
                   fail=1
                   ;;
               esac
             done <<< "${runs_tsv}"
           fi
 
+          # Gated core workflow runs, judged at the run level as well as by their
+          # check runs:
+          #   - A run that has not completed is pending even when none of its check
+          #     runs is: a queued run may not have created any check runs yet, and
+          #     a running one may not have created its later jobs' check runs.
+          #     Without this, a poll could see only that run's finished jobs (or
+          #     none, plus a green combined commit status) and pass before it
+          #     reports.
+          #   - A completed run whose conclusion is not success/skipped/neutral
+          #     blocks, even with no failing check run: a run that ends in
+          #     startup_failure or is cancelled before creating jobs leaves no
+          #     check run to fail. Skipped when one of its jobs already blocked.
+          for s_id in "${!suite_status[@]}"; do
+            path="${suite_path[${s_id}]}"
+            is_non_core_workflow "${path}" && continue
+            head_branch="${suite_branch[${s_id}]}"
+            if [ "${branch_filter}" -eq 1 ] && [ "${head_branch}" != "${GATE_BRANCH}" ]; then
+              continue
+            fi
+            workflow="${path##*/}"
+            run_url="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${suite_run[${s_id}]}"
+            if [ "${suite_status[${s_id}]}" = "completed" ]; then
+              run_conclusion="${suite_conclusion[${s_id}]}"
+              case "${run_conclusion}" in
+                success|skipped|neutral) continue ;;
+              esac
+              [ -n "${suite_failed[${s_id}]:-}" ] && continue
+              echo "::${annot}::Workflow run ${workflow} @ ${head_branch:-?} concluded ${run_conclusion} on ${SHA}: ${run_url}"
+              add_row "(workflow run)" "${workflow}" "${head_branch}" "${run_conclusion}" "❌ **blocking**" "${run_url}"
+              note_rerun "${suite_run[${s_id}]}"
+              fail=1
+              continue
+            fi
+            [ -n "${suite_pending[${s_id}]:-}" ] && continue
+            echo "Workflow run ${workflow} @ ${head_branch:-?} is still ${suite_status[${s_id}]} with jobs not yet reported on ${SHA}: ${run_url}"
+            pending=$((pending + 1))
+            pending_names="${pending_names:+${pending_names}, }workflow run ${workflow} [${head_branch:-?}] ${run_url}"
+            add_row "(workflow run, jobs not yet reported)" "${workflow}" "${head_branch}" "${suite_status[${s_id}]}" "⏳ waiting" "${run_url}"
+          done
+
           # Combined legacy status: the .state field is aggregated server-side across
           # every context, so one read is authoritative regardless of context count.
-          # One call returns both fields as a TSV (via gh's embedded jq, so no system
-          # jq dependency); splitting it into two `gh api` calls would risk reading an
-          # inconsistent state/total across a status update mid-poll.
+          # One call returns the aggregate (first line) and every non-success
+          # context with its link (later lines) via gh's embedded jq, so no system
+          # jq dependency; splitting it into several `gh api` calls would risk
+          # reading an inconsistent state/total across a status update mid-poll.
           status_state=""
           status_total=0
-          if status_tsv=$(gh_api "repos/${REPO}/commits/${SHA}/status" \
-            -q '[.state, .total_count] | @tsv'); then
-            IFS=$'\t' read -r status_state status_total <<< "${status_tsv}"
+          bad_statuses=""
+          if status_out=$(gh_api "repos/${REPO}/commits/${SHA}/status?per_page=100" \
+            -q '([.state, .total_count] | @tsv), (.statuses[] | select(.state != "success") | [.context, .state, (.target_url // "")] | @tsv)'); then
+            IFS=$'\t' read -r status_state status_total <<< "$(head -n1 <<< "${status_out}")"
+            bad_statuses=$(tail -n +2 <<< "${status_out}")
           else
             rc=$?
             if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
@@ -289,17 +571,32 @@ runs:
             case "${status_state}" in
               success)
                 successes=$((successes + 1))
+                add_row "combined commit status (${status_total} context(s))" "(status)" "" "success" "✅ pass" ""
                 ;;
               pending)
                 echo "Combined commit status for ${SHA} is still pending."
                 pending=$((pending + 1))
-                pending_names="${pending_names:+${pending_names}, }combined commit status"
                 ;;
               *)
-                echo "::error::Combined commit status for ${SHA} is '${status_state}' (expected success)."
+                echo "::${annot}::Combined commit status for ${SHA} is '${status_state}' (expected success)."
                 fail=1
                 ;;
             esac
+            # Name each non-success context, with its link, so a red or pending
+            # combined status says which status is responsible.
+            if [ -n "${bad_statuses}" ]; then
+              while IFS=$'\t' read -r context state target_url; do
+                [ -z "${context}" ] && continue
+                if [ "${state}" = "pending" ]; then
+                  echo "Commit status '${context}' is still pending on ${SHA}${target_url:+: ${target_url}}"
+                  pending_names="${pending_names:+${pending_names}, }status ${context}${target_url:+ ${target_url}}"
+                  add_row "${context}" "(status)" "" "${state}" "⏳ waiting" "${target_url}"
+                else
+                  echo "::${annot}::Commit status '${context}' is '${state}' on ${SHA}${target_url:+: ${target_url}}"
+                  add_row "${context}" "(status)" "" "${state}" "❌ **blocking**" "${target_url}"
+                fi
+              done <<< "${bad_statuses}"
+            fi
           fi
 
           # A real failure is terminal — waiting cannot turn it green, so fail fast
@@ -308,8 +605,13 @@ runs:
           # red is proven red regardless of the other endpoint. Checked before the
           # api_error branch so a known failure is never deferred behind a read blip.
           if [ "${fail}" -ne 0 ]; then
-            echo "::error::Core CI for ${SHA} is not green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
-            exit 1
+            if [ -n "${rerun_ids}" ]; then
+              echo "Re-run the failed jobs, then dispatch the release again:"
+              for id in ${rerun_ids}; do
+                echo "  gh run rerun ${id} --failed -R ${REPO}"
+              done
+            fi
+            gate_fail "Core CI for ${SHA} is not green; refusing to release (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
           fi
 
           # A read failed after exhausting its retries on a transient error (5xx /
@@ -321,8 +623,7 @@ runs:
           # past, so a persistent outage still fails fast and closed.
           if [ "${api_error}" -ne 0 ]; then
             if [ "${SECONDS}" -ge "${deadline}" ]; then
-              echo "::error::Could not read CI status for ${SHA} from the GitHub API after retries (transient error, e.g. 5xx). Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
-              exit 1
+              gate_fail "Could not read CI status for ${SHA} from the GitHub API after retries (transient error, e.g. 5xx). Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
             fi
             echo "GitHub API read failed (likely transient); waiting ${POLL_INTERVAL}s before retry (elapsed ${SECONDS}s / timeout ${WAIT_TIMEOUT}s) — ${CHECKS_URL}"
             sleep "${POLL_INTERVAL}"
@@ -348,15 +649,14 @@ runs:
             if [ "${no_results}" -ne 0 ]; then
               waiting_for="core CI to register on ${SHA}"
             else
-              waiting_for="${pending} in-progress CI check(s) on ${SHA} to finish (${pending_names})"
+              waiting_for="${pending} in-progress CI check(s) on ${SHA} to finish (${pending_names:-combined commit status})"
             fi
             if [ "${SECONDS}" -ge "${deadline}" ]; then
               if [ "${no_results}" -ne 0 ]; then
-                echo "::error::Timed out after ${WAIT_TIMEOUT}s: no core CI check runs or commit statuses ever appeared for ${SHA}. Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
+                gate_fail "Timed out after ${WAIT_TIMEOUT}s: no core CI check runs or commit statuses ever appeared for ${SHA}. Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
               else
-                echo "::error::Timed out after ${WAIT_TIMEOUT}s waiting for ${waiting_for} (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
+                gate_fail "Timed out after ${WAIT_TIMEOUT}s waiting for ${waiting_for} (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
               fi
-              exit 1
             fi
             echo "Waiting ${POLL_INTERVAL}s for ${waiting_for} (elapsed ${SECONDS}s / timeout ${WAIT_TIMEOUT}s) — ${CHECKS_URL}"
             sleep "${POLL_INTERVAL}"
@@ -371,8 +671,7 @@ runs:
         # actually ran (e.g. a #disable-ci gate short-circuit), so there is no
         # passing run to stand behind.
         if [ "${successes}" -eq 0 ]; then
-          echo "::error::No successful core CI result for ${SHA} (all core checks skipped/neutral, no green status). Cannot prove a real CI run passed. (Emergency hotfixes can bypass with force=true.)"
-          exit 1
+          gate_fail "No successful core CI result for ${SHA} (all core checks skipped/neutral, no green status). Cannot prove a real CI run passed (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
         fi
 
         if [ "${status_total}" -gt 0 ]; then
@@ -381,3 +680,4 @@ runs:
           status_summary="no commit statuses"
         fi
         echo "Core CI for ${SHA} is green (${check_successes} of ${total_runs} core check run(s) successful; ${status_summary})."
+        gate_outcome="✅ passed: ${check_successes} of ${total_runs} core check run(s) successful; ${status_summary}"
