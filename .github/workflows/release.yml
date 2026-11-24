@@ -168,8 +168,11 @@ jobs:
           commit: ${{ steps.base.outputs.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           branch: ${{ steps.base.outputs.branch }}
-          # Telemetry workflows (by file name) that never gate the release.
-          non-core-workflows: "bench.yml coverage.yml"
+          # Workflows (by file name) that never gate the release: Benchmarks and
+          # Coverage are telemetry; Flaky Test Detection and Heavy Nightly Specs
+          # are scheduled master runs that land on whatever master's tip is, and
+          # flaky detection is expected to go red when it finds a flake.
+          non-core-workflows: "bench.yml coverage.yml flaky.yml heavy-nightly.yml"
           # Dry runs report what the real release would hit without failing.
           report-only: ${{ inputs.dry_run }}
           # Wait for in-progress *core* CI on the gate target to finish rather

@@ -5,7 +5,8 @@ description: >-
   upstream code being shipped — having passed CI, as defense-in-depth on top of
   branch protection. Core CI is the required correctness lane (Rust Checks and
   any other workflow not listed in non-core-workflows). Non-core workflows
-  (Benchmarks and Coverage by default) do not gate: they may be failed,
+  (Benchmarks, Coverage and the scheduled nightly Flaky Test Detection and
+  Heavy Nightly Specs runs by default) do not gate: they may be failed,
   cancelled, or still running. A commit is "core-green" when:
     - it has at least one successful core check run (or a green combined commit
       status), proving CI actually ran. A green skip-controller check does not
@@ -67,7 +68,7 @@ inputs:
       the workflow file, not job or display names, so renaming a job cannot turn
       a telemetry workflow into a blocking one.
     required: false
-    default: "bench.yml coverage.yml"
+    default: "bench.yml coverage.yml flaky.yml heavy-nightly.yml"
   report-only:
     description: >-
       "true": evaluate and report exactly as normal, but never fail the step.
@@ -241,9 +242,12 @@ runs:
           gate_fail "GitHub API returned a non-retryable error reading CI status for ${SHA} (e.g. HTTP 404 bad SHA, or a token missing checks:read/statuses:read). Cannot gate the release (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
         }
 
-        # Benchmarks and Coverage are telemetry, not a release correctness gate. A
-        # pending or failed run of a non-core workflow must not block release and
-        # must not count as the required successful CI result. Matched on the
+        # Benchmarks and Coverage are telemetry, and the nightly Flaky Test
+        # Detection / Heavy Nightly Specs runs are scheduled master health
+        # signals (flaky detection exists to surface flakes), not a release
+        # correctness gate. A pending or failed run of a non-core workflow must not
+        # block release and must not count as the required successful CI result.
+        # Matched on the
         # workflow file (path basename) of the check run's workflow run, so job
         # renames inside those workflows cannot make them blocking. A workflow
         # run's path can carry an @<ref> suffix (e.g. coverage.yml@refs/heads/x);
