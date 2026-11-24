@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795452280181,
+  "lastUpdate": 1795528072871,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -24126,6 +24126,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b85c399bb9c7a25aac0c7b01daef4f1019863159",
+          "message": "ci(release): make the release CI gate's failures actionable and scope it to the gated branch (#1841)\n\n* ci(release): link the blocking check's job in the CI gate log\n\nThe release CI gate named a failing check but not which workflow run it\ncame from. When a SHA is pushed to several branches, each push's run is\nits own check suite, so a red job in one of them blocks the release even\nthough the same-named check is green elsewhere on the commit page.\n\nPrint the job URL (details_url, falling back to html_url for external\ncheck apps) on the failure, still-running and ignored-non-core lines, and\ncorrect the comment that implied filter=latest collapses across suites.\n\n* ci(release): make CI gate failures actionable; gate on the gated branch\n\nFollow-ups to linking the blocking job in the release CI gate:\n\n- Name each non-success legacy commit status with its target URL instead of\n  only the combined state.\n- On failure, print `gh run rerun <id> --failed` for each failed run.\n- Write a per-check table (workflow, branch, result, gate verdict, job link)\n  and the outcome to the job summary on every exit path.\n- Include job links in the timeout / still-running wait message.\n- Dry runs now run the gate in report-only mode (warnings, never fails, no\n  waiting) instead of skipping it, so a dry run shows whether the real release\n  would be blocked. A dry run before release/<major>.x exists reports on the\n  release commit instead.\n- Match non-core workflows by workflow file (bench.yml, coverage.yml; new\n  non-core-workflows input) rather than job names, so a job rename cannot make\n  telemetry blocking.\n- New `branch` input: when the gated branch (release/<major>.x, or\n  release/<env>/<major>.x with gate_ci_on_trunk=false) has its own core runs on\n  the commit, only those gate; the same SHA's runs on other branches are\n  ignored. Falls back to every branch when it has none. External check apps\n  and commit statuses carry no branch and always gate.\n\nThe workflow-runs listing that maps check suites to workflow/branch/run also\nreplaces the per-poll own-workflow suite lookup, so the poll makes the same\nnumber of API calls.\n\n* fix(ci): wait on unfinished core workflow runs; strip @ref from workflow paths\n\n- A gated core workflow run that has not completed now counts as pending\n  even when none of its check runs is in progress. A queued run may not\n  have created any check runs yet, and a running one may not have created\n  its later jobs' check runs; the gate could otherwise pass on that run's\n  finished jobs alone, or on a green combined commit status with no core\n  check runs at all.\n- Strip an @<ref> suffix from workflow run paths before matching them\n  against non-core-workflows, so coverage.yml@<ref> stays non-core.\n\n* fix(ci): read workflow runs before check runs; never emit an empty URL field\n\n- Read the workflow-run list before the check runs. A run seen as completed\n  has then already created every job, so the check-run snapshot holds all\n  of its jobs' final results. Read the other way round, a run could create\n  and finish a job between the two reads and be treated as complete without\n  that job's result. A check run whose Actions workflow run started between\n  the reads (so is not yet in the list) is held as pending for a re-poll\n  instead of being classified without its workflow and branch.\n- Use the first non-empty of details_url and html_url (or \"-\"). jq's `//`\n  does not fall back on \"\", so an external check with details_url \"\" left\n  an empty TSV field that `read` merged away, shifting the conclusion and\n  blocking the gate on a green check.\n\n* ci(release): exclude nightly flaky / heavy-nightly runs from the CI gate\n\nFlaky Test Detection (flaky.yml) and Heavy Nightly Specs (heavy-nightly.yml)\nrun on a schedule against whatever commit is master's tip. While a release's\ngate target is that tip, a red nightly run blocked the release, and flaky\ndetection is expected to go red when it finds a flake. Treat both as\nnon-core alongside Benchmarks and Coverage.\n\n* fix(ci): block on failed core workflow runs; key unlisted-run wait on app\n\n- Read each workflow run's conclusion. A completed gated core run whose\n  conclusion is not success/skipped/neutral now blocks even with no failing\n  check run: a run that ends in startup_failure, or is cancelled before\n  creating jobs, leaves no check run to fail. With the branch filter on,\n  the gate could otherwise pass on a green combined commit status, or wait\n  out the full timeout and fail with a misleading \"no CI appeared\" error.\n  Not reported again when one of the run's jobs already blocked.\n- Hold a check run in the \"workflow run not yet listed\" wait only when its\n  app is github-actions, not on its details_url pattern: an external check\n  app linking to an Actions job URL would otherwise be held pending until\n  the gate timed out.",
+          "timestamp": "2026-11-24T13:32:42Z",
+          "tree_id": "715e171ed8c8ba520bacfeeb80b5441b7153ee4f",
+          "url": "https://github.com/Irys-xyz/irys/commit/b85c399bb9c7a25aac0c7b01daef4f1019863159"
+        },
+        "date": 1795528071470,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015201,
+            "range": "± 0.000676",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152114,
+            "range": "± 0.011736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.575946,
+            "range": "± 0.041599",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.338389,
+            "range": "± 0.443158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.072435,
+            "range": "± 0.000645",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 731.577483,
+            "range": "± 5.832703",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 942.139968,
+            "range": "± 54.646449",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118584,
+            "range": "± 0.001106",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1191.652029,
+            "range": "± 14.510264",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1875.374526,
+            "range": "± 183.292365",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.097901,
+            "range": "± 0.03494",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 192.019667,
+            "range": "± 4.613573",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 182.179463,
+            "range": "± 23.776747",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0.000001",
             "unit": "ms/iter"
           }
