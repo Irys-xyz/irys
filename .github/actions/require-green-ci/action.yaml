@@ -312,6 +312,28 @@ runs:
           summary_rows=""
           rerun_ids=""
 
+          # Workflow runs on SHA, read *before* the check runs: a run seen here as
+          # completed has already created every job, so the check-run snapshot
+          # below contains all of its jobs' final results (read the other way
+          # round, a run could create and finish a job between the two reads and
+          # be treated as complete without it). Maps each suite to its workflow
+          # file, branch, run and status, and identifies this workflow's own
+          # suites (a run of it queued after the gate started also adds check runs
+          # to SHA). Without this map, own/non-core/other-branch check runs cannot
+          # be told apart, so do not evaluate check runs on this poll (api_error
+          # re-polls).
+          wf_tsv=""
+          if wf_tsv=$(gh_api --paginate \
+            "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
+            -q '.workflow_runs[] | [.check_suite_id, .workflow_id, .id, .status, .path, (.head_branch // "")] | @tsv'); then
+            :
+          else
+            rc=$?
+            wf_tsv=""
+            if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
+            api_error=1
+          fi
+
           # GitHub Actions jobs surface as "check runs"; external CI / bots surface
           # as legacy "commit statuses". A passing core CI result must satisfy both.
           # filter=latest (the API default) collapses re-runs to the most recent run
@@ -319,38 +341,19 @@ runs:
           # that was later re-run green is not counted. It does not collapse across
           # suites: when the same SHA is pushed to several branches, each push's
           # workflow run is its own suite (see the branch filter below).
-          # The URL is the job page for Actions checks (details_url), falling back to
-          # the check run page (html_url, always set) for external check apps, so a
-          # blocking check can be opened straight from the gate's log.
+          # The URL is the first non-empty of the job page (details_url, set for
+          # Actions checks) and the check run page (html_url), so a blocking check
+          # can be opened straight from the gate's log; "-" if neither is set.
           # Only the last field may be empty: `read` with IFS=tab merges adjacent
           # tabs, so an empty field before it would shift the later fields left.
           runs_tsv=""
-          if runs_tsv=$(gh_api --paginate \
-            "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
-            -q '.check_runs[] | [.check_suite.id, .name, .status, (.details_url // .html_url), (.conclusion // "")] | @tsv'); then
-            :
-          else
-            rc=$?
-            runs_tsv=""
-            if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
-            api_error=1
-          fi
-
-          # Workflow runs on SHA, read *after* the check runs so every check run's
-          # suite is already listed. Maps each suite to its workflow file, branch
-          # and run, and identifies this workflow's own suites (a run of it queued
-          # after the gate started also adds check runs to SHA). Without this map,
-          # own/non-core/other-branch check runs cannot be told apart, so do not
-          # evaluate check runs on this poll (api_error re-polls).
-          wf_tsv=""
           if [ "${api_error}" -eq 0 ]; then
-            if wf_tsv=$(gh_api --paginate \
-              "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
-              -q '.workflow_runs[] | [.check_suite_id, .workflow_id, .id, .status, .path, (.head_branch // "")] | @tsv'); then
+            if runs_tsv=$(gh_api --paginate \
+              "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
+              -q '.check_runs[] | [.check_suite.id, .name, .status, ([.details_url, .html_url] | map(select(. != null and . != "")) | .[0] // "-"), (.conclusion // "")] | @tsv'); then
               :
             else
               rc=$?
-              wf_tsv=""
               runs_tsv=""
               if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
               api_error=1
@@ -411,9 +414,19 @@ runs:
               if [ -n "${own_suite[${suite_id}]:-}" ]; then
                 continue
               fi
-              # Empty path: not a GitHub Actions check (an external check app), so
-              # it has no workflow or branch and is always core.
               path="${suite_path[${suite_id}]:-}"
+              # An Actions job whose workflow run is not in this poll's run list:
+              # the run started between the two reads. Its workflow and branch are
+              # unknown until the next poll, so it is neither passed nor failed yet.
+              if [ -z "${path}" ] && [[ "${url}" == */actions/runs/*/job/* ]]; then
+                echo "Check '${name}' belongs to a workflow run not yet listed on ${SHA}; re-polling: ${url}"
+                pending=$((pending + 1))
+                pending_names="${pending_names:+${pending_names}, }${name} [unlisted run] ${url}"
+                add_row "${name}" "?" "?" "${status}" "⏳ waiting (run not yet listed)" "${url}"
+                continue
+              fi
+              # Empty path otherwise: not a GitHub Actions check (an external check
+              # app), so it has no workflow or branch and is always core.
               head_branch="${suite_branch[${suite_id}]:-}"
               workflow="${path##*/}"
               [ -n "${path}" ] || workflow="(external)"
