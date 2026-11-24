@@ -2778,14 +2778,20 @@ mod tests {
                 .saturating_sub(1),
         )?;
         let tx_path_hash = H256::random();
+        // Callers look this placement up by the commitment they pass. The
+        // tree root is a different value, so a check that mixes the two fails.
+        let data_commitment = data_root;
+        let mut root_bytes = data_commitment.0.0;
+        root_bytes[0] ^= 0xff;
+        let data_tree_root = H256(root_bytes);
         let (_, submodule) = sm.get_submodule_for_offset(PartitionChunkOffset::from(0_u32))?;
         submodule.db.update(|tx| {
             tx.add_tx_leaf_binding(
                 tx_path_hash,
                 &TxLeafBinding {
-                    data_root: data_root.0,
+                    data_root: data_tree_root,
                     prefix_hash: H256::zero(),
-                    data_commitment: data_root,
+                    data_commitment,
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -2794,11 +2800,11 @@ mod tests {
                 Some(tx_path_hash),
             )?;
             tx.add_data_root_info(
-                data_root,
+                data_commitment,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset::from(0_i32),
                     data_size,
-                    data_tree_root: DataTreeRoot(data_root.0),
+                    data_tree_root: DataTreeRoot(data_tree_root),
                 },
             )
         })?;

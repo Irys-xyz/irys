@@ -2260,15 +2260,25 @@ mod tests {
 
     #[test]
     fn placement_registration_refuses_a_foreign_live_root() -> eyre::Result<()> {
+        use irys_types::data_tree::Geometry;
         each_engine("placement_owner_guard", |store| {
             let root = H256::zero();
             let foreign = H256::repeat_byte(22);
-            store.update(|tx| index_tx_span(tx, root, 1, 3))?;
+            let owned =
+                irys_types::data_tree::data_commitment(&Geometry::TESTING, DataTreeRoot(root), 32);
+            let other = irys_types::data_tree::data_commitment(
+                &Geometry::TESTING,
+                DataTreeRoot(foreign),
+                32,
+            );
+            assert_ne!(owned.0, root);
+            assert_ne!(owned, other);
+            store.update(|tx| place_sized_span(tx, root, root, owned, 1, 3))?;
             let before = store.view(|tx| {
                 tx.tx_intervals_in_range(PartitionChunkOffset(0), PartitionChunkOffset(5))
             })?;
             let err = store
-                .update(|tx| index_tx_span(tx, foreign, 2, 4))
+                .update(|tx| place_sized_span(tx, foreign, foreign, other, 2, 4))
                 .unwrap_err();
             assert!(
                 err.to_string().contains("overlaps live commitment"),
@@ -2281,15 +2291,15 @@ mod tests {
                 before
             );
             assert!(store.view(|tx| tx.get_full_tx_path(foreign))?.is_none());
-            store.update(|tx| index_tx_span(tx, root, 1, 3))?;
-            // A different path can carry the same root during replay.
+            store.update(|tx| place_sized_span(tx, root, root, owned, 1, 3))?;
+            // A different path can carry the same commitment during replay.
             store.update(|tx| {
                 tx.add_tx_leaf_binding(
                     foreign,
                     &TxLeafBinding {
                         data_root: root,
                         prefix_hash: foreign,
-                        data_commitment: DataCommitment(root),
+                        data_commitment: owned,
                     },
                 )?;
                 tx.add_tx_path_hash_to_offset_range(
@@ -2305,13 +2315,20 @@ mod tests {
                 })?,
                 root
             );
+            assert_eq!(
+                store.view(|tx| {
+                    let row = tx.tx_interval_at(PartitionChunkOffset(2))?.unwrap();
+                    tx.interval_data_commitment(&row)
+                })?,
+                owned
+            );
             store.update(|tx| {
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset(1),
                     PartitionChunkOffset(3),
                     None,
                 )?;
-                index_tx_span(tx, foreign, 1, 3)
+                place_sized_span(tx, foreign, foreign, other, 1, 3)
             })?;
             assert_eq!(
                 store.view(|tx| {

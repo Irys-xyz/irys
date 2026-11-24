@@ -12276,20 +12276,21 @@ mod tests {
         storage.force_sync_pending_chunks()?;
         drop(storage);
         let storage = reopen_presence(&config)?;
+        let commitment = presence_commitment(&storage, root, 96);
+        assert_ne!(commitment.0, root);
         assert_eq!(
             storage.interval_data_root_at(PartitionChunkOffset(1))?,
             None
         );
         assert_eq!(
-            storage
-                .partition_offsets_for_commitment_chunk(DataCommitment(root), TxChunkOffset(1))?,
+            storage.partition_offsets_for_commitment_chunk(commitment, TxChunkOffset(1))?,
             Some(vec![PartitionChunkOffset(1)])
         );
         let candidates = BTreeSet::from([TxChunkOffset(1)]);
-        let status = storage.chunk_placement_status(DataCommitment(root), &candidates)?;
+        let status = storage.chunk_placement_status(commitment, &candidates)?;
         assert_eq!(status.placed, candidates);
         assert_eq!(status.unpersisted, candidates);
-        assert!(!storage.holds_full_persisted_data_root(DataCommitment(root), 96)?);
+        assert!(!storage.holds_full_persisted_data_root(commitment, 96)?);
         Ok(())
     }
 
@@ -12317,23 +12318,26 @@ mod tests {
             ));
         }
         storage.force_sync_pending_chunks()?;
+        let root_commitment = presence_commitment(&storage, root, 96);
+        let foreign_commitment = presence_commitment(&storage, foreign, 32);
+        assert_ne!(root_commitment.0, root);
+        assert_ne!(root_commitment, foreign_commitment);
         assert!(storage.is_data_chunk_persisted_at(PartitionChunkOffset(1)));
         assert_eq!(
-            storage
-                .partition_offsets_for_commitment_chunk(DataCommitment(root), TxChunkOffset(1))?,
+            storage.partition_offsets_for_commitment_chunk(root_commitment, TxChunkOffset(1))?,
             Some(vec![])
         );
         let candidates = BTreeSet::from([TxChunkOffset(1)]);
-        let status = storage.chunk_placement_status(DataCommitment(root), &candidates)?;
+        let status = storage.chunk_placement_status(root_commitment, &candidates)?;
         assert!(status.placed.is_empty());
         assert!(status.unpersisted.is_empty());
         assert!(
             storage
-                .placed_tx_offsets_for_data_root(DataCommitment(root), &candidates)?
+                .placed_tx_offsets_for_data_root(root_commitment, &candidates)?
                 .is_empty()
         );
-        assert!(!storage.holds_full_persisted_data_root(DataCommitment(root), 96)?);
-        assert!(storage.holds_full_persisted_data_root(DataCommitment(foreign), 32)?);
+        assert!(!storage.holds_full_persisted_data_root(root_commitment, 96)?);
+        assert!(storage.holds_full_persisted_data_root(foreign_commitment, 32)?);
         // Even persisted bytes in an unowned hole cannot authorize reclamation.
         submodule.db.update(|tx| {
             tx.add_tx_path_hash_to_offset_range(
@@ -12342,10 +12346,10 @@ mod tests {
                 None,
             )
         })?;
-        let status = storage.chunk_placement_status(DataCommitment(root), &candidates)?;
+        let status = storage.chunk_placement_status(root_commitment, &candidates)?;
         assert_eq!(status.placed, candidates);
         assert_eq!(status.unpersisted, candidates);
-        assert!(!storage.holds_full_persisted_data_root(DataCommitment(root), 96)?);
+        assert!(!storage.holds_full_persisted_data_root(root_commitment, 96)?);
         Ok(())
     }
 
@@ -12388,8 +12392,10 @@ mod tests {
             ));
         }
         storage.force_sync_pending_chunks()?;
+        let commitment = presence_commitment(&storage, root, 256);
+        assert_ne!(commitment.0, root);
         let candidates = (0..10).map(TxChunkOffset).collect();
-        let status = storage.chunk_placement_status(DataCommitment(root), &candidates)?;
+        let status = storage.chunk_placement_status(commitment, &candidates)?;
         assert_eq!(
             status.placed,
             [0, 1, 4, 5, 6, 7].into_iter().map(TxChunkOffset).collect()
@@ -12399,12 +12405,12 @@ mod tests {
             [5, 6].into_iter().map(TxChunkOffset).collect()
         );
         assert_eq!(
-            storage.placed_tx_offsets_for_data_root(DataCommitment(root), &candidates)?,
+            storage.placed_tx_offsets_for_data_root(commitment, &candidates)?,
             status.placed
         );
         for candidate in candidates {
-            let single = storage
-                .chunk_placement_status(DataCommitment(root), &BTreeSet::from([candidate]))?;
+            let single =
+                storage.chunk_placement_status(commitment, &BTreeSet::from([candidate]))?;
             assert_eq!(
                 single.placed.contains(&candidate),
                 status.placed.contains(&candidate)
@@ -12414,7 +12420,7 @@ mod tests {
                 status.unpersisted.contains(&candidate)
             );
             let forward = storage
-                .partition_offsets_for_commitment_chunk(DataCommitment(root), candidate)?
+                .partition_offsets_for_commitment_chunk(commitment, candidate)?
                 .unwrap();
             assert_eq!(
                 forward,
@@ -12435,9 +12441,7 @@ mod tests {
         end: u32,
         data_size: u64,
     ) -> eyre::Result<()> {
-        // The fixture's commitment is the root itself. Ownership compares the
-        // data tree root; the index keys the placement by this commitment.
-        let data_commitment = DataCommitment(root);
+        let data_commitment = presence_commitment(storage, root, data_size);
         let span = ii(PartitionChunkOffset(start), PartitionChunkOffset(end));
         for (range, submodule) in storage.submodules.overlapping(span) {
             submodule.db.update(|tx| {
@@ -12465,6 +12469,14 @@ mod tests {
             })?;
         }
         Ok(())
+    }
+
+    fn presence_commitment(storage: &StorageModule, root: H256, data_size: u64) -> DataCommitment {
+        irys_types::data_tree::data_commitment(
+            &storage.config.data_tree_geometry(),
+            DataTreeRoot(root),
+            data_size,
+        )
     }
 
     fn presence_info() -> StorageModuleInfo {
