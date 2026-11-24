@@ -53,7 +53,8 @@ missing blocks. Recover by hand, for the submodule the error names:
 submodule-index-convert mdbx-to-rocks --allow-unresolved \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <active slot width> --chunk-size <bytes> \
+  --chunks-per-partition <active slot width> \
+  --config <node>/config.toml \
   <submodule>/db <submodule>/rocks
 ```
 
@@ -74,12 +75,14 @@ The converter places each row at `slot * partition_chunks + offset`. The
 start uses the active slot width from the epoch snapshot, which a
 partition resize makes smaller than the genesis `num_chunks_in_partition`.
 
-A schema v1 `db/` (release 4.0.8) converts directly. The converter reads
-it and does not change it. A schema row that still starts with
-`irys-submodule-index migrate-v1 ` is a v1 to v2 in-place migration that
-an earlier release did not finish. The start finishes that migration in
-`db/` (the same step that release runs on open), then converts. Copy `db/`
-before the upgrade if you want to keep it as it is.
+A schema v1 `db/` (release 4.0.8) with no data rows converts. The converter
+reads it and does not change it. A schema v1 `db/` with data rows is
+refused: those rows are keyed by the data root, and the network must reset.
+A schema row `irys-submodule-index 2` (data keyed by the data root), or a
+row that still starts with `irys-submodule-index migrate-v1 `, goes through
+the same open the node uses. An empty index is upgraded to commitment keys,
+then converted. An index with data rows is refused: the network must reset.
+Copy `db/` before that open if you want to keep it as it is.
 
 Every storage module, and every submodule inside it, converts on its own
 thread, so the disks work in parallel. Memory pinned to warm the MDBX
@@ -355,8 +358,10 @@ node's working directory or use an absolute path. Mainnet chunk size is
 stored bytes to be identical. A mismatch aborts and names the partition
 offset.
 
-The converter never modifies its source. It reads a schema v1 or v2
-`db/` and writes RocksDB v1 to the target. The completion marker is
+The converter never modifies its source. It reads a commitment-keyed
+schema v3 `db/`, or a schema v1 `db/` with no data rows, and writes
+RocksDB v1 to the target. A source with data rows keyed by the data
+root is refused: the network must reset. The completion marker is
 written last. `rocks/SCHEMA` is the RocksDB marker. The MDBX marker is
 the schema row. A crash leaves no marker and leaves `CONVERTING`. The
 node refuses that directory. Run the same command again with
