@@ -2913,15 +2913,16 @@ mod ingress_proof_peer_tests {
 #[cfg(test)]
 mod write_outcome_tests {
     use super::{DataSyncWriteOutcome, attempt_data_sync_write};
-    use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
     use irys_domain::{StorageModule, StorageModuleInfo, WriteDataChunkError};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::DataTreeRoot;
     use irys_types::{
-        Config, DataLedger, H256, IrysAddress, PartitionChunkOffset, RelativeChunkOffset,
-        StorageSyncConfig, TxChunkOffset, UnpackedChunk, partition::PartitionAssignment,
+        Config, DataLedger, DataTransactionLedger, H256, IrysAddress, LedgerChunkOffset,
+        LedgerChunkRange, PartitionChunkOffset, StorageSyncConfig, TxChunkOffset, UnpackedChunk,
+        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
         partition_chunk_offset_ie,
     };
+    use nodit::interval::ii;
     use std::sync::Arc;
 
     /// Unindexed data_root must classify as MissingDataRootIndex (not Other/requeue thrash).
@@ -3001,36 +3002,20 @@ mod write_outcome_tests {
         let sm = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
         sm.pack_with_zeros();
 
-        let data_root = H256::random();
         let offset = PartitionChunkOffset::from(0_u32);
-        let (_, submodule) = sm
-            .get_submodule_for_offset(offset)
-            .expect("submodule for offset");
-        submodule
-            .db
-            .update(|tx| {
-                tx.add_data_root_info(
-                    irys_types::data_tree::data_commitment(
-                        &config.data_tree_geometry(),
-                        DataTreeRoot(data_root),
-                        chunk_size,
-                    ),
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset::from(0_i32),
-                        data_size: chunk_size,
-                        data_tree_root: DataTreeRoot(data_root),
-                    },
-                )
-            })
-            .expect("index data root");
-
-        let chunk = UnpackedChunk {
-            data_tree_root: DataTreeRoot(data_root),
-            data_size: chunk_size,
-            data_path: vec![1, 2, 3, 4].into(),
-            bytes: vec![0xcd; chunk_size as usize].into(),
-            tx_offset: TxChunkOffset::from(0_u32),
-        };
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .create_transaction(vec![0xcd; chunk_size as usize], H256::zero())
+            .expect("tx");
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )
+        .expect("index transaction");
+        let chunk = tx.data_chunks().expect("chunk").remove(0);
 
         assert_eq!(
             attempt_data_sync_write(&sm, &chunk, offset).await,
@@ -3165,15 +3150,14 @@ mod peer_chunk_validation_tests {
     use crate::services::ServiceSenders;
     use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
-    use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::DataTreeRoot;
     use irys_types::{
         Base64, ChunkFormat, Config, DataLedger, H256, IrysAddress, IrysBlockHeader,
-        LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, RelativeChunkOffset, Traced,
-        TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
-        partition::PartitionAssignment, partition_chunk_offset_ie,
+        LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, Traced, TxChunkOffset,
+        UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use std::{
@@ -3303,20 +3287,15 @@ mod peer_chunk_validation_tests {
             .expect("tx");
         let good = tx.data_chunks().expect("chunk").remove(0);
         let offset = PartitionChunkOffset::from(0_u32);
-        let (_, submodule) = sm.get_submodule_for_offset(offset).expect("submodule");
-        submodule
-            .db
-            .update(|db_tx| {
-                db_tx.add_data_root_info(
-                    good.data_commitment(&config.data_tree_geometry()),
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset::from(0_i32),
-                        data_size: good.data_size,
-                        data_tree_root: DataTreeRoot::default(),
-                    },
-                )
-            })
-            .expect("index data root");
+        let (_root, proofs) =
+            irys_types::DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )
+        .expect("index transaction");
 
         let db = DatabaseProvider::for_testing(
             &(tmp.path().join("db")),
@@ -3721,8 +3700,8 @@ mod peer_chunk_validation_tests {
         chunk: UnpackedChunk,
     }
 
-    /// One storage module on `ledger` with a one-chunk tx at offset 0. With
-    /// `index` false the offset has a data-root row but no placement.
+    /// One storage module on `ledger` with a one-chunk tx at offset 0.
+    /// With `index` false the offset has no placement.
     /// The second value is the temp dir; keep it alive for the test.
     fn route_harness(ledger: DataLedger, index: bool) -> (RouteHarness, impl Sized) {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3763,23 +3742,6 @@ mod peer_chunk_validation_tests {
                 0,
             )
             .expect("index tx");
-        } else {
-            let (_, submodule) = sm
-                .get_submodule_for_offset(PartitionChunkOffset::from(0_u32))
-                .expect("submodule");
-            submodule
-                .db
-                .update(|db_tx| {
-                    db_tx.add_data_root_info(
-                        chunk.data_commitment(&config.data_tree_geometry()),
-                        &DataRootInfo {
-                            start_offset: RelativeChunkOffset::from(0_i32),
-                            data_size: chunk.data_size,
-                            data_tree_root: DataTreeRoot::default(),
-                        },
-                    )
-                })
-                .expect("index data root");
         }
 
         let env = DatabaseProvider::for_testing(

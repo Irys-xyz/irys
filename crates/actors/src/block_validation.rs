@@ -1763,6 +1763,37 @@ fn publish_ingress_proof_count_is_valid(
     Ok(())
 }
 
+fn ingress_proof_chain_ids_are_valid(
+    publish_ledger: &DataTransactionLedger,
+    chain_id: u64,
+) -> Result<(), PreValidationError> {
+    if publish_ledger.proofs.is_none() {
+        return Ok(());
+    }
+
+    for tx_id in &publish_ledger.tx_ids.0 {
+        let tx_proofs = get_ingress_proofs(publish_ledger, tx_id).map_err(|e| {
+            PreValidationError::InvalidIngressProof {
+                tx_id: *tx_id,
+                reason: e.to_string(),
+            }
+        })?;
+        for ingress_proof in tx_proofs.iter() {
+            if ingress_proof.chain_id != chain_id {
+                return Err(PreValidationError::InvalidIngressProof {
+                    tx_id: *tx_id,
+                    reason: format!(
+                        "Ingress proof chain ID mismatch: expected {chain_id}, got {}",
+                        ingress_proof.chain_id
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
@@ -1813,6 +1844,8 @@ pub async fn prevalidate_block(
             &parent_epoch_snapshot,
         ),
     )?;
+    // Reject a proof signed for another chain before PoA and VDF work.
+    ingress_proof_chain_ids_are_valid(publish_ledger, config.consensus.chain_id)?;
 
     debug!(
         block.hash = ?block.block_hash,
@@ -2013,11 +2046,15 @@ pub async fn prevalidate_block(
     })?
     .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
+    // The oracle price bound and the EMA rules change at Delta, resolved at the
+    // block's own timestamp.
+    let ema_rules = config.consensus.ema_rules_at(block.timestamp_secs());
+
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
         block.oracle_irys_price,
         previous_block.oracle_irys_price,
-        config.consensus.token_price_safe_range,
+        &ema_rules,
     );
     if !oracle_price_valid {
         return Err(PreValidationError::OraclePriceInvalid);
@@ -2026,12 +2063,7 @@ pub async fn prevalidate_block(
     // Check that the EMA has been correctly calculated
     let ema_valid = {
         let res = parent_ema_snapshot
-            .calculate_ema_for_new_block(
-                previous_block,
-                block.oracle_irys_price,
-                config.consensus.token_price_safe_range,
-                config.consensus.ema.price_adjustment_interval,
-            )
+            .calculate_ema_for_new_block(previous_block, block.oracle_irys_price, &ema_rules)
             .ema;
         res == block.ema_irys_price
     };
@@ -2077,7 +2109,6 @@ pub async fn prevalidate_block(
         });
     }
 
-    // Validate ingress proof signers are unique and staked
     validate_ingress_proof_signers(block, &parent_epoch_snapshot)?;
     debug!(
         block.hash = ?block.block_hash,
@@ -7691,7 +7722,8 @@ fn extract_data_ledgers(
     Ok((publish_ledger, submit_ledger))
 }
 
-/// Validates that all ingress proof signers are unique and staked for each transaction in the Publish ledger
+/// Validates that all ingress proof signers are unique and staked for each
+/// transaction in the Publish ledger.
 fn validate_ingress_proof_signers(
     block: &IrysBlockHeader,
     parent_epoch_snapshot: &EpochSnapshot,
@@ -8301,6 +8333,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
@@ -8370,6 +8404,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8447,6 +8483,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8528,6 +8566,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8590,6 +8630,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8754,6 +8796,115 @@ mod tests {
         // the generator short-circuits on an empty list, so it cannot panic.
         let none = ledger_with_tx(DataLedger::Publish, tx_id);
         assert!(publish_ingress_proof_count_is_valid(&none, 1, 3).is_ok());
+    }
+
+    fn foreign_chain_ingress_proof_block(
+        fission_configured: bool,
+    ) -> (IrysBlockHeader, EpochSnapshot) {
+        use irys_types::{
+            CommitmentStatus, DataCommitment,
+            hardfork_config::Fission,
+            ingress::{IngressProof, IngressProofV1},
+        };
+
+        let fission = Fission::proposed(UnixTimestamp::from_secs(0));
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.fission = fission_configured.then_some(fission);
+        let expected_chain_id = consensus.chain_id;
+        assert!(!consensus.enable_full_ingress_proof_validation);
+        let mut snapshot = EpochSnapshot {
+            config: Config::new_with_random_peer_id(node_config),
+            ..Default::default()
+        };
+
+        let signer = IrysSigner::random_signer(&snapshot.config.consensus);
+        snapshot.commitment_state.stake_commitments.insert(
+            signer.address(),
+            irys_domain::StakeEntry {
+                id: H256::random(),
+                commitment_status: CommitmentStatus::Active,
+                signer: signer.address(),
+                amount: U256::from(1),
+                reward_address: signer.address(),
+            },
+        );
+
+        let tx_id = H256::repeat_byte(4);
+        let mut proof = IngressProof::V1(IngressProofV1 {
+            signature: Default::default(),
+            data_commitment: DataCommitment(H256::repeat_byte(5)),
+            proof: H256::repeat_byte(6),
+            chain_id: expected_chain_id + 1,
+            anchor: H256::repeat_byte(7),
+        });
+        signer.sign_ingress_proof(&mut proof).unwrap();
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.data_ledgers[DataLedger::Publish].tx_ids = H256List(vec![tx_id]);
+        block.data_ledgers[DataLedger::Publish].proofs =
+            Some(irys_types::IngressProofsList(vec![proof]));
+        block.data_ledgers[DataLedger::Publish].required_proof_count = Some(1);
+        (block, snapshot)
+    }
+
+    #[rstest::rstest]
+    #[case::without_fission(false)]
+    #[case::with_fission(true)]
+    fn ingress_proof_chain_id_is_always_checked(#[case] fission_configured: bool) {
+        let (block, snapshot) = foreign_chain_ingress_proof_block(fission_configured);
+        let publish_ledger = &block.data_ledgers[DataLedger::Publish];
+
+        let error =
+            ingress_proof_chain_ids_are_valid(publish_ledger, snapshot.config.consensus.chain_id)
+                .expect_err("foreign-chain ingress proofs must always be rejected");
+
+        assert!(matches!(
+            error,
+            PreValidationError::InvalidIngressProof { .. }
+        ));
+        assert!(!error.is_node_fault());
+    }
+
+    #[rstest::rstest]
+    #[case::without_fission(false)]
+    #[case::with_fission(true)]
+    #[tokio::test]
+    async fn prevalidation_checks_ingress_proof_chain_before_poa(#[case] fission_configured: bool) {
+        let (mut block, snapshot) = foreign_chain_ingress_proof_block(fission_configured);
+        block.poa.chunk = None;
+        let transactions = BlockTransactions {
+            data_txs: std::collections::HashMap::from([(
+                DataLedger::Publish,
+                vec![DataTransactionHeader::default()],
+            )]),
+            ..Default::default()
+        };
+        let sealed_block = SealedBlock::new_unchecked(Arc::new(block), transactions);
+        let previous_block = IrysBlockHeader::new_mock_header();
+        let parent_ema_snapshot = EmaSnapshot::genesis(&previous_block);
+        let config = snapshot.config.clone();
+        let pool = Arc::new(irys_vdf::build_verification_pool(&config.vdf));
+        let reward_curve = Arc::new(crate::block_reward::reward_curve_from_config(
+            &config.consensus,
+        ));
+        let result = prevalidate_block(
+            &sealed_block,
+            &previous_block,
+            Arc::new(snapshot),
+            config,
+            pool,
+            reward_curve,
+            &parent_ema_snapshot,
+        )
+        .await;
+
+        let error = result.expect_err("foreign-chain ingress proofs must always be rejected");
+        assert!(matches!(
+            error,
+            PreValidationError::InvalidIngressProof { .. }
+        ));
+        assert!(!error.is_node_fault());
     }
 
     /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:

@@ -250,8 +250,8 @@ pub fn add_tx_path_hash_to_offset_index<T: DbTxMut + DbTx>(
 
 /// Record one tx-path interval for the inclusive range `[start, end]`.
 ///
-/// Overlapping intervals are split. `None` removes coverage. Data-path hashes
-/// already stored on those offsets stay.
+/// Only the same data root may overlap live coverage. `None` removes coverage.
+/// Data-path hashes already stored on those offsets stay.
 pub fn add_tx_path_hash_to_offset_range<T: DbTxMut + DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
@@ -671,12 +671,10 @@ pub fn delete_reset_marker<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "rocksdb")]
 pub(super) fn read_schema_bytes<T: DbTx>(tx: &T) -> eyre::Result<Option<Vec<u8>>> {
     Ok(tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?)
 }
 
-#[cfg(feature = "rocksdb")]
 pub(super) fn write_schema_bytes<T: DbTxMut>(tx: &T, bytes: &[u8]) -> eyre::Result<()> {
     tx.put::<Metadata>(MetadataKey::DBSchemaVersion, bytes.to_vec())?;
     Ok(())
@@ -872,6 +870,27 @@ fn assign_tx_interval<T: DbTxMut + DbTx>(
         return Ok(());
     }
     let existing = intervals_touching(tx, start, end)?;
+    if let Some(hash) = tx_path_hash {
+        for row in &existing {
+            if row.start > end || row.end < start || row.tx_path_hash == hash {
+                continue;
+            }
+            let incoming_root = get_tx_leaf_binding(tx, hash)?
+                .ok_or_else(|| eyre::eyre!("incoming interval has no data-root binding"))?
+                .data_root;
+            let existing_root = get_tx_leaf_binding(tx, row.tx_path_hash)?
+                .ok_or_else(|| eyre::eyre!("live interval has no data-root binding"))?
+                .data_root;
+            // Different paths may replay the same root, but cannot replace another root.
+            if incoming_root != existing_root {
+                tracing::error!(%start, %end, %existing_root, %incoming_root,
+                    "refusing placement over a different data root");
+                eyre::bail!(
+                    "placement [{start}, {end}] for {incoming_root} overlaps live root {existing_root}"
+                );
+            }
+        }
+    }
     let edit = plan_coverage(&existing, start, end, tx_path_hash);
     for key in &edit.delete {
         tx.delete::<TxPathIntervalByStart>(*key, None)?;
@@ -1478,6 +1497,7 @@ mod tests {
 
         db.update_eyre(|tx| add_tx_path_hash_to_offset_range(tx, o(2), o(4), Some(tx_hash_1)))?;
         db.update_eyre(|tx| write_data_path_updates(tx, vec![(o(3), data_hash_3, vec![3, 3, 3])]))?;
+        db.update_eyre(|tx| add_tx_path_hash_to_offset_range(tx, o(2), o(4), None))?;
         db.update_eyre(|tx| add_tx_path_hash_to_offset_range(tx, o(2), o(4), Some(tx_hash_2)))?;
         db.update_eyre(|tx| add_tx_path_hash_to_offset_range(tx, o(6), o(7), Some(tx_hash_3)))?;
         db.update_eyre(|tx| {

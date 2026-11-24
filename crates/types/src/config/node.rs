@@ -54,16 +54,6 @@ impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
     }
 }
 
-/// Per-chunk submodule index engine. The default stays MDBX.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-// MDBX-SUBMODULE-INDEX: make RocksDB the only submodule index engine, then remove this enum and the submodule_index key. The consensus database stays MDBX. DatabaseConfig denies unknown fields, so delete the key only after configs no longer contain it.
-pub enum SubmoduleIndexEngine {
-    #[default]
-    Mdbx,
-    Rocksdb,
-}
-
 /// Block cache shared by every RocksDB submodule index in the process.
 ///
 /// Partitioned filters stay in this cache. A 64 MiB cache has 1 MiB shards,
@@ -120,33 +110,27 @@ pub struct DatabaseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_max_size: Option<usize>,
 
-    /// Engine for each storage submodule's per-chunk index.
-    /// `mdbx` opens `db/`. `rocksdb` opens a sibling `rocks/` directory.
-    #[serde(default)]
-    // MDBX-SUBMODULE-INDEX: remove this field once every config is on RocksDB and the key has been retired. An omitted key selects MDBX.
-    pub submodule_index: SubmoduleIndexEngine,
-
-    /// Block cache shared by every RocksDB submodule index. Ignored for MDBX.
+    /// Block cache shared by every RocksDB submodule index.
     /// See [`DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES`].
     #[serde(default = "default_rocksdb_block_cache_bytes")]
     pub rocksdb_block_cache_bytes: u64,
 
     /// Memtable budget shared by every RocksDB submodule index and charged to
-    /// the block cache. Ignored for MDBX. Writers are not stalled. RocksDB
+    /// the block cache. Writers are not stalled. RocksDB
     /// schedules flushes once mutable memtables pass 7/8 of this budget.
     #[serde(default = "default_rocksdb_write_buffer_bytes")]
     pub rocksdb_write_buffer_bytes: u64,
 
-    /// Process-wide RocksDB flush threads. Ignored for MDBX.
+    /// Process-wide RocksDB flush threads.
     #[serde(default = "default_rocksdb_flush_threads")]
     pub rocksdb_flush_threads: u32,
 
-    /// Process-wide RocksDB compaction threads. Ignored for MDBX.
+    /// Process-wide RocksDB compaction threads.
     #[serde(default = "default_rocksdb_compaction_threads")]
     pub rocksdb_compaction_threads: u32,
 
     /// Flush and compaction write cap, bytes per second, per submodule
-    /// database. `0` leaves the limiter off. Ignored for MDBX.
+    /// database. `0` leaves the limiter off.
     ///
     /// One limiter per physical disk is the right scope. Each open builds its
     /// own limiter, and the open does not know which disk the directory is
@@ -184,8 +168,6 @@ impl Default for DatabaseConfig {
             sync_mode: default_db_sync_mode(),
             cache_sync_mode: default_cache_db_sync_mode(),
             geometry_max_size: None,
-            // MDBX-SUBMODULE-INDEX: delete this assignment with the field. The default is MDBX until then.
-            submodule_index: SubmoduleIndexEngine::Mdbx,
             rocksdb_block_cache_bytes: default_rocksdb_block_cache_bytes(),
             rocksdb_write_buffer_bytes: default_rocksdb_write_buffer_bytes(),
             rocksdb_flush_threads: default_rocksdb_flush_threads(),
@@ -662,8 +644,7 @@ pub struct StorageSyncConfig {
     /// The write is in the WAL page cache. It becomes durable at the next
     /// synced write on that database, when this backstop syncs the WAL, or
     /// on clean shutdown. `0` makes the backstop thread sync as soon as it
-    /// wakes. MDBX ignores this key. Open leaves group commit off, so each
-    /// MDBX registration is durable before the write returns.
+    /// wakes.
     #[serde(default = "default_index_wal_backstop_ms")]
     pub index_wal_backstop_ms: u64,
     /// Threads that prefetch tx headers when a data solution has no stored tx path.
@@ -2023,8 +2004,6 @@ impl NodeConfig {
                 // Small MDBX geometry so many concurrent test node databases don't
                 // exhaust virtual address space (see TEST_DB_GEOMETRY_MAX_SIZE).
                 geometry_max_size: Some(crate::TEST_DB_GEOMETRY_MAX_SIZE),
-                // MDBX-SUBMODULE-INDEX: point test configs at RocksDB when that is the only engine. This line selects MDBX.
-                submodule_index: SubmoduleIndexEngine::Mdbx,
                 ..DatabaseConfig::default()
             },
         }
@@ -2471,12 +2450,10 @@ mod run_mode_tests {
     }
 
     #[test]
-    // MDBX-SUBMODULE-INDEX: delete the submodule_index assertion in this test when the field is removed. The other assertions stay.
     fn database_config_defaults() {
         let config = DatabaseConfig::default();
         assert_eq!(config.sync_mode, DbSyncMode::Durable);
         assert_eq!(config.cache_sync_mode, DbSyncMode::SafeNoSync);
-        assert_eq!(config.submodule_index, SubmoduleIndexEngine::Mdbx);
         assert_eq!(
             config.rocksdb_block_cache_bytes,
             DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
@@ -2521,51 +2498,18 @@ mod run_mode_tests {
         assert_eq!(tuned.rocksdb_compaction_threads, 1);
         assert_eq!(tuned.rocksdb_rate_limit_bytes_per_sec, 1024 * 1024);
         assert_eq!(tuned.sync_mode, DbSyncMode::Durable);
-        assert_eq!(tuned.submodule_index, SubmoduleIndexEngine::Mdbx);
     }
 
-    /// A config with no `submodule_index` stays on MDBX. `rocksdb` selects the
-    /// sibling engine. Any other string is rejected.
+    /// RocksDB is the only submodule index engine. The retired
+    /// `submodule_index` key is an unknown field, so a config that still sets
+    /// it fails to parse instead of silently selecting an engine.
     #[test]
-    // MDBX-SUBMODULE-INDEX: rewrite this test when the key is removed. It pins an omitted key to MDBX.
-    fn submodule_index_engine_serde() {
-        let missing_toml: DatabaseConfig = toml::from_str(
-            r#"
-            sync_mode = "Durable"
-            cache_sync_mode = "SafeNoSync"
-            "#,
-        )
-        .expect("toml without submodule_index");
-        assert_eq!(missing_toml.submodule_index, SubmoduleIndexEngine::Mdbx);
-
-        let missing_json: DatabaseConfig =
-            serde_json::from_str("{}").expect("json without submodule_index");
-        assert_eq!(missing_json.submodule_index, SubmoduleIndexEngine::Mdbx);
-
-        let mdbx: DatabaseConfig = toml::from_str("submodule_index = \"mdbx\"").expect("mdbx toml");
-        assert_eq!(mdbx.submodule_index, SubmoduleIndexEngine::Mdbx);
-
-        let rocks_toml: DatabaseConfig =
-            toml::from_str("submodule_index = \"rocksdb\"").expect("rocksdb toml");
-        assert_eq!(rocks_toml.submodule_index, SubmoduleIndexEngine::Rocksdb);
-
-        let rocks_json: DatabaseConfig =
-            serde_json::from_str(r#"{"submodule_index":"rocksdb"}"#).expect("rocksdb json");
-        assert_eq!(rocks_json.submodule_index, SubmoduleIndexEngine::Rocksdb);
-
-        assert!(
-            toml::from_str::<DatabaseConfig>("submodule_index = \"lmdb\"").is_err(),
-            "unknown toml engine must fail"
-        );
-        assert!(
-            serde_json::from_str::<DatabaseConfig>(r#"{"submodule_index":"other"}"#).is_err(),
-            "unknown json engine must fail"
-        );
-
-        assert_eq!(
-            NodeConfig::testing().database.submodule_index,
-            SubmoduleIndexEngine::Mdbx
-        );
+    fn retired_submodule_index_key_is_refused() {
+        for engine in ["mdbx", "rocksdb"] {
+            let err = toml::from_str::<DatabaseConfig>(&format!("submodule_index = \"{engine}\""))
+                .expect_err("retired key must fail");
+            assert!(err.to_string().contains("submodule_index"), "{err}");
+        }
     }
 
     /// Regression test: a legacy TOML config that predates the `run_mode`,

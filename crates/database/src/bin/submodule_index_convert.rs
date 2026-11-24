@@ -40,13 +40,21 @@ required flags:
                                  The tool reads num_chunks_in_partition, the chunk
                                  size and the data tree geometry from its consensus
                                  config. The geometry derives each tx's data
-                                 commitment. Every node of one chain has the same
-                                 consensus config, but a config for another chain
-                                 or preset, or another custom consensus file,
-                                 gives false mismatches. A relative `consensus`
-                                 path in the file resolves from the current
-                                 directory: run the tool from the node's working
-                                 directory or use an absolute path.
+                                 commitment. Chunk size comes from that geometry.
+                                 Every node of one chain has the same consensus
+                                 config, but a config for another chain or preset,
+                                 or another custom consensus file, gives false
+                                 mismatches. A relative `consensus` path in the
+                                 file resolves from the current directory: run the
+                                 tool from the node's working directory or use an
+                                 absolute path.
+
+optional width:
+  --chunks-per-partition <n>     active slot width. Default is the config's
+                                 num_chunks_in_partition. After a partition
+                                 resize, pass the resized width. The tool has
+                                 no epoch snapshot, so it cannot see that width
+                                 itself.
 
 optional:
   --rollback                     verify only: the <db-dir> is a rocks-to-mdbx copy.
@@ -103,8 +111,13 @@ A crash before that marker leaves CONVERTING and no completion marker.
 Rerun the same command with --replace-incomplete. A finished run removes
 CONVERTING. Do not start the node on an incomplete directory.
 
-mdbx-to-rocks writes <submodule>/rocks. Set database.submodule_index to rocksdb
-before the next start. Read `ledger` and `slot` from <submodule>/packing_params.toml.
+mdbx-to-rocks writes <submodule>/rocks. The node does the same conversion when
+it starts, so a manual run is optional. The next start sees the complete
+rocks/ and renames db/ to db.migrated/. Read `ledger` and `slot` from
+<submodule>/packing_params.toml.
+--config supplies the chunk size, the data tree geometry, and the default
+slot width. Pass --chunks-per-partition when a partition resize has changed
+the active width.
 
   submodule-index-convert mdbx-to-rocks \\
     --consensus-db <node>/.irys/irys_consensus_data \\
@@ -120,10 +133,9 @@ before the next start. Read `ledger` and `slot` from <submodule>/packing_params.
 
   submodule-index-convert verify-rocks <submodule>/rocks <other>/rocks
 
-rocks-to-mdbx writes an MDBX schema v2 index for this build. It reads
-RocksDB v1 only. The node migrates a schema v1 db/ (release 4.0.x) to
-MDBX schema v2 in place. Release 4.0.x cannot read the result.
-There is no rollback from 4.1.0 to 4.0.x.
+rocks-to-mdbx writes an MDBX schema v2 index for a 4.1.x node, which
+reads MDBX. This build opens RocksDB only. rocks-to-mdbx reads RocksDB v1
+only. Release 4.0.x cannot read the result. There is no rollback to 4.0.x.
 
 verify, verify-rocks, and mdbx-to-rocks --verify exit 1 when a compared value
 differs or when a placement was skipped because the consensus database does not
@@ -215,7 +227,9 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     options.consensus_db = Some(consensus_db);
     options.ledger_id = ledger_id;
     options.slot_index = slot_index;
-    options.chunks_per_partition = consensus.num_chunks_in_partition;
+    options.chunks_per_partition = tool
+        .chunks_per_partition
+        .unwrap_or(consensus.num_chunks_in_partition);
     options.packing_record = packing_record_from_flags(tool, data_tree_geometry.chunk_size())?;
     Ok(options)
 }
@@ -300,6 +314,7 @@ struct ToolArgs {
     ledger_id: Option<u32>,
     slot_index: Option<u64>,
     config: Option<PathBuf>,
+    chunks_per_partition: Option<u64>,
     packing_address: Option<IrysAddress>,
     packing_iterations: Option<u32>,
     chain_id: Option<u64>,
@@ -339,6 +354,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     let mut ledger_id = None;
     let mut slot_index = None;
     let mut config = None;
+    let mut chunks_per_partition = None;
     let mut packing_address = None;
     let mut packing_iterations = None;
     let mut chain_id = None;
@@ -373,6 +389,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
             | "--ledger"
             | "--slot"
             | "--config"
+            | "--chunks-per-partition"
             | "--packing-address"
             | "--packing-iterations"
             | "--chain-id" => {
@@ -386,6 +403,9 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
                     "--ledger" => ledger_id = Some(parse_u32_flag("--ledger", value)?),
                     "--slot" => slot_index = Some(parse_u64("--slot", value)?),
                     "--config" => config = Some(PathBuf::from(value)),
+                    "--chunks-per-partition" => {
+                        chunks_per_partition = Some(parse_u64("--chunks-per-partition", value)?)
+                    }
                     "--packing-address" => packing_address = Some(parse_address(value)?),
                     "--packing-iterations" => {
                         packing_iterations = Some(parse_u32_flag("--packing-iterations", value)?)
@@ -457,6 +477,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         ledger_id,
         slot_index,
         config,
+        chunks_per_partition,
         packing_address,
         packing_iterations,
         chain_id,

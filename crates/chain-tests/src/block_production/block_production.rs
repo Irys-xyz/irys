@@ -477,15 +477,14 @@ async fn rewards_get_calculated_correctly() -> eyre::Result<()> {
 
         // Empty blocks carry no fees, so the whole balance delta is the block reward.
         let previous_seconds = (block.height - 1) * block_time;
-        let expected_reward = node
-            .node_ctx
-            .reward_curve
-            .reward_between(
-                u128::from(previous_seconds),
-                u128::from(previous_seconds + block_time),
-            )?
-            .amount;
-        assert!(expected_reward > irys_types::U256::zero());
+        let full_reward = node.node_ctx.reward_curve.reward_between(
+            u128::from(previous_seconds),
+            u128::from(previous_seconds + block_time),
+        )?;
+        assert!(full_reward.amount > irys_types::U256::zero());
+        // After Delta a capacity PoA pays the miner only its share of the curve amount.
+        let (expected_reward, _treasury_share) =
+            crate::utils::expected_block_reward_split(&node, &block)?;
         assert_eq!(block.reward_amount, expected_reward);
 
         let balance_before = reth_context

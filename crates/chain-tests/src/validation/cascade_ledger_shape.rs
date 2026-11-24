@@ -129,6 +129,8 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         // Cascade intentionally NOT configured yet — activated mid-chain below.
         c.hardforks.cascade = None;

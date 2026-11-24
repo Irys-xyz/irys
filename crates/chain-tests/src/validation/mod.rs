@@ -1198,6 +1198,7 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
         .hardforks
         .frontier
         .number_of_ingress_proofs_total = 2;
+    let chain_id = genesis_config.consensus_config().chain_id;
 
     let test_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&test_signer]);
@@ -1240,7 +1241,7 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
             perm_fee: Some(U256::from(1000).into()), // Increased to cover 2 ingress proofs + base storage
             ledger_id: DataLedger::Publish.into(),
             metadata_format: 0,
-            chain_id: 1,
+            chain_id,
             signature: Default::default(),
         },
         metadata: irys_types::DataTransactionMetadata::with_promoted_height(1),
@@ -1250,7 +1251,6 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
     let data_commitment = data_tx.data_commitment(&geometry);
 
     // Generate two ingress proofs from the SAME signer (duplicate!)
-    let chain_id = 1_u64;
     let proof1 = generate_ingress_proof(
         &test_signer,
         data_commitment,

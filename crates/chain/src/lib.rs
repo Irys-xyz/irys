@@ -4,6 +4,8 @@ pub mod genesis_utilities;
 mod metrics;
 pub mod peer_utilities;
 mod storage_module_init;
+// MDBX-SUBMODULE-INDEX: delete this module with the startup migration.
+mod submodule_index_migration;
 pub mod utils;
 pub mod vdf_seed_source;
 

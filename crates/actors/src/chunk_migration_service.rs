@@ -1059,17 +1059,21 @@ mod tests {
     use super::*;
     use irys_database::{
         DatabaseProviderTestExt as _, cache_chunk, cache_data_root, insert_block_header,
-        insert_tx_header, submodule::tables::PendingBodyMigration,
+        insert_tx_header,
+        submodule::{
+            SubmoduleStore as _,
+            tables::{DataRootInfo, PendingBodyMigration, TxLeafBinding},
+        },
     };
     use irys_domain::{ChunkType, StorageModuleInfo};
     use irys_storage::{ie, ii};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        BlockIndexItem, ConsensusConfig, DataTransaction, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
-        LedgerChunkOffset, LedgerChunkRange, LedgerIndexItem, NodeConfig, PartitionChunkOffset,
-        SubmoduleIndexEngine, irys::IrysSigner, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        BlockIndexItem, ConsensusConfig, DataCommitment, DataTransaction, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, DataTreeRoot, H256List,
+        IrysAddress, LedgerChunkOffset, LedgerChunkRange, LedgerIndexItem, NodeConfig,
+        PartitionChunkOffset, RelativeChunkOffset, irys::IrysSigner,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::{
         sync::{
@@ -1098,20 +1102,13 @@ mod tests {
     /// carrying a single `num_chunks`-chunk Submit tx. The node DB starts with
     /// no cached bodies; `seed_cache` adds them. `max_pending_write_bytes` is
     /// the module's pending-write ceiling (`None` = derived default).
-    // MDBX-SUBMODULE-INDEX: this helper opens only MDBX. Retarget it at RocksDB, or delete the tests that call fixture.
     fn fixture(num_chunks: u64, max_pending_write_bytes: Option<u64>) -> eyre::Result<Fixture> {
-        fixture_with(
-            num_chunks,
-            max_pending_write_bytes,
-            SubmoduleIndexEngine::Mdbx,
-            20,
-        )
+        fixture_with(num_chunks, max_pending_write_bytes, 20)
     }
 
     fn fixture_with(
         num_chunks: u64,
         max_pending_write_bytes: Option<u64>,
-        engine: SubmoduleIndexEngine,
         partition_chunks: u64,
     ) -> eyre::Result<Fixture> {
         let tmp = TempDirBuilder::new().with_tracing().build();
@@ -1130,11 +1127,8 @@ mod tests {
             ..NodeConfig::testing()
         };
         node_config.storage.max_pending_write_bytes = max_pending_write_bytes;
-        node_config.database.submodule_index = engine;
-        if engine == SubmoduleIndexEngine::Rocksdb {
-            // The ordering test must observe the block sync, not the backstop.
-            node_config.storage.index_wal_backstop_ms = 60_000;
-        }
+        // The ordering test must observe the block sync, not the backstop.
+        node_config.storage.index_wal_backstop_ms = 60_000;
         let config = Config::new_with_random_peer_id(node_config);
 
         let sm = Arc::new(StorageModule::new(
@@ -1190,6 +1184,76 @@ mod tests {
             tx,
             data,
         })
+    }
+
+    fn add_test_placement(
+        storage: &StorageModule,
+        data_tree_root: DataTreeRoot,
+        data_commitment: DataCommitment,
+        offset: PartitionChunkOffset,
+        data_size: u64,
+    ) -> eyre::Result<()> {
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        let tx_path_hash = H256::random();
+        submodule.db.update(|tx| {
+            tx.add_tx_leaf_binding(
+                tx_path_hash,
+                &TxLeafBinding {
+                    data_root: data_tree_root.0,
+                    prefix_hash: H256::zero(),
+                    data_commitment,
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(offset, offset, Some(tx_path_hash))?;
+            tx.add_data_root_info(
+                data_commitment,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(i32::try_from(*offset)?),
+                    data_size,
+                    data_tree_root,
+                },
+            )
+        })
+    }
+
+    fn hold_first_test_chunk_occupancy(
+        fixture: &Fixture,
+        free_offset: PartitionChunkOffset,
+    ) -> std::thread::JoinHandle<Result<(), WriteDataChunkError>> {
+        let span = ii(free_offset, free_offset);
+        {
+            let mut intervals = fixture.sm.intervals().write().unwrap();
+            let _ = intervals.cut(span);
+            intervals
+                .insert_merge_touching_if_values_equal(span, ChunkType::Uninitialized)
+                .expect("free test offset should accept Uninitialized");
+        }
+        // The signed fixture transaction owns the tree. Chunk 0 is the byte
+        // range the occupancy hold writes.
+        let chunk = fixture
+            .tx
+            .data_chunks()
+            .expect("fixture tx has a data tree")
+            .into_iter()
+            .next()
+            .expect("fixture tx has one chunk");
+        fixture.sm.hold_ingress_after_occupy_for_test();
+        let storage = fixture.sm.clone();
+        let writer = std::thread::spawn(move || storage.deposit_data_chunk(&chunk));
+        assert!(
+            fixture
+                .sm
+                .ingress_occupy_hold_arrived_for_test(Duration::from_secs(5)),
+            "test placement was not occupied"
+        );
+        {
+            let mut intervals = fixture.sm.intervals().write().unwrap();
+            let _ = intervals.cut(span);
+            intervals
+                .insert_merge_touching_if_values_equal(span, ChunkType::Entropy)
+                .expect("free test offset should accept Entropy");
+        }
+        writer
     }
 
     impl Fixture {
@@ -1709,57 +1773,20 @@ mod tests {
     /// pass writes the body.
     #[tokio::test]
     async fn sibling_occupancy_does_not_retire_the_body_job() -> eyre::Result<()> {
-        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
-        use irys_types::RelativeChunkOffset;
-
         let f = fixture(1, Some(u64::MAX))?;
         f.sm.pack_with_zeros();
         f.seed_cache()?;
         f.index()?;
 
-        let chunk_size = f.config.consensus.chunk_size;
-        let (_, submodule) =
-            f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        let sibling_root = H256::repeat_byte(0x42);
-        submodule.db.update(|tx| {
-            tx.add_data_root_info(
-                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(1),
-                    data_size: f.tx.header.data_size,
-                    data_tree_root: f.tx.header.data_tree_root,
-                },
-            )?;
-            tx.add_data_root_info(
-                irys_types::data_tree::data_commitment(
-                    &f.config.data_tree_geometry(),
-                    DataTreeRoot(sibling_root),
-                    chunk_size,
-                ),
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(1),
-                    data_size: chunk_size,
-                    data_tree_root: DataTreeRoot(sibling_root),
-                },
-            )
-        })?;
-
-        let queued = f.sm.deposit_data_chunks(&[UnpackedChunk {
-            data_tree_root: DataTreeRoot(sibling_root),
-            data_size: chunk_size,
-            data_path: Base64(vec![1, 2, 3, 4]),
-            bytes: Base64(vec![9_u8; chunk_size as usize]),
-            tx_offset: TxChunkOffset::from(0),
-        }])?;
-        assert!(
-            matches!(
-                &queued[0],
-                BatchEnqueueItem::Queued(offsets)
-                    if offsets == &vec![PartitionChunkOffset::from(1)]
-            ),
-            "the sibling root must reserve only offset 1, got {queued:?}"
-        );
-        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+        let sibling = PartitionChunkOffset::from(1);
+        add_test_placement(
+            &f.sm,
+            f.tx.header.data_tree_root,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry()),
+            sibling,
+            f.tx.header.data_size,
+        )?;
+        let held_writer = hold_first_test_chunk_occupancy(&f, PartitionChunkOffset::from(0));
         assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
         assert_eq!(
             f.sm.partition_offsets_for_commitment_chunk(
@@ -1791,6 +1818,8 @@ mod tests {
         assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
 
         // The sibling sweep ends. Both placements are still entropy.
+        f.sm.release_ingress_occupy_hold_for_test();
+        held_writer.join().expect("held writer panicked")?;
         f.sm.drop_pending_writes_in_range(
             PartitionChunkOffset::from(1),
             PartitionChunkOffset::from(1),
@@ -1809,19 +1838,6 @@ mod tests {
         Ok(())
     }
 
-    /// Replace the live label on the inclusive span. One cut, one insert.
-    fn label_span(sm: &StorageModule, start: u32, end: u32, kind: ChunkType) {
-        let mut intervals = sm.intervals().write().unwrap();
-        let span = ii(
-            PartitionChunkOffset::from(start),
-            PartitionChunkOffset::from(end),
-        );
-        let _ = intervals.cut(span);
-        intervals
-            .insert_merge_touching_if_values_equal(span, kind)
-            .unwrap_or_else(|_| panic!("interval {start}..={end} could not take {kind:?}"));
-    }
-
     /// A reserved sibling sits outside the tx span. The tail is already Data.
     /// Each pass while the sibling is held must keep the job and must not
     /// read durability once per tail chunk. Releasing the sibling still
@@ -1829,73 +1845,45 @@ mod tests {
     /// is queued, does not scan the tail either.
     #[tokio::test]
     async fn sibling_reserve_does_not_scan_a_durable_tail() -> eyre::Result<()> {
-        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
-        use irys_types::RelativeChunkOffset;
-
         const TX_CHUNKS: u64 = 1024;
         // A per-offset walk is one durability read per tail chunk. The head
         // and one lookahead read stay under this. The tail does not.
         const SCAN_BOUND: usize = 8;
-        // MDBX-SUBMODULE-INDEX: retarget this test at RocksDB. The scan bound is not MDBX-specific.
-        let f = fixture_with(
-            TX_CHUNKS,
-            Some(u64::MAX),
-            SubmoduleIndexEngine::Mdbx,
-            TX_CHUNKS + 1,
-        )?;
+        let f = fixture_with(TX_CHUNKS, Some(u64::MAX), TX_CHUNKS + 1)?;
         f.seed_cache()?;
         f.index()?;
         let tx_last = u32::try_from(TX_CHUNKS - 1)?;
         let sibling_at = u32::try_from(TX_CHUNKS)?;
-        label_span(&f.sm, 1, tx_last, ChunkType::Data);
-        label_span(&f.sm, 0, 0, ChunkType::Entropy);
-        label_span(&f.sm, sibling_at, sibling_at, ChunkType::Entropy);
+        let chunk_size = f.config.consensus.chunk_size as usize;
+        assert!(f.sm.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0_u8; chunk_size],
+            ChunkType::Entropy,
+        ));
+        for offset in 1..=tx_last {
+            assert!(f.sm.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![7_u8; chunk_size],
+                ChunkType::Data,
+            ));
+        }
+        f.sm.force_sync_pending_chunks()?;
         assert_eq!(f.chunk_type(0), Some(ChunkType::Entropy));
         assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
         assert!(!f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
 
         let chunk_size = f.config.consensus.chunk_size;
-        let (_, submodule) =
-            f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        let sibling_root = H256::repeat_byte(0x42);
-        let sibling_start = i32::try_from(sibling_at)?;
-        submodule.db.update(|tx| {
-            tx.add_data_root_info(
-                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(sibling_start),
-                    data_size: chunk_size,
-                    data_tree_root: f.tx.header.data_tree_root,
-                },
-            )?;
-            tx.add_data_root_info(
-                irys_types::data_tree::data_commitment(
-                    &f.config.data_tree_geometry(),
-                    DataTreeRoot(sibling_root),
-                    chunk_size,
-                ),
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(sibling_start),
-                    data_size: chunk_size,
-                    data_tree_root: DataTreeRoot(sibling_root),
-                },
-            )
-        })?;
-        let queued = f.sm.deposit_data_chunks(&[UnpackedChunk {
-            data_tree_root: DataTreeRoot(sibling_root),
-            data_size: chunk_size,
-            data_path: Base64(vec![1, 2, 3, 4]),
-            bytes: Base64(vec![9_u8; chunk_size as usize]),
-            tx_offset: TxChunkOffset::from(0),
-        }])?;
-        assert!(
-            matches!(
-                &queued[0],
-                BatchEnqueueItem::Queued(offsets)
-                    if offsets == &vec![PartitionChunkOffset::from(sibling_at)]
-            ),
-            "the sibling root must reserve only the outside offset, got {queued:?}"
-        );
+        let sibling = PartitionChunkOffset::from(sibling_at);
+        add_test_placement(
+            &f.sm,
+            f.tx.header.data_tree_root,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry()),
+            sibling,
+            chunk_size,
+        )?;
+        assert!(f.sm.write_chunk(sibling, vec![9_u8; chunk_size as usize], ChunkType::Entropy,));
+        f.sm.force_sync_pending_chunks()?;
+        let held_writer = hold_first_test_chunk_occupancy(&f, PartitionChunkOffset::from(0));
 
         let worker = f.worker();
         for _ in 0..MAX_BODY_MIGRATION_ATTEMPTS {
@@ -1915,6 +1903,8 @@ mod tests {
         assert_eq!(rows[0].1.attempts, 0);
         assert_eq!(f.chunk_type(1), Some(ChunkType::Data));
 
+        f.sm.release_ingress_occupy_hold_for_test();
+        held_writer.join().expect("held writer panicked")?;
         f.sm.drop_pending_writes_in_range(
             PartitionChunkOffset::from(sibling_at),
             PartitionChunkOffset::from(sibling_at),
@@ -1959,17 +1949,18 @@ mod tests {
     async fn pending_data_inside_a_run_does_not_scan_the_suffix() -> eyre::Result<()> {
         const TX_CHUNKS: u64 = 256;
         const HOLE: u32 = 4;
-        // MDBX-SUBMODULE-INDEX: retarget this test at RocksDB. The scan bound is not MDBX-specific.
-        let f = fixture_with(
-            TX_CHUNKS,
-            Some(u64::MAX),
-            SubmoduleIndexEngine::Mdbx,
-            TX_CHUNKS,
-        )?;
+        let f = fixture_with(TX_CHUNKS, Some(u64::MAX), TX_CHUNKS)?;
         f.index()?;
         let last = u32::try_from(TX_CHUNKS - 1)?;
-        label_span(&f.sm, 0, last, ChunkType::Data);
         let chunk_size = f.config.consensus.chunk_size as usize;
+        for offset in 0..=last {
+            assert!(f.sm.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![7_u8; chunk_size],
+                ChunkType::Data,
+            ));
+        }
+        f.sm.force_sync_pending_chunks()?;
         assert!(
             f.sm.write_chunk(
                 PartitionChunkOffset::from(HOLE),
@@ -3277,6 +3268,10 @@ mod tests {
         f.sm.pack_with_zeros();
         f.seed_cache()?;
         f.index()?;
+        f.sm.clear_offset_index_in_range(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(2),
+        )?;
         f.sm.clear_data_root_infos_in_range(
             PartitionChunkOffset::from(0),
             PartitionChunkOffset::from(2),
@@ -3344,7 +3339,7 @@ mod tests {
     /// wake and `OnBlockMigrated` run only after that sync.
     #[tokio::test(flavor = "current_thread")]
     async fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
-        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
+        let f = fixture_with(1, Some(u64::MAX), 20)?;
         f.persist_block()?;
         let db = {
             let (_, sub) =
@@ -3429,7 +3424,7 @@ mod tests {
     /// does not wake the body worker or send `OnBlockMigrated`.
     #[tokio::test]
     async fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
-        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
+        let f = fixture_with(1, Some(u64::MAX), 20)?;
         f.persist_block()?;
         let db = {
             let (_, sub) =

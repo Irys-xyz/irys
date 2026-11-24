@@ -1145,6 +1145,12 @@ impl InnerCacheTask {
                     {
                         continue;
                     }
+                    // A refused mapping (width clamped below the chain's) does
+                    // not show that this module holds no copy. Keep the body.
+                    if sm.get_storage_module_ledger_offsets().is_err() {
+                        keep_offset = true;
+                        break 'spans;
+                    }
                     if !sm.contains_offset(ledger_offset) {
                         continue;
                     }
@@ -2680,12 +2686,23 @@ mod prune_timing;
 
 #[cfg(test)]
 mod tests {
+    use irys_database::submodule::SubmoduleStore as _;
     use irys_types::DataTreeRoot;
     use reth_db::transaction::DbTxMut as _;
     /// Cache tests exercise pruning policy, not storage placement; an empty
     /// module set means "nothing is durably stored locally".
     fn test_storage_modules_guard() -> StorageModulesReadGuard {
         StorageModulesReadGuard::new(Arc::new(RwLock::new(Vec::new())))
+    }
+
+    fn index_test_placement(
+        storage: &StorageModule,
+        header: &DataTransactionHeader,
+        range: LedgerChunkRange,
+        block_height: u64,
+    ) -> eyre::Result<()> {
+        let (_, paths) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(header));
+        storage.index_transaction_data(header, &paths[0].proof, range, block_height)
     }
 
     /// A guard holding one storage module that genuinely reports `offsets` of
@@ -2716,7 +2733,10 @@ mod tests {
         offsets: &[u32],
         ledger: DataLedger,
     ) -> eyre::Result<StorageModulesReadGuard> {
-        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
+        use irys_database::submodule::{
+            SubmoduleStore as _,
+            tables::{DataRootInfo, TxLeafBinding},
+        };
         use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
         use irys_types::{
             ConsensusConfig, PartitionChunkOffset, RelativeChunkOffset,
@@ -2752,8 +2772,27 @@ mod tests {
             )],
         };
         let sm = Arc::new(StorageModule::new(&info, &sm_config)?);
+        let placement_end = u32::try_from(
+            data_size
+                .div_ceil(sm_config.consensus.chunk_size)
+                .saturating_sub(1),
+        )?;
+        let tx_path_hash = H256::random();
         let (_, submodule) = sm.get_submodule_for_offset(PartitionChunkOffset::from(0_u32))?;
         submodule.db.update(|tx| {
+            tx.add_tx_leaf_binding(
+                tx_path_hash,
+                &TxLeafBinding {
+                    data_root: data_root.0,
+                    prefix_hash: H256::zero(),
+                    data_commitment: data_root,
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0_u32),
+                PartitionChunkOffset::from(placement_end),
+                Some(tx_path_hash),
+            )?;
             tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
@@ -2790,15 +2829,15 @@ mod tests {
         db_cache::CachedDataRoot,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots},
     };
-    use irys_domain::{BlockIndex, BlockTree};
+    use irys_domain::{BlockIndex, BlockTree, StorageModule};
     use irys_testing_utils::{
         IrysBlockHeaderTestExt as _, initialize_tracing, new_mock_signed_header,
     };
     use irys_types::v2::GossipDataV2;
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
-        NodeConfig, TxChunkOffset, UnpackedChunk,
+        DataTransactionHeaderV1WithMetadata, DataTransactionLedger, DataTransactionMetadata,
+        H256List, IrysAddress, LedgerChunkRange, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
@@ -3169,13 +3208,13 @@ mod tests {
         use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
         use irys_types::{
             ConsensusConfig, ConsensusOptions, DataTransactionLedger, LedgerChunkRange,
-            SubmoduleIndexEngine, irys::IrysSigner, ledger_chunk_offset_ii,
-            partition::PartitionAssignment, partition_chunk_offset_ii,
+            irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+            partition_chunk_offset_ii,
         };
         use nodit::interval::ii;
 
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let mut node_config = NodeConfig {
+        let node_config = NodeConfig {
             base_directory: temp_dir.path().join("storage"),
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
@@ -3187,7 +3226,6 @@ mod tests {
             }),
             ..NodeConfig::testing()
         };
-        node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
         let config = Config::new_with_random_peer_id(node_config);
         let local_address = config.irys_signer().address();
         let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
@@ -3435,6 +3473,7 @@ mod tests {
         let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: 64,
                 ..Default::default()
             },
@@ -4026,6 +4065,7 @@ mod tests {
         let data_size = 32_u64.saturating_mul(u64::from(chunk_count.max(1)));
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size,
                 ..Default::default()
             },
@@ -4178,6 +4218,7 @@ mod tests {
         let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: chunk_size,
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
@@ -4257,6 +4298,14 @@ mod tests {
                 &[0],
             )?;
             let sm = guard.read()[0].clone();
+            let (_, submodule) = sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            submodule.db.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(0),
+                    None,
+                )
+            })?;
             sm.clear_data_root_infos_in_range(
                 PartitionChunkOffset::from(0),
                 PartitionChunkOffset::from(0),
@@ -4322,6 +4371,16 @@ mod tests {
         base_directory: std::path::PathBuf,
         slot_index: usize,
     ) -> eyre::Result<StorageModulesReadGuard> {
+        assigned_module_with_fission(base_directory, slot_index, None)
+    }
+
+    /// [`assigned_module_without_placement`] with an optional Fission resize
+    /// geometry, so a test can finalize a resize on the module.
+    fn assigned_module_with_fission(
+        base_directory: std::path::PathBuf,
+        slot_index: usize,
+        fission: Option<irys_types::hardfork_config::Fission>,
+    ) -> eyre::Result<StorageModulesReadGuard> {
         use irys_domain::{StorageModule, StorageModuleInfo};
         use irys_types::{
             ConsensusConfig, PartitionChunkOffset, partition::PartitionAssignment,
@@ -4329,16 +4388,18 @@ mod tests {
         };
 
         let num_chunks = 10_u64;
+        let mut consensus = ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: num_chunks,
+            num_chunks_in_recall_range: 2,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
+            entropy_packing_iterations: 1,
+            chain_id: 1,
+            ..ConsensusConfig::testing()
+        };
+        consensus.hardforks.fission = fission;
         let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: num_chunks,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
+            consensus: irys_types::ConsensusOptions::Custom(consensus),
             base_directory,
             ..NodeConfig::testing()
         };
@@ -4714,6 +4775,10 @@ mod tests {
             !shifted_slot_body_survives(SlotLabel::OtherSlot)?.0,
             "a module on another slot does not keep this chunk"
         );
+        assert!(
+            shifted_slot_body_survives(SlotLabel::RefusedMapping)?.0,
+            "a module whose ledger mapping is refused may still hold the only copy"
+        );
         Ok(())
     }
 
@@ -4732,6 +4797,9 @@ mod tests {
         OtherPlacement,
         /// The module's slot does not cover the cached span.
         OtherSlot,
+        /// `OwnData`, then a finalized resize clamps the module below the
+        /// width the chain sets, so its ledger mapping is refused.
+        RefusedMapping,
     }
 
     /// One old migrated body at the start of slot 1. `num_chunks` is 10, so
@@ -4741,12 +4809,11 @@ mod tests {
     /// visits during prune)`.
     fn shifted_slot_body_survives(label: SlotLabel) -> eyre::Result<(bool, u64, u64)> {
         use irys_database::insert_tx_header;
-        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_database::tables::{IrysBlockHeaders, MigratedBlockHashes};
         use irys_domain::ChunkType;
         use irys_types::{
             DataTransactionLedger, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
-            PartitionChunkOffset, RelativeChunkOffset, U256, irys::IrysSigner,
+            PartitionChunkOffset, U256, irys::IrysSigner,
         };
         use nodit::interval::ii;
 
@@ -4758,6 +4825,7 @@ mod tests {
         let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: chunk_size,
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
@@ -4805,7 +4873,10 @@ mod tests {
             for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(data_key, updated)?;
             }
-            if matches!(label, SlotLabel::OwnData | SlotLabel::OtherPlacement) {
+            if matches!(
+                label,
+                SlotLabel::OwnData | SlotLabel::OtherPlacement | SlotLabel::RefusedMapping
+            ) {
                 irys_database::store_ingress_data_hash(
                     wtx,
                     data_key,
@@ -4842,9 +4913,18 @@ mod tests {
             SlotLabel::OtherSlot => 0,
             _ => 1,
         };
+        let fission = matches!(label, SlotLabel::RefusedMapping).then(|| {
+            irys_types::hardfork_config::Fission {
+                activation_timestamp: irys_types::UnixTimestamp::from_secs(0),
+                partition_chunks: 4,
+                recall_chunks: 1,
+                target_ingress_bytes_per_second: 1,
+                minimum_partition_ids: 0,
+            }
+        });
         let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let storage_modules_guard =
-            assigned_module_without_placement(sm_dir.path().to_path_buf(), module_slot)?;
+            assigned_module_with_fission(sm_dir.path().to_path_buf(), module_slot, fission)?;
         let sm = storage_modules_guard.read()[0].clone();
         let partition_zero = PartitionChunkOffset::from(0_u32);
         match label {
@@ -4883,24 +4963,24 @@ mod tests {
                     "fixture index does not name the old root at partition offset 0, got {named:?}"
                 );
             }
-            SlotLabel::ClearedData | SlotLabel::OwnData | SlotLabel::OtherPlacement => {
-                let (_, submodule) = sm.get_submodule_for_offset(partition_zero)?;
-                submodule.db.update(|tx| {
-                    tx.add_data_root_info(
-                        data_key,
-                        &DataRootInfo {
-                            start_offset: RelativeChunkOffset::from(
-                                if matches!(label, SlotLabel::OtherPlacement) {
-                                    2
-                                } else {
-                                    0
-                                },
-                            ),
-                            data_size: sm.config.consensus.chunk_size,
-                            data_tree_root: DataTreeRoot(data_root.0),
-                        },
-                    )
-                })?;
+            SlotLabel::ClearedData
+            | SlotLabel::OwnData
+            | SlotLabel::OtherPlacement
+            | SlotLabel::RefusedMapping => {
+                let ledger_at = if matches!(label, SlotLabel::OtherPlacement) {
+                    NUM_CHUNKS + 2
+                } else {
+                    NUM_CHUNKS
+                };
+                index_test_placement(
+                    &sm,
+                    &tx_header,
+                    LedgerChunkRange(ii(
+                        LedgerChunkOffset::from(ledger_at),
+                        LedgerChunkOffset::from(ledger_at),
+                    )),
+                    0,
+                )?;
             }
         }
         let write_data = !matches!(label, SlotLabel::ForeignUnpersisted);
@@ -4943,16 +5023,40 @@ mod tests {
             );
         }
         if matches!(label, SlotLabel::ClearedData) {
+            let (_, submodule) = sm.get_submodule_for_offset(partition_zero)?;
+            submodule.db.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(partition_zero, partition_zero, None)
+            })?;
             sm.clear_data_root_infos_in_range(partition_zero, partition_zero, &[data_key])?;
             eyre::ensure!(
                 sm.is_data_chunk_persisted_at(partition_zero),
                 "clearing the placement row cleared the Data label"
             );
         }
+        if let Some(params) = fission {
+            // The drive keeps the first 4 chunks; the chain view is back to 10.
+            sm.finalize_partition_resize(&irys_types::partition_resize::PartitionResizeState {
+                params,
+                activation_height: sm.config.consensus.epoch.num_blocks_in_epoch,
+                activation_hash: H256::repeat_byte(7),
+                sampling_origin: 0,
+                preserved_id_floor: 0,
+                reference_partition_chunks: 10,
+            })?;
+            sm.set_partition_chunks(10)?;
+            eyre::ensure!(
+                sm.get_storage_module_ledger_offsets().is_err(),
+                "fixture did not refuse the ledger mapping"
+            );
+            eyre::ensure!(
+                sm.is_data_chunk_persisted_at(partition_zero),
+                "the resize dropped the persisted body"
+            );
+        }
         let placed = sm
             .placed_tx_offsets_for_data_root(data_key, &BTreeSet::from([TxChunkOffset::from(0)]))?;
         match label {
-            SlotLabel::OwnData | SlotLabel::OtherPlacement => {
+            SlotLabel::OwnData | SlotLabel::OtherPlacement | SlotLabel::RefusedMapping => {
                 eyre::ensure!(!placed.is_empty(), "own placement row is missing");
             }
             _ => {
@@ -5012,9 +5116,9 @@ mod tests {
     async fn keeps_cached_body_when_prune_snapshot_becomes_stale(
         #[case] mutation: PruneMutation,
     ) -> eyre::Result<()> {
-        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_domain::{ChunkType, StorageModule};
-        use irys_types::{PartitionChunkOffset, RelativeChunkOffset};
+        use irys_types::{LedgerChunkOffset, PartitionChunkOffset};
+        use nodit::interval::ii;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -5149,17 +5253,12 @@ mod tests {
                 })?;
             }
             PruneMutation::NewPlacement => {
-                let (_, submodule) = sm.get_submodule_for_offset(offset)?;
-                submodule.db.update(|tx| {
-                    tx.add_data_root_info(
-                        tx_header.data_commitment(&irys_types::data_tree::Geometry::TESTING),
-                        &DataRootInfo {
-                            start_offset: RelativeChunkOffset::from(4),
-                            data_size: 32,
-                            data_tree_root: DataTreeRoot(data_root),
-                        },
-                    )
-                })?;
+                index_test_placement(
+                    &sm,
+                    &tx_header,
+                    LedgerChunkRange(ii(LedgerChunkOffset::from(4), LedgerChunkOffset::from(4))),
+                    2,
+                )?;
                 assert!(!sm.is_data_chunk_persisted_at(PartitionChunkOffset::from(4)));
             }
         }

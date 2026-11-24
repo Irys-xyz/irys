@@ -229,12 +229,14 @@ fn solution_hash_link_valid_ok() {
 
     let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
 
-    // compute expected solution_hash = sha256(poa_chunk || offset_le || seed)
+    // compute expected solution_hash in the order the config selects for the block
     block.solution_hash = compute_solution_hash(
         &poa_chunk,
         block.poa.partition_chunk_offset,
         &block.vdf_limiter_info.output,
-        Activation::Inactive,
+        ConsensusConfig::testing()
+            .hardforks
+            .delta_for_block(block.timestamp.to_secs()),
     );
 
     assert!(
@@ -256,7 +258,9 @@ fn solution_hash_link_invalid_when_inputs_tampered() {
         &poa_chunk,
         block.poa.partition_chunk_offset,
         &block.vdf_limiter_info.output,
-        Activation::Inactive,
+        ConsensusConfig::testing()
+            .hardforks
+            .delta_for_block(block.timestamp.to_secs()),
     );
 
     // now tamper the inputs (e.g., change poa_chunk by one byte) to trigger mismatch
@@ -290,6 +294,8 @@ fn solution_hash_link_follows_delta_activation(
         initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
         capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
         ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        token_price_safe_range: Delta::default_token_price_safe_range(),
+        ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
     };
     consensus.hardforks.delta = Some(delta);
 

@@ -4332,6 +4332,83 @@ pub fn assert_reorg_event_lca_contract(reorg_event: &ReorgEvent) {
     );
 }
 
+/// Sets the EMA price adjustment interval for both rule sets: the base
+/// `EmaConfig::price_adjustment_interval` (which also sizes the two-interval
+/// bootstrap) and, when Delta is configured, `Delta::ema_price_adjustment_interval`,
+/// which replaces the base interval once Delta is active.
+pub fn set_ema_price_adjustment_interval(consensus: &mut ConsensusConfig, interval: u64) {
+    consensus.ema.price_adjustment_interval = interval;
+    if let Some(delta) = consensus.hardforks.delta.as_mut() {
+        delta.ema_price_adjustment_interval = interval;
+    }
+}
+
+// The reward helpers below are test oracles. They compute expected values from
+// the reward curve and the Delta config directly, without calling
+// `irys_actors::block_reward`, so a bug there cannot cancel out in a test.
+
+/// Tokens the block at `height` emits: the reward-curve amount over its fixed
+/// block interval, whoever receives it. The genesis block emits nothing.
+pub fn expected_block_emission(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    height: u64,
+) -> eyre::Result<U256> {
+    let Some(parent_height) = height.checked_sub(1) else {
+        return Ok(U256::zero());
+    };
+    let block_time = node
+        .node_ctx
+        .config
+        .consensus
+        .difficulty_adjustment
+        .block_time;
+    let from = u128::from(parent_height) * u128::from(block_time);
+    Ok(node
+        .node_ctx
+        .reward_curve
+        .reward_between(from, from + u128::from(block_time))?
+        .amount)
+}
+
+/// `(miner, treasury)` parts of `block`'s emission. From Delta (at the
+/// block's own timestamp) a capacity PoA block pays the miner
+/// `Delta::capacity_chunk_reward_percent` of the emission, rounded down, and
+/// the treasury the rest. Otherwise the miner gets all of it.
+pub fn expected_block_reward_split(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    block: &IrysBlockHeader,
+) -> eyre::Result<(U256, U256)> {
+    let emission = expected_block_emission(node, block.height)?;
+    let delta = node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .delta
+        .as_ref()
+        .filter(|delta| block.timestamp_secs() >= delta.activation_timestamp);
+    match delta {
+        Some(delta) if !block.poa.is_data_poa() => {
+            let miner = emission
+                .checked_mul(delta.capacity_chunk_reward_percent.amount)
+                .ok_or_else(|| eyre::eyre!("miner part overflows"))?
+                / irys_types::storage_pricing::PRECISION_SCALE;
+            Ok((miner, emission - miner))
+        }
+        _ => Ok((emission, U256::zero())),
+    }
+}
+
+/// The part of `block`'s emission that goes to the treasury rather than the
+/// miner (see `expected_block_reward_split`). Non-zero only for a capacity
+/// PoA block from Delta. The genesis block carries no reward.
+pub fn block_reward_treasury_share(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    block: &IrysBlockHeader,
+) -> eyre::Result<U256> {
+    Ok(expected_block_reward_split(node, block)?.1)
+}
+
 /// Waits until the supply state is ready and has counted every block up to
 /// `height`. Migration writes the block index before it updates the supply
 /// state, so a wait on the index height alone can read a stale supply state.

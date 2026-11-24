@@ -93,9 +93,10 @@ pub async fn get_price(
             // - Not in last quarter: use stable public pricing (2 intervals ago)
             // - In last quarter: use the LOWER of the last two EMAs (more conservative in IRYS)
             //   Note: lower USD price -> higher IRYS required
-            let pricing_ema = ema.ema_for_public_quote(
+            let pricing_ema = ema.ema_for_public_quote_at(
                 tip_height,
-                state.config.consensus.ema.price_adjustment_interval,
+                latest_block_timestamp_secs,
+                &state.config.consensus,
             );
 
             // From Delta the term fee pays for the full term; before, for the epochs left in the cycle
@@ -193,9 +194,10 @@ pub async fn get_price(
             drop(tree);
 
             let next_block_height = tip_height + 1;
-            let pricing_ema = ema.ema_for_public_quote(
+            let pricing_ema = ema.ema_for_public_quote_at(
                 tip_height,
-                state.config.consensus.ema.price_adjustment_interval,
+                latest_block_timestamp_secs,
+                &state.config.consensus,
             );
 
             let term_fee = state

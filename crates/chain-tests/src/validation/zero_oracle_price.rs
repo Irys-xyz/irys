@@ -12,15 +12,33 @@ use irys_actors::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_validation::PreValidationError,
 };
-use irys_types::{NodeConfig, SealedBlock, storage_pricing::Amount};
+use irys_types::{
+    NodeConfig, SealedBlock, UnixTimestamp, hardfork_config::Delta, storage_pricing::Amount,
+};
 use rust_decimal_macros::dec;
 
-/// Produce a valid block, rewrite `oracle_irys_price` to zero, re-sign, and
-/// assert BlockDiscovery rejects with `OraclePriceInvalid`.
+/// Exercise the real prevalidator with re-signed headers. Zero is invalid
+/// on either side of Delta; a 50% jump is valid only before Delta.
+#[rstest::rstest]
+#[case::zero_before_delta(false, true)]
+#[case::zero_after_delta(true, true)]
+#[case::jump_before_delta(false, false)]
+#[case::jump_after_delta(true, false)]
 #[test_log::test(tokio::test)]
-async fn heavy_zero_oracle_price_block_rejected() -> eyre::Result<()> {
+async fn heavy_oracle_price_bound_enforced(
+    #[case] delta_active: bool,
+    #[case] zero_price: bool,
+) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing().with_consensus(|c| {
         c.chunk_size = 32;
+        c.hardforks.delta = delta_active.then_some(Delta {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
+        });
     });
 
     let test_signer = genesis_config.new_random_signer();
@@ -46,7 +64,33 @@ async fn heavy_zero_oracle_price_block_rejected() -> eyre::Result<()> {
     );
 
     let mut header = (**block.header()).clone();
-    header.oracle_irys_price = Amount::token(dec!(0.0)).expect("zero token amount");
+    let parent = genesis_node.get_block_by_height(header.height - 1).await?;
+    header.oracle_irys_price = if zero_price {
+        Amount::token(dec!(0.0)).expect("zero token amount")
+    } else {
+        parent
+            .oracle_irys_price
+            .add_multiplier(Amount::percentage(dec!(0.5))?)?
+    };
+    // Keep the EMA consistent in the allowed pre-Delta case, so acceptance
+    // proves that the bound is selected at the candidate's fork timestamp.
+    if !zero_price && !delta_active {
+        let snapshot = genesis_node
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(&parent.block_hash)
+            .expect("parent EMA snapshot");
+        header.ema_irys_price = snapshot
+            .calculate_ema_for_new_block(
+                &parent,
+                header.oracle_irys_price,
+                &genesis_config
+                    .consensus_config()
+                    .ema_rules_at(header.timestamp_secs()),
+            )
+            .ema;
+    }
     genesis_config.signer().sign_block_header(&mut header)?;
 
     let mut tampered_body = block.to_block_body();
@@ -62,15 +106,19 @@ async fn heavy_zero_oracle_price_block_rejected() -> eyre::Result<()> {
     );
     let result = block_discovery.handle_block(tampered_block, false).await;
 
-    assert!(
-        matches!(
-            result,
-            Err(BlockDiscoveryError::BlockValidationError(
-                PreValidationError::OraclePriceInvalid
-            ))
-        ),
-        "block with oracle_irys_price = 0 must be rejected, got: {result:?}"
-    );
+    if zero_price || delta_active {
+        assert!(
+            matches!(
+                result,
+                Err(BlockDiscoveryError::BlockValidationError(
+                    PreValidationError::OraclePriceInvalid
+                ))
+            ),
+            "out-of-bound oracle must be rejected, got: {result:?}"
+        );
+    } else {
+        assert!(result.is_ok(), "50% jump is legal before Delta: {result:?}");
+    }
 
     genesis_node.stop().await;
     Ok(())

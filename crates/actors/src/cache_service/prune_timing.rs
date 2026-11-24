@@ -15,8 +15,8 @@ use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
 use irys_types::{
     Base64, BlockTransactions, ConsensusConfig, ConsensusOptions, DataTransactionHeaderV1,
     DataTransactionHeaderV1WithMetadata, DataTransactionLedger, DataTransactionMetadata,
-    DataTreeRoot, H256List, LedgerChunkRange, NodeConfig, PartitionChunkOffset, SealedBlock,
-    SubmoduleIndexEngine, U256, partition::PartitionAssignment, partition_chunk_offset_ii,
+    DataTreeRoot, H256List, LedgerChunkRange, NodeConfig, PartitionChunkOffset, SealedBlock, U256,
+    partition::PartitionAssignment, partition_chunk_offset_ii,
 };
 use nodit::interval::ii;
 use reth_db::transaction::DbTxMut as _;
@@ -234,7 +234,6 @@ fn slow_timed_capacity_prune() -> eyre::Result<()> {
         }),
         ..NodeConfig::testing()
     };
-    node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
     node_config.cache.max_cache_size_bytes = root_count * chunk_size / 2;
     let config = Config::new_with_random_peer_id(node_config);
     let geometry = config.data_tree_geometry();

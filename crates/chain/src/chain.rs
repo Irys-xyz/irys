@@ -1987,9 +1987,15 @@ impl IrysNode {
             );
         }
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
-
-        let storage_modules = Self::init_storage_modules(&config, storage_module_infos).await?;
         let logical_chunks = epoch_snapshot.partition_chunks();
+
+        let storage_modules = Self::init_storage_modules(
+            &config,
+            storage_module_infos,
+            Arc::clone(irys_db.consensus()),
+            logical_chunks,
+        )
+        .await?;
         for module in storage_modules.read().unwrap().iter() {
             module.set_partition_chunks(logical_chunks)?;
             // Drives already carry a finalized resize the chain view has not
@@ -2000,7 +2006,7 @@ impl IrysNode {
                     storage_module.id = module.id,
                     retained = module.partition_chunks(),
                     canonical = logical_chunks,
-                    "storage module is truncated beyond the canonical partition size; bounded to the retained prefix until the chain passes the activation"
+                    "storage module is truncated beyond the canonical partition size; ledger mapping is refused until the chain passes the activation; mining and packing remain bounded to the retained prefix"
                 );
             }
         }
@@ -2860,10 +2866,14 @@ impl IrysNode {
     async fn init_storage_modules(
         config: &Config,
         storage_module_infos: Vec<StorageModuleInfo>,
+        consensus: Arc<irys_database::reth_db::DatabaseEnv>,
+        partition_chunks: u64,
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
         let storage_modules = crate::storage_module_init::open_storage_modules(
             config,
             storage_module_infos,
+            consensus,
+            partition_chunks,
             #[cfg(test)]
             Duration::ZERO,
         )

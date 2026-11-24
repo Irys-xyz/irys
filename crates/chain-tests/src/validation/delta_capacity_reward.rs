@@ -35,6 +35,8 @@ fn delta_from_genesis_config() -> NodeConfig {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
     })
 }
@@ -218,13 +220,15 @@ async fn heavy_delta_capacity_reward_share_goes_to_treasury() -> eyre::Result<()
     Ok(())
 }
 
-/// Pays the miner part but leaves the treasury share out of the treasury.
-struct NoTreasuryShareStrategy {
+/// Pays the miner part but replaces the treasury share with
+/// `treasury_share(correct_share)`.
+struct TreasuryShareOverrideStrategy {
     prod: ProductionStrategy,
+    treasury_share: fn(U256) -> U256,
 }
 
 #[async_trait::async_trait]
-impl BlockProdStrategy for NoTreasuryShareStrategy {
+impl BlockProdStrategy for TreasuryShareOverrideStrategy {
     fn inner(&self) -> &BlockProducerInner {
         &self.prod.inner
     }
@@ -245,7 +249,7 @@ impl BlockProdStrategy for NoTreasuryShareStrategy {
                 prev_evm_block,
                 mempool,
                 BlockRewardSplit {
-                    treasury: Amount::new(U256::zero()),
+                    treasury: Amount::new((self.treasury_share)(block_reward.treasury.amount)),
                     ..block_reward
                 },
                 timestamp_ms,
@@ -256,19 +260,22 @@ impl BlockProdStrategy for NoTreasuryShareStrategy {
     }
 }
 
-/// A capacity-PoA block whose treasury leaves out the reward share fails
-/// shadow-tx validation with a treasury mismatch.
-#[test_log::test(tokio::test)]
-async fn heavy_delta_capacity_poa_missing_treasury_share_rejected() -> eyre::Result<()> {
+/// Produces a capacity-PoA block whose miner part is correct but whose
+/// treasury share is `treasury_share(correct_share)`, and asserts that
+/// shadow-tx validation discards it with a treasury mismatch.
+async fn assert_tampered_treasury_share_rejected(
+    treasury_share: fn(U256) -> U256,
+) -> eyre::Result<()> {
     let node = IrysNodeTest::new_genesis(delta_from_genesis_config())
         .start()
         .await;
     node.gossip_disable();
 
-    let strategy = NoTreasuryShareStrategy {
+    let strategy = TreasuryShareOverrideStrategy {
         prod: ProductionStrategy {
             inner: node.node_ctx.block_producer_inner.clone(),
         },
+        treasury_share,
     };
     let (block, _, _) = strategy
         .fully_produce_new_block_without_gossip(&solution_context(&node.node_ctx).await?)
@@ -282,9 +289,16 @@ async fn heavy_delta_capacity_poa_missing_treasury_share_rejected() -> eyre::Res
     let parent = node.get_block_by_height(header.height - 1).await?;
     let full = full_reward(&node, parent.height)?;
     let miner = capacity_reward(&node, full)?;
-    eyre::ensure!(full > miner, "treasury share is zero");
+    let correct_share = full - miner;
+    eyre::ensure!(correct_share > U256::zero(), "treasury share is zero");
+    let tampered_share = treasury_share(correct_share);
+    eyre::ensure!(
+        tampered_share != correct_share,
+        "the override must change the treasury share"
+    );
+    // Only the treasury is tampered: the miner part and its payout stay correct.
     eyre::ensure!(header.reward_amount == miner);
-    eyre::ensure!(header.treasury == parent.treasury);
+    eyre::ensure!(header.treasury == parent.treasury + tampered_share);
 
     let event_rx = node
         .node_ctx
@@ -305,6 +319,21 @@ async fn heavy_delta_capacity_poa_missing_treasury_share_rejected() -> eyre::Res
 
     node.stop().await;
     Ok(())
+}
+
+/// A capacity-PoA block whose treasury leaves out the reward share fails
+/// shadow-tx validation with a treasury mismatch.
+#[test_log::test(tokio::test)]
+async fn heavy_delta_capacity_poa_missing_treasury_share_rejected() -> eyre::Result<()> {
+    assert_tampered_treasury_share_rejected(|_| U256::zero()).await
+}
+
+/// A capacity-PoA block whose treasury credits even one atomic unit more than
+/// the reward share fails shadow-tx validation with a treasury mismatch: the
+/// treasury cannot mint beyond `full reward - miner part`.
+#[test_log::test(tokio::test)]
+async fn heavy_delta_capacity_poa_overcredited_treasury_share_rejected() -> eyre::Result<()> {
+    assert_tampered_treasury_share_rejected(|share| share + U256::from(1)).await
 }
 
 /// Pays the full reward on both the Irys header and the EVM coinbase.
@@ -483,6 +512,8 @@ async fn heavy_delta_midchain_activation_boundary() -> eyre::Result<()> {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
     });
     let node = IrysNodeTest::new_genesis(config)

@@ -221,6 +221,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     )
     .await;
     assert_treasury(
+        &genesis_node,
         &unstake_block,
         treasury_before_unstake,
         "Treasury must remain unchanged during unstake inclusion",
@@ -282,6 +283,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .get_block_by_height(epoch_block.height - 1)
         .await?;
     assert_treasury(
+        &genesis_node,
         &epoch_block,
         epoch_prev.treasury - expected_refund_amount,
         "Treasury must decrease exactly by the stake refund amount",
@@ -405,6 +407,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
 
     // Assert treasury is unchanged
     assert_treasury(
+        &genesis_node,
         &first_block,
         treasury_before_unstake_attempt,
         "Treasury must be unchanged when unstake is not included in block",
@@ -449,6 +452,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         .get_block_by_height(first_epoch_block.height - 1)
         .await?;
     assert_treasury(
+        &genesis_node,
         &first_epoch_block,
         epoch_prev.treasury,
         "Treasury must remain unchanged at epoch when unstake was not processed",
@@ -763,6 +767,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     // Verify balance and treasury reflect ONLY pledge processing
     // Treasury should increase by pledge value (no unstake refund)
     assert_treasury(
+        &genesis_node,
         &block_header,
         treasury_before + pledge_value,
         "Treasury should increase by pledge value only (unstake was rejected)",
@@ -965,9 +970,22 @@ async fn assert_balance(
     assert_eq!(balance, expected, "{}", message);
 }
 
-/// Assert treasury equals expected value
-fn assert_treasury(block: &irys_types::IrysBlockHeader, expected: U256, message: &str) {
-    assert_eq!(block.treasury, expected, "{}", message);
+/// Assert treasury equals `expected` plus the block's own reward share.
+///
+/// `expected` is the treasury from the parent's treasury and the block's
+/// commitments and refunds. From Delta a capacity PoA block also sends part of
+/// its reward to the treasury (see `block_reward_treasury_share`), so the
+/// helper adds that share. Callers must pass a value built from the direct
+/// parent's treasury.
+fn assert_treasury(
+    node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
+    block: &irys_types::IrysBlockHeader,
+    expected: U256,
+    message: &str,
+) {
+    let reward_share = crate::utils::block_reward_treasury_share(node, block)
+        .expect("block reward treasury share");
+    assert_eq!(block.treasury, expected + reward_share, "{}", message);
 }
 
 /// Assert commitment is in the block's commitment ledger
@@ -1308,6 +1326,7 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
         .get_block_by_height(epoch_block.height - 1)
         .await?;
     assert_treasury(
+        &genesis_node,
         &epoch_block,
         epoch_prev.treasury - total_refunds,
         "Treasury must decrease by total unpledge refunds + unstake refund",

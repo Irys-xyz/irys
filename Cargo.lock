@@ -5075,7 +5075,7 @@ dependencies = [
 
 [[package]]
 name = "irys-chain"
-version = "4.1.0"
+version = "5.0.1"
 dependencies = [
  "actix-web",
  "alloy-contract",
@@ -14725,12 +14725,15 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
+ "glob",
  "irys-testing-utils",
  "nextest-monitor",
+ "regex",
  "rstest",
  "serde",
  "serde_json",
  "tempfile",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber 0.3.23",
  "xshell",

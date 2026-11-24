@@ -1030,6 +1030,14 @@ impl std::fmt::Debug for RocksSubmoduleStore {
     }
 }
 
+/// Opens the completed index at `path` read-only, then closes it. Returns the
+/// open error for a directory RocksDB v1 cannot open. Writes nothing.
+// MDBX-SUBMODULE-INDEX: delete with the startup migration. It decides whether an existing rocks/ is the live index before db/ is retired.
+pub fn check_rocks_index_opens(path: &Path) -> eyre::Result<()> {
+    drop(RocksSubmoduleStore::open_read_only(path)?);
+    Ok(())
+}
+
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
         Self::open_inner(path, RocksTuning::baseline(), true, false, None, true, None)
@@ -4689,6 +4697,22 @@ impl<'a> Batch<'a> {
                         "RocksDB v1 interval requires a tx leaf binding in this batch before the interval is written"
                     )
                 })?;
+                // Live coverage can only be replayed by its owning data tree root.
+                // Two sizes of one root share that root and may replay the span.
+                for row in &existing {
+                    if row.start <= end.0
+                        && row.value.end >= start.0
+                        && row.value.data_root != binding.data_root.0
+                    {
+                        let existing_root = H256(row.value.data_root);
+                        tracing::error!(%start, %end, %existing_root, incoming_root = %binding.data_root,
+                            "refusing placement over a different data root");
+                        eyre::bail!(
+                            "placement [{start}, {end}] for {} overlaps live root {existing_root}",
+                            binding.data_root
+                        );
+                    }
+                }
                 Some(records::fresh_placement(
                     end.0,
                     binding.data_root,
@@ -6203,6 +6227,10 @@ impl SubmoduleRead for Rows<'_> {
         self.interval_covering(offset)
     }
 
+    fn interval_data_root(&self, interval: &IntervalRow) -> eyre::Result<H256> {
+        Ok(interval.tx_path_hash)
+    }
+
     fn tx_intervals_in_range(
         &self,
         start: PartitionChunkOffset,
@@ -6265,6 +6293,7 @@ macro_rules! impl_batch_read {
 
 impl_batch_read! {
     stores_tx_paths() -> bool;
+    interval_data_root(interval: &IntervalRow) -> eyre::Result<H256>;
     stores_offset_crc() -> bool;
     get_data_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkDataPath>>;
     get_offset_meta(offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>>;
@@ -8467,6 +8496,14 @@ mod tests {
         assert_eq!(at_zero.tx_index, Some(3));
         assert_eq!(at_zero.end, PartitionChunkOffset::from(19));
 
+        // Model the coverage-clear step before rollback replay reuses this slice.
+        store.update(|tx| {
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(8),
+                PartitionChunkOffset::from(11),
+                None,
+            )
+        })?;
         place_span(&store, 8, 11, root_b, 0, 7, 1, &[8], None)?;
         assert_no_orphans(&store)?;
         let left = store

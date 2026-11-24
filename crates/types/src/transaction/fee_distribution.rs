@@ -273,8 +273,11 @@ mod tests {
     use crate::storage_pricing::phantoms::Percentage;
     use rust_decimal_macros::dec;
 
-    /// Ingress proof reward pool at a timestamp before any Delta activation.
+    /// Ingress proof reward pool under the pre-Delta rules. The testing config
+    /// activates Delta at genesis, so this resolves the pool with Delta unset.
     fn pre_delta_pool(config: &ConsensusConfig, term_fee: BoundedFee) -> U256 {
+        let mut config = config.clone();
+        config.hardforks.delta = None;
         config
             .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), term_fee.get())
             .unwrap()
@@ -605,6 +608,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
 
         let term_fee = BoundedFee::from(1000_u64);

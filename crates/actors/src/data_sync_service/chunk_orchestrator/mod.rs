@@ -477,6 +477,10 @@ impl ChunkOrchestrator {
             .storage_module
             .partition_assignment()
             .is_some_and(|pa| pa.ledger_id.is_some())
+            && self
+                .storage_module
+                .get_storage_module_ledger_offsets()
+                .is_ok()
         {
             self.cache_lookups_this_tick = 0;
             self.reload_pending_body_coverage();
@@ -1301,6 +1305,14 @@ impl ChunkOrchestrator {
     /// stop the current round when this storage module cannot make progress.
     #[tracing::instrument(skip_all)]
     pub fn dispatch_next(&mut self) -> bool {
+        // Queued root-addressed requests also wait for canonical slot geometry.
+        if self
+            .storage_module
+            .get_storage_module_ledger_offsets()
+            .is_err()
+        {
+            return false;
+        }
         if self.should_throttle_requests() {
             debug!("Throttling chunk requests due to storage throughput");
             return false;

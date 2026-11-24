@@ -678,7 +678,6 @@ mod tests {
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::DataTreeRoot;
-    use irys_types::SubmoduleIndexEngine;
     use irys_types::{
         Base64, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
         DataTransactionLedger, H256, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
@@ -687,7 +686,6 @@ mod tests {
     };
     use nodit::interval::ii;
     use rand::Rng as _;
-    use rstest::rstest;
 
     #[test]
     fn missing_on_disk_matches_only_the_typed_hole() {
@@ -698,10 +696,8 @@ mod tests {
     }
 
     #[test]
-    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
-        let (tmp_dir, config, storage_module) =
-            opened_publish("get_by_data_tx_offset_test", SubmoduleIndexEngine::Mdbx)?;
+        let (tmp_dir, config, storage_module) = opened_publish("get_by_data_tx_offset_test")?;
         let data_size = (config.consensus.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
@@ -723,10 +719,8 @@ mod tests {
 
     /// A node with no storage module still serves a cached body by data root.
     #[test]
-    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn get_by_data_root_serves_from_chunk_cache_without_sm() -> eyre::Result<()> {
-        let (tmp_dir, config) =
-            opened_config("get_by_data_root_cache_test", SubmoduleIndexEngine::Mdbx);
+        let (tmp_dir, config) = opened_config("get_by_data_root_cache_test");
         let data_size = (config.consensus.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
@@ -786,10 +780,8 @@ mod tests {
     /// Two sizes of one data tree root are two data commitments. From the
     /// cache: each commitment serves its own size and its own chunks only.
     #[test]
-    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn get_by_commitment_from_the_cache_with_two_sizes_of_one_root() -> eyre::Result<()> {
-        let (tmp_dir, config) =
-            opened_config("get_by_data_root_two_sizes", SubmoduleIndexEngine::Mdbx);
+        let (tmp_dir, config) = opened_config("get_by_data_root_two_sizes");
         let chunk_size = config.consensus.chunk_size as usize;
         let bytes = patterned_bytes(0x21, chunk_size * 2);
         let short_tx = signed_tx(&config, bytes);
@@ -890,14 +882,9 @@ mod tests {
 
     /// Two sizes of one data tree root placed in a storage module. Each
     /// commitment is a point lookup of its own placement.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn get_by_commitment_from_storage_with_two_sizes_of_one_root(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
-        let (tmp_dir, config, storage_module) = opened_publish("data_root_two_sizes_sm", engine)?;
+    #[test]
+    fn get_by_commitment_from_storage_with_two_sizes_of_one_root() -> eyre::Result<()> {
+        let (tmp_dir, config, storage_module) = opened_publish("data_root_two_sizes_sm")?;
         let chunk_size = config.consensus.chunk_size as usize;
 
         // The real tree has three chunks. The short header claims the same
@@ -962,14 +949,9 @@ mod tests {
 
     /// Two adjacent placements. `data_tx_offset == chunk_count` of the first tx
     /// is the first byte of the next tx. That offset must not be served.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn out_of_range_data_tx_offset_does_not_serve_the_next_placement(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
-        let (tmp_dir, config, storage_module) = opened_publish("data_root_next_placement", engine)?;
+    #[test]
+    fn out_of_range_data_tx_offset_does_not_serve_the_next_placement() -> eyre::Result<()> {
+        let (tmp_dir, config, storage_module) = opened_publish("data_root_next_placement")?;
         let chunk_size = config.consensus.chunk_size as usize;
 
         let bytes_a = patterned_bytes(0xA1, chunk_size * 2);
@@ -1011,14 +993,9 @@ mod tests {
 
     /// `data_size` is not a multiple of `chunk_size`. The short final chunk is
     /// in range. The next offset is the following placement.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn partial_final_chunk_is_in_range_and_the_next_offset_is_not(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
-        let (tmp_dir, config, storage_module) = opened_publish("data_root_partial_chunk", engine)?;
+    #[test]
+    fn partial_final_chunk_is_in_range_and_the_next_offset_is_not() -> eyre::Result<()> {
+        let (tmp_dir, config, storage_module) = opened_publish("data_root_partial_chunk")?;
         let chunk_size = config.consensus.chunk_size as usize;
         let short_len = chunk_size / 2;
         let bytes_a = patterned_bytes(0x11, chunk_size * 2 + short_len);
@@ -1059,14 +1036,9 @@ mod tests {
     /// The same data root stored twice, back to back. An offset past
     /// `chunk_count` names the second placement's first chunk and must not
     /// be returned as if it were that offset.
-    #[rstest]
-    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
-    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
-    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn same_data_root_second_placement_does_not_extend_chunk_count(
-        #[case] engine: SubmoduleIndexEngine,
-    ) -> eyre::Result<()> {
-        let (tmp_dir, config, storage_module) = opened_publish("data_root_two_placements", engine)?;
+    #[test]
+    fn same_data_root_second_placement_does_not_extend_chunk_count() -> eyre::Result<()> {
+        let (tmp_dir, config, storage_module) = opened_publish("data_root_two_placements")?;
         let chunk_size = config.consensus.chunk_size as usize;
 
         let bytes = patterned_bytes(0x42, chunk_size * 2);
@@ -1108,9 +1080,8 @@ mod tests {
     /// The cache key is `(data_root, tx_offset)`, so this does not alias into
     /// another tx; the bound is the data size on `CachedDataRoots`.
     #[test]
-    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn cache_does_not_serve_offset_past_data_size() -> eyre::Result<()> {
-        let (tmp_dir, config) = opened_config("data_root_cache_bounds", SubmoduleIndexEngine::Mdbx);
+        let (tmp_dir, config) = opened_config("data_root_cache_bounds");
         let chunk_size = config.consensus.chunk_size as usize;
         let bytes = patterned_bytes(0x7C, chunk_size * 2);
         let tx = signed_tx(&config, bytes.clone());
@@ -1160,24 +1131,20 @@ mod tests {
         Ok(())
     }
 
-    fn opened_config(
-        prefix: &str,
-        engine: SubmoduleIndexEngine,
-    ) -> (irys_testing_utils::utils::tempfile::TempDir, Config) {
+    fn opened_config(prefix: &str) -> (irys_testing_utils::utils::tempfile::TempDir, Config) {
         let tmp = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let config = bounds_testing_config(tmp.path().to_path_buf(), engine);
+        let config = bounds_testing_config(tmp.path().to_path_buf());
         (tmp, config)
     }
 
     fn opened_publish(
         prefix: &str,
-        engine: SubmoduleIndexEngine,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
         Config,
         StorageModule,
     )> {
-        let (tmp, config) = opened_config(prefix, engine);
+        let (tmp, config) = opened_config(prefix);
         let storage_module = testing_publish_module(&config)?;
         Ok((tmp, config, storage_module))
     }
@@ -1191,11 +1158,7 @@ mod tests {
         (tmp, config)
     }
 
-    fn bounds_testing_config(
-        base_path: std::path::PathBuf,
-        engine: SubmoduleIndexEngine,
-    ) -> Config {
-        let testing = NodeConfig::testing();
+    fn bounds_testing_config(base_path: std::path::PathBuf) -> Config {
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
@@ -1203,11 +1166,7 @@ mod tests {
                 ..ConsensusConfig::testing()
             }),
             base_directory: base_path,
-            database: irys_types::DatabaseConfig {
-                submodule_index: engine,
-                ..testing.database
-            },
-            ..testing
+            ..NodeConfig::testing()
         };
         Config::new_with_random_peer_id(node_config)
     }

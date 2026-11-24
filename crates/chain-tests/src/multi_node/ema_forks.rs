@@ -29,11 +29,10 @@ async fn spiky_slow_heavy4_ema_intervals_roll_over_in_forks() -> eyre::Result<()
         .get_mut()
         .mempool
         .tx_anchor_expiry_depth = 40;
-    genesis_config
-        .consensus
-        .get_mut()
-        .ema
-        .price_adjustment_interval = PRICE_ADJUSTMENT_INTERVAL;
+    crate::utils::set_ema_price_adjustment_interval(
+        genesis_config.consensus.get_mut(),
+        PRICE_ADJUSTMENT_INTERVAL,
+    );
 
     let peer_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_signer]);

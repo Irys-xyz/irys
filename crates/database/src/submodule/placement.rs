@@ -150,7 +150,8 @@ fn placements_for_interval<R: SubmoduleRead + ?Sized>(
     else {
         return Ok(Vec::new());
     };
-    let Some(infos) = reader.get_data_root_infos_for_commitment(data_commitment)? else {
+    let Some(infos) = infos_for_commitment_or_data_root(reader, data_commitment, data_tree_root.0)?
+    else {
         return Ok(Vec::new());
     };
     let mut cuts = vec![interval.start];
@@ -216,6 +217,22 @@ fn covering_info(
         return Ok(None);
     };
     Ok((info.start_offset <= probe_rel).then(|| info.clone()))
+}
+
+/// Infos stored under the commitment, or under the data root.
+///
+/// Schema 3 keys the row by the commitment. A finished schema v2 migration
+/// still keys it by the data root. The bytes differ, so a miss on the
+/// commitment is a second read. A schema 3 row hits the first read.
+fn infos_for_commitment_or_data_root<R: SubmoduleRead + ?Sized>(
+    reader: &R,
+    data_commitment: DataCommitment,
+    data_root: H256,
+) -> eyre::Result<Option<super::tables::DataRootInfos>> {
+    if let Some(infos) = reader.get_data_root_infos_for_commitment(data_commitment)? {
+        return Ok(Some(infos));
+    }
+    reader.get_data_root_infos_for_commitment(DataCommitment(data_root))
 }
 
 /// Real data root and data commitment for a stored tx path, checked against

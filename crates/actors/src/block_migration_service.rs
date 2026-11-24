@@ -824,7 +824,7 @@ impl BlockMigrationService {
                         let module_range = match module.get_storage_module_ledger_offsets() {
                             Ok(r) => r,
                             Err(err) => {
-                                warn!(
+                                debug!(
                                     module_id = module.id,
                                     ?ledger,
                                     %err,
@@ -853,7 +853,7 @@ impl BlockMigrationService {
                         let partition_range = match module.make_range_partition_relative(overlap) {
                             Ok(r) => r,
                             Err(err) => {
-                                warn!(
+                                debug!(
                                     module_id = module.id,
                                     ?ledger,
                                     %err,
@@ -2986,7 +2986,10 @@ mod tests {
     /// is also placed by a still-canonical block.
     #[test]
     fn recover_from_network_partition_scopes_data_root_infos_clear() -> eyre::Result<()> {
-        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
+        use irys_database::submodule::{
+            SubmoduleStore as _,
+            tables::{DataRootInfo, TxLeafBinding},
+        };
         use irys_types::RelativeChunkOffset;
 
         let (db, _db_tmp) = open_db()?;
@@ -3025,34 +3028,42 @@ mod tests {
         // offset 3 (inside it).
         let shared_data_root = H256::random();
         let orphan_txid = H256::random();
-        // The orphaned block carries the tx whose data_root is shared; its
+        // The orphaned block carries the tx whose data root is shared; its
         // header must be resolvable so recovery adds it to the clear set.
         let orphan_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: orphan_txid,
                 data_tree_root: DataTreeRoot(shared_data_root),
+                data_size: 32,
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
         });
-
         let shared_commitment = orphan_tx.data_commitment(&config.data_tree_geometry());
-        {
-            let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
+        // One update per placement. RocksDB fills the data-root row of the
+        // interval written in that same update, and two unfilled intervals of
+        // one commitment in one update are refused.
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
+        for (start, tx_path_hash) in [(0_u32, H256::random()), (3, H256::random())] {
             submodule.db.update(|tx| {
-                tx.add_data_root_info(
-                    shared_commitment,
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset(0),
-                        data_size: 32,
-                        data_tree_root: DataTreeRoot(shared_data_root),
+                tx.add_tx_leaf_binding(
+                    tx_path_hash,
+                    &TxLeafBinding {
+                        data_root: shared_data_root,
+                        prefix_hash: H256::zero(),
+                        data_commitment: shared_commitment,
                     },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(start),
+                    PartitionChunkOffset::from(start),
+                    Some(tx_path_hash),
                 )?;
                 tx.add_data_root_info(
                     shared_commitment,
                     &DataRootInfo {
-                        start_offset: RelativeChunkOffset(3),
+                        start_offset: RelativeChunkOffset(i32::try_from(start)?),
                         data_size: 32,
                         data_tree_root: DataTreeRoot(shared_data_root),
                     },

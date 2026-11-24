@@ -1646,6 +1646,10 @@ mod tests {
                 irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent:
                 irys_types::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range:
+                irys_types::hardfork_config::Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval:
+                irys_types::hardfork_config::Delta::default_ema_price_adjustment_interval(),
         });
     }
 
@@ -1661,6 +1665,8 @@ mod tests {
         config.hardforks.frontier.number_of_ingress_proofs_total = 1;
         if delta_active {
             config_with_delta_active(&mut config);
+        } else {
+            config.hardforks.delta = None;
         }
         let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let term_fee = U256::from(30000);

@@ -46,7 +46,8 @@ pub const SUBMODULE_SCHEMA_ROCKS_V1: &str = "irys-submodule-index rocksdb 1\n";
 /// Open stamps it over a [`SUBMODULE_SCHEMA_ROCKS_V1`] row when the index has
 /// no data rows, and refuses that row when it has data rows. An older binary
 /// refuses this row as an unrecognised layout.
-#[cfg(feature = "rocksdb")]
+// RocksDB is the only submodule engine this build opens, so the row is
+// always part of the library. There is no `rocksdb` crate feature.
 pub(crate) const SUBMODULE_SCHEMA_ROCKS_ROW: &str =
     "irys-submodule-index rocksdb 1 data-commitment-keys\n";
 

@@ -13,7 +13,6 @@ use irys_types::{
     ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     partition_chunk_offset_ii,
 };
-use openssl::sha;
 use tracing::info;
 
 #[test_log::test(test)]
@@ -160,6 +159,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     );
 
     let data_commitment = tx_headers[0].data_commitment(&config.data_tree_geometry());
+    let placement_root = tx_headers[0].data_tree_root.0;
     let data_size = tx_headers[0].data_size;
     let _ = storage_modules[0].index_transaction_data(&tx_headers[0], tx_path, tx_ledger_range, 0);
 
@@ -169,11 +169,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         .ok_or(eyre::eyre!("Storage module not found"))
         .unwrap();
 
-    // Verify the tx_path_hash and tx_path bytes were added
-    let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
-    verify_tx_path_in_submodule(submodule, tx_path, tx_path_hash);
-
-    verify_tx_path_offsets(submodule, tx_path_hash, tx_partition_range, &[]);
+    // RocksDB v1 exposes the bound data root from each placement interval.
+    verify_placement_offsets(submodule, placement_root, tx_partition_range, &[]);
 
     verify_data_root_start_offset(submodule, data_commitment, 0);
 
@@ -190,6 +187,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     );
     let tx_path = &proofs[1].proof;
     let data_commitment = tx_headers[1].data_commitment(&config.data_tree_geometry());
+    let placement_root = tx_headers[1].data_tree_root.0;
     let data_size = tx_headers[1].data_size;
     assert_eq!(data_size, bytes_in_tx);
     let _ = storage_modules[0].index_transaction_data(&tx_headers[1], tx_path, tx_ledger_range, 0);
@@ -205,14 +203,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         .ok_or(eyre::eyre!("Storage module not found"))
         .unwrap();
 
-    // Verify the tx_path_hash and tx_path bytes were added to both submodules
-    let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
-
-    verify_tx_path_in_submodule(submodule, tx_path, tx_path_hash);
-    verify_tx_path_in_submodule(submodule2, tx_path, tx_path_hash);
-
-    verify_tx_path_offsets(submodule, tx_path_hash, tx_partition_range, &[5]);
-    verify_tx_path_offsets(submodule2, tx_path_hash, tx_partition_range, &[3, 4]);
+    // Verify the placement root was added to both submodules.
+    verify_placement_offsets(submodule, placement_root, tx_partition_range, &[5]);
+    verify_placement_offsets(submodule2, placement_root, tx_partition_range, &[3, 4]);
 
     verify_data_root_start_offset(submodule, data_commitment, 3);
     verify_data_root_start_offset(submodule2, data_commitment, 3);
@@ -223,6 +216,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:3 - Fill up the StorageModule leaving one empty chunk
     let tx_path = &proofs[2].proof;
     let data_commitment = tx_headers[2].data_commitment(&config.data_tree_geometry());
+    let placement_root = tx_headers[2].data_tree_root.0;
     let last_byte_index = proofs[2].last_byte_index as u64;
     let bytes_in_tx =
         (last_byte_index + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
@@ -242,20 +236,16 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         .ok_or(eyre::eyre!("Storage module not found"))
         .unwrap();
 
-    // Verify the tx_path hash and bytes were added to the 2nd submodule
-    let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
-    verify_tx_path_in_submodule(submodule2, tx_path, tx_path_hash);
-    verify_tx_path_in_submodule(submodule3, tx_path, tx_path_hash);
-
-    verify_tx_path_offsets(
+    // Verify the placement root was added to both submodules.
+    verify_placement_offsets(
         submodule2,
-        tx_path_hash,
+        placement_root,
         tx_partition_range,
         &[10, 11, 12, 13, 14, 15, 16, 17, 18],
     );
-    verify_tx_path_offsets(
+    verify_placement_offsets(
         submodule3,
-        tx_path_hash,
+        placement_root,
         tx_partition_range,
         &[6, 7, 8, 9, 10],
     );
@@ -269,6 +259,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:4 - Overlap between StorageModules
     let tx_path = &proofs[3].proof;
     let data_commitment = tx_headers[3].data_commitment(&config.data_tree_geometry());
+    let placement_root = tx_headers[3].data_tree_root.0;
     let data_size = tx_headers[3].data_size;
     let last_byte_index = proofs[3].last_byte_index as u64;
     let bytes_in_tx =
@@ -291,12 +282,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         .ok_or(eyre::eyre!("Storage module not found"))
         .unwrap();
 
-    // Verify the tx_path hash and bytes were added to the 2nd submodule
-    let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
-    verify_tx_path_in_submodule(submodule3, tx_path, tx_path_hash);
-    verify_tx_path_in_submodule(submodule4, tx_path, tx_path_hash);
-
-    verify_tx_path_offsets(submodule3, tx_path_hash, tx_partition_range, &[20, 21]);
+    // Verify the placement root was added to both submodules.
+    verify_placement_offsets(submodule3, placement_root, tx_partition_range, &[20, 21]);
 
     // We now need ranges relative to the second partition
     let (_tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
@@ -306,7 +293,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         config.consensus.chunk_size,
     );
 
-    verify_tx_path_offsets(submodule4, tx_path_hash, tx_partition_range, &[]);
+    verify_placement_offsets(submodule4, placement_root, tx_partition_range, &[]);
 
     verify_data_root_start_offset(submodule3, data_commitment, 19);
     verify_data_root_start_offset(submodule4, data_commitment, -1); // Offset is from previous Partition
@@ -317,6 +304,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:5 - Perfectly fills the submodule without overlapping
     let tx_path = &proofs[4].proof;
     let data_commitment = tx_headers[4].data_commitment(&config.data_tree_geometry());
+    let placement_root = tx_headers[4].data_tree_root.0;
     let data_size = tx_headers[4].data_size;
     let last_byte_index = proofs[4].last_byte_index as u64;
     let bytes_in_tx =
@@ -332,10 +320,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     let _ = storage_modules[1].index_transaction_data(&tx_headers[4], tx_path, tx_ledger_range, 0);
 
-    let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
-    verify_tx_path_in_submodule(submodule4, tx_path, tx_path_hash);
-
-    verify_tx_path_offsets(submodule4, tx_path_hash, tx_partition_range, &[]);
+    verify_placement_offsets(submodule4, placement_root, tx_partition_range, &[]);
 
     verify_data_root_data_size(submodule4, data_commitment, data_size);
 
@@ -489,29 +474,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     Ok(())
 }
 
-fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
-    let mut hasher = sha::Sha256::new();
-    hasher.update(message);
-    let result = hasher.finish();
-    Ok(result)
-}
-
-fn verify_tx_path_in_submodule(submodule: &StorageSubmodule, tx_path: &[u8], tx_path_hash: H256) {
-    submodule
-        .db
-        .view(|tx| {
-            let path = tx
-                .get_full_tx_path(tx_path_hash)?
-                .expect("tx_path bytes not found in index");
-            assert_eq!(path, tx_path);
-            Ok(())
-        })
-        .unwrap();
-}
-
-fn verify_tx_path_offsets(
+fn verify_placement_offsets(
     submodule: &StorageSubmodule,
-    tx_path_hash: H256,
+    data_root: H256,
     chunk_range: PartitionChunkRange,
     expected_missing_offsets: &[u32],
 ) {
@@ -524,7 +489,7 @@ fn verify_tx_path_offsets(
                         let tx_ph = paths
                             .tx_path_hash
                             .expect("index exists but tx_path_hash value is empty");
-                        assert_eq!(tx_path_hash, tx_ph);
+                        assert_eq!(data_root, tx_ph);
                     }
                     None => {
                         // Assert this offset should be missing

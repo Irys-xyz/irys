@@ -48,7 +48,8 @@ fn reject_future_timestamp_at(reported: UnixTimestamp, now_secs: u64) -> eyre::R
 }
 
 /// Fails when the feed reports a zero price. Block validation rejects a zero oracle price.
-/// The producer bounds the price to `token_price_safe_range` around the parent price. Only
+/// The producer bounds the price to the safe range in force (`ConsensusConfig::ema_rules_at`:
+/// `token_price_safe_range`, or Delta's from its activation) around the parent price. Only
 /// when that range is 100% or more does the lower bound reach zero. A zero price then passes
 /// the bound and the produced block is invalid. With a smaller range, the bound raises a zero
 /// price to a non-zero minimum.

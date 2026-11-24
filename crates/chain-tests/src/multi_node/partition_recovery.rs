@@ -1,4 +1,4 @@
-use crate::utils::{IrysNodeTest, wait_supply_height};
+use crate::utils::{IrysNodeTest, expected_block_emission, wait_supply_height};
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_domain::ChunkType;
@@ -331,10 +331,14 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
 
     // Verify supply state
     let supply_after = wait_supply_height(&genesis, index_height).await?;
+    // Emission is each block's full reward-curve amount. After Delta a
+    // capacity PoA block's `reward_amount` is only the miner's share, so the
+    // headers' rewards undercount it.
     let mut expected_emitted = irys_types::U256::zero();
     for h in 1..=supply_after.height {
-        let block = genesis.get_block_by_height_from_index(h, false)?;
-        expected_emitted = expected_emitted.saturating_add(block.reward_amount);
+        // The canonical chain must be readable from the index up to this height.
+        genesis.get_block_by_height_from_index(h, false)?;
+        expected_emitted = expected_emitted.saturating_add(expected_block_emission(&genesis, h)?);
     }
     assert_eq!(
         supply_after.cumulative_emitted, expected_emitted,
@@ -469,8 +473,9 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     let final_supply = wait_supply_height(&genesis, final_index_height).await?;
     let mut final_expected = irys_types::U256::zero();
     for h in 1..=final_supply.height {
-        let block = genesis.get_block_by_height_from_index(h, false)?;
-        final_expected = final_expected.saturating_add(block.reward_amount);
+        // Full reward-curve emission per block; see the supply check above.
+        genesis.get_block_by_height_from_index(h, false)?;
+        final_expected = final_expected.saturating_add(expected_block_emission(&genesis, h)?);
     }
     assert_eq!(
         final_supply.cumulative_emitted, final_expected,
@@ -926,6 +931,8 @@ async fn heavy4_delta_partition_recovery_supply_uses_full_emission() -> eyre::Re
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
     });
     genesis_config.storage.num_writes_before_sync = 1;

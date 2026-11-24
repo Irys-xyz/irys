@@ -317,7 +317,10 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<(
     // Last 25% = 1 block (tip height % interval == 3)
     let price_adjustment_interval = 4;
     let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
-    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
 
     // Configure mock oracle with consistent price increases (smoothing_interval = 999999).
     // This ensures ema_price_1_interval_ago > ema_price_2_intervals_ago throughout the test.
@@ -420,7 +423,10 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
     // Configure with interval of 4 blocks
     let price_adjustment_interval = 4;
     let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
-    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
 
     // Configure mock oracle with an initially decreasing trend
     config.oracles = vec![irys_types::OracleConfig::Mock {
@@ -516,7 +522,10 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
 async fn heavy_pricing_quote_on_last_tip_before_roll_survives_roll() -> eyre::Result<()> {
     let price_adjustment_interval = 4;
     let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
-    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
     config.oracles = vec![irys_types::OracleConfig::Mock {
         initial_price: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0))
             .unwrap(),
