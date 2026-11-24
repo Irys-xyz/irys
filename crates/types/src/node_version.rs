@@ -55,6 +55,31 @@ pub fn init_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: b
     }
 }
 
+/// Parses `+irys-rs`, `+irys-rs.<sha>`, `+irys-rs.<sha>.dirty`, `+irys-rs.dirty`.
+pub fn parse_git_identity_from_version(version: &Version) -> (Option<String>, bool) {
+    let meta = version.build.as_str();
+    let mut parts = meta.split('.');
+    match parts.next() {
+        Some(VENDOR) => {}
+        Some(_) | None => return (None, meta.ends_with(".dirty")),
+    }
+    let rest: Vec<&str> = parts.collect();
+    match rest.as_slice() {
+        [] => (None, false),
+        ["dirty"] => (None, true),
+        [sha] => (Some((*sha).to_string()), false),
+        [sha, "dirty"] => (Some((*sha).to_string()), true),
+        rest => {
+            let dirty = rest.last().copied() == Some("dirty");
+            let sha = rest
+                .first()
+                .filter(|s| **s != "dirty")
+                .map(|s| (*s).to_string());
+            (sha, dirty)
+        }
+    }
+}
+
 /// Builds a [`Version`] with vendor and git metadata in the build metadata field.
 /// This is the pure logic used by [`init_version`]; extracted for testability.
 fn make_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) -> Version {
@@ -128,6 +153,49 @@ mod tests {
     fn version_tagged_dirty() {
         let v = make_version("3.0.0", "", true, true);
         assert_eq!(v.to_string(), "3.0.0+irys-rs.dirty");
+    }
+
+    #[test]
+    fn parse_git_identity_from_vendor_only() {
+        let v = make_version("3.0.0", "", true, false);
+        assert_eq!(parse_git_identity_from_version(&v), (None, false));
+    }
+
+    #[test]
+    fn parse_git_identity_from_sha_and_dirty() {
+        let v = make_version("3.0.0", "abc1234", false, true);
+        assert_eq!(
+            parse_git_identity_from_version(&v),
+            (Some("abc1234".into()), true)
+        );
+    }
+
+    #[test]
+    fn parse_git_identity_tagged_dirty_has_no_sha() {
+        let v = make_version("3.0.0", "", true, true);
+        assert_eq!(parse_git_identity_from_version(&v), (None, true));
+    }
+
+    /// Encodes with [`make_version`], sends the version through its string form
+    /// (as a client reads it from `/v1/info`), then decodes it.
+    /// Tagged builds do not encode the SHA, so it does not decode.
+    #[rstest::rstest]
+    #[case::tagged_clean(true, false, None)]
+    #[case::tagged_dirty(true, true, None)]
+    #[case::untagged_clean(false, false, Some("a1b2c3d"))]
+    #[case::untagged_dirty(false, true, Some("a1b2c3d"))]
+    fn git_identity_encode_decode_roundtrip(
+        #[case] has_tag: bool,
+        #[case] is_dirty: bool,
+        #[case] expected_sha: Option<&str>,
+    ) {
+        let encoded = make_version("3.0.0", "a1b2c3d", has_tag, is_dirty).to_string();
+        let decoded = Version::parse(&encoded).expect("encoded version is valid semver");
+        assert_eq!(
+            parse_git_identity_from_version(&decoded),
+            (expected_sha.map(str::to_string), is_dirty),
+            "roundtrip of {encoded}"
+        );
     }
 
     // -- Golden-string fixture tests for serialization / deserialization --
