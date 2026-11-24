@@ -1879,8 +1879,20 @@ mod tests {
             f.tx.header.data_tree_root,
             f.tx.header.data_commitment(&f.config.data_tree_geometry()),
             sibling,
-            chunk_size,
+            f.tx.header.data_size,
         )?;
+        let stored = {
+            let (_, submodule) = f.sm.get_submodule_for_offset(sibling)?;
+            submodule
+                .db
+                .view(|tx| tx.placement_at(sibling))?
+                .expect("sibling placement")
+        };
+        assert_eq!(stored.data_size, f.tx.header.data_size);
+        assert_eq!(
+            stored.data_commitment,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry())
+        );
         assert!(f.sm.write_chunk(sibling, vec![9_u8; chunk_size as usize], ChunkType::Entropy,));
         f.sm.force_sync_pending_chunks()?;
         let held_writer = hold_first_test_chunk_occupancy(&f, PartitionChunkOffset::from(0));
