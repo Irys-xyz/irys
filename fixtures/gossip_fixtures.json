@@ -440,8 +440,6 @@
     "cumulativeDifficulty": "50000",
     "currentSyncHeight": "42",
     "dbSchemaVersion": 3,
-    "dirty": false,
-    "gitSha": "abc1234",
     "height": "42",
     "isSyncing": false,
     "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
