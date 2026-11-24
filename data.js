@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795528072871,
+  "lastUpdate": 1795548138917,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -24234,6 +24234,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000111,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "05fe6d97ce383d8064cdd09f1b78e5bcbdfe3e20",
+          "message": "refactor(api): remove gitSha and dirty from /v1/info (#1844)\n\n* refactor(api): remove gitSha and dirty from /v1/info\n\nThe `version` field already holds the git SHA and the dirty flag as\nsemver build metadata (`3.0.0+irys-rs.a1b2c3d.dirty`). Clients decode\nthe version string to get them.\n\nRemove the two NodeInfo fields and the helpers that only they used:\nGitIdentity, git_sha(), git_dirty() and parse_git_identity_from_version.\n\nThe gossip wire types (NodeInfoV1/V2) never carried these fields, so the\ngossip format does not change. Both fields were `#[serde(default)]`, so\nclients still parse responses from older nodes.\n\n* feat(types): keep the version-string decoder for external clients\n\nRestore parse_git_identity_from_version. Clients that read `version`\nfrom /v1/info use it to get the git SHA and dirty flag from the build\nmetadata.\n\nAdd an encode-decode round-trip test. It encodes with make_version,\nsends the version through its string form, and decodes it, for each\ntagged/dirty combination.",
+          "timestamp": "2026-11-24T19:01:43Z",
+          "tree_id": "31a0eb70db54e7e967da02150c42d01d9f267bdb",
+          "url": "https://github.com/Irys-xyz/irys/commit/05fe6d97ce383d8064cdd09f1b78e5bcbdfe3e20"
+        },
+        "date": 1795548137540,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012061,
+            "range": "± 0.000238",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119951,
+            "range": "± 0.001412",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.206307,
+            "range": "± 0.01843",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.998815,
+            "range": "± 0.176794",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.06648,
+            "range": "± 0.000541",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 660.568389,
+            "range": "± 7.030097",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 906.44779,
+            "range": "± 43.330107",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120084,
+            "range": "± 0.000475",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1202.39528,
+            "range": "± 5.888508",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1573.252199,
+            "range": "± 9.447623",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.02739,
+            "range": "± 0.000793",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 138.71119,
+            "range": "± 1.341932",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 181.393375,
+            "range": "± 0.928613",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
             "range": "± 0.000001",
             "unit": "ms/iter"
           }
