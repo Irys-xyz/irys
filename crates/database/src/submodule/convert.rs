@@ -6104,10 +6104,17 @@ mod tests {
         let pair = derived_pair(&consensus)?;
         let other_size = binding_with_other_size(&pair);
         // Same root and same offsets, other size: only the commitment differs.
+        // The live span is cleared first. A different commitment cannot
+        // overwrite it.
         {
             let hash = tx_path_hash(&pair.proof_a);
             let opened = RocksSubmoduleStore::open(&rocks)?;
             opened.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(2),
+                    None,
+                )?;
                 tx.add_tx_leaf_binding(hash, &other_size)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset(0),
