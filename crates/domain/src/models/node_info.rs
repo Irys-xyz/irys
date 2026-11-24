@@ -2,7 +2,7 @@ use crate::{
     BlockIndexReadGuard, BlockTreeReadGuard, PeerList, chain_sync_state::ChainSyncState,
     get_canonical_chain,
 };
-use irys_types::{DatabaseVersion, H256, NodeInfo, ProtocolVersion, git_dirty, git_sha};
+use irys_types::{DatabaseVersion, H256, NodeInfo, ProtocolVersion};
 
 pub async fn get_node_info(
     block_index: &BlockIndexReadGuard,
@@ -45,8 +45,6 @@ pub async fn get_node_info(
         // the max cumulative difficulty can still wait for validation.
         cumulative_difficulty: latest.header().cumulative_diff,
         mining_address,
-        git_sha: git_sha(),
-        dirty: git_dirty(),
         protocol_version: ProtocolVersion::current() as u32,
         supported_protocol_versions: ProtocolVersion::supported_versions_u32().to_vec(),
         db_schema_version: u32::from(DatabaseVersion::CURRENT),

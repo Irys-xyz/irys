@@ -369,8 +369,6 @@ fn assert_gossip_node_info_roundtrip(roundtrip: irys_types::version::NodeInfo) {
         roundtrip.cumulative_difficulty,
         canonical.cumulative_difficulty
     );
-    assert_eq!(roundtrip.git_sha, None);
-    assert!(!roundtrip.dirty);
     assert_eq!(roundtrip.protocol_version, 0);
     assert!(roundtrip.supported_protocol_versions.is_empty());
     assert_eq!(roundtrip.db_schema_version, 0);

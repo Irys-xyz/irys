@@ -478,12 +478,6 @@ pub struct NodeInfo {
     // #[serde(with = "address_base58_stringify")]
     pub mining_address: IrysAddress,
     pub cumulative_difficulty: U256,
-    /// Short git SHA if known. `null` only when truly unknown (tagged
-    /// clean builds still expose SHA when [`crate::init_version`] recorded it).
-    #[serde(default)]
-    pub git_sha: Option<String>,
-    #[serde(default)]
-    pub dirty: bool,
     #[serde(default)]
     pub protocol_version: u32,
     #[serde(default)]
@@ -504,8 +498,6 @@ mod node_info_tests {
         let mut value = serde_json::to_value(NodeInfo::default()).unwrap();
         let object = value.as_object_mut().unwrap();
         for key in [
-            "gitSha",
-            "dirty",
             "protocolVersion",
             "supportedProtocolVersions",
             "dbSchemaVersion",
@@ -514,8 +506,6 @@ mod node_info_tests {
             object.remove(key);
         }
         let info: NodeInfo = serde_json::from_value(value).expect("legacy NodeInfo");
-        assert_eq!(info.git_sha, None);
-        assert!(!info.dirty);
         assert_eq!(info.protocol_version, 0);
         assert!(info.supported_protocol_versions.is_empty());
         assert_eq!(info.db_schema_version, 0);
@@ -526,8 +516,6 @@ mod node_info_tests {
     fn node_info_encodes_new_fields() {
         let info = NodeInfo {
             version: "4.0.6+irys-rs.6cbc03b".into(),
-            git_sha: Some("6cbc03b".into()),
-            dirty: false,
             protocol_version: 2,
             supported_protocol_versions: vec![1, 2],
             db_schema_version: 3,
@@ -535,8 +523,6 @@ mod node_info_tests {
             ..Default::default()
         };
         let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["gitSha"], "6cbc03b");
-        assert_eq!(json["dirty"], false);
         assert_eq!(json["protocolVersion"], 2);
         assert_eq!(json["supportedProtocolVersions"], serde_json::json!([1, 2]));
         assert_eq!(json["dbSchemaVersion"], 3);
@@ -815,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_info_serde_roundtrip() -> eyre::Result<()> {
-        let canonical_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123","gitSha":"abc1234","dirty":false,"protocolVersion":2,"supportedProtocolVersions":[1,2],"dbSchemaVersion":3,"consensusConfigHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD"}"#;
+        let canonical_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123","protocolVersion":2,"supportedProtocolVersions":[1,2],"dbSchemaVersion":3,"consensusConfigHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD"}"#;
         let node_info: NodeInfo = serde_json::from_str(canonical_json)?;
         assert_eq!(node_info.chain_id, 12345);
         assert_eq!(node_info.height, 67890);
