@@ -12,8 +12,6 @@
 //! applies [`upgrade_data_root_keyed_schema`]: no data rows stamps
 //! [`SUBMODULE_SCHEMA`], data rows refuse the open. Open does not return
 //! until the row is current, so a caller never reads a half-migrated index.
-//! The startup converter sets `keep_data_root_keys` and stops at schema v2:
-//! it has the chain geometry and writes the commitment keys into RocksDB.
 //! Before the copy, `mdbx_env_warmup` loads the open environment's pages and
 //! pins them when the process memlock budget has room. The pin is released
 //! when the migration returns.
@@ -117,13 +115,6 @@ pub struct SubmoduleMigrationOptions {
     /// Minimum gap between progress lines. The default is 15 seconds.
     /// A test can set a shorter gap.
     pub progress_log_interval: Duration,
-    /// Leave a finished migration on [`SUBMODULE_SCHEMA_DATA_ROOT_KEYS`].
-    ///
-    /// The node open upgrades an empty index and refuses one that has data
-    /// rows. The startup converter sets this so it can read those rows and
-    /// write commitment keys into RocksDB. It has the chain geometry. The
-    /// in-place upgrade does not.
-    pub keep_data_root_keys: bool,
 }
 
 impl Default for SubmoduleMigrationOptions {
@@ -133,13 +124,8 @@ impl Default for SubmoduleMigrationOptions {
             batch_rows: DEFAULT_BATCH_ROWS,
             batch_value_bytes: DEFAULT_BATCH_VALUE_BYTES,
             progress_log_interval: PROGRESS_LOG_INTERVAL,
-            keep_data_root_keys: false,
         }
     }
-}
-
-fn stop_at_data_root_keys(options: &SubmoduleMigrationOptions) -> bool {
-    keeps_data_root_keys() || options.keep_data_root_keys
 }
 
 /// Refuse a path whose name does not mark it as a copy.
@@ -187,7 +173,7 @@ pub(super) fn ensure_mdbx_schema(
 
     let stats = match classify(&row) {
         SchemaRow::DataRootKeys => {
-            let detected = if stop_at_data_root_keys(options) {
+            let detected = if keeps_data_root_keys() {
                 DetectedSubmoduleSchema::V2
             } else {
                 upgrade_data_root_keyed_schema(env, path)?;
@@ -249,7 +235,7 @@ pub(super) fn ensure_mdbx_schema(
                 },
                 started,
             )?;
-            if !stop_at_data_root_keys(options) {
+            if !keeps_data_root_keys() {
                 upgrade_data_root_keyed_schema(env, path)?;
             }
             stats
@@ -262,7 +248,7 @@ pub(super) fn ensure_mdbx_schema(
                 legacy_rows: legacy_rows.saturating_add(progress.deleted),
             };
             let stats = run_migration(env, path, options, progress, totals, started)?;
-            if !stop_at_data_root_keys(options) {
+            if !keeps_data_root_keys() {
                 upgrade_data_root_keyed_schema(env, path)?;
             }
             stats
@@ -1336,7 +1322,6 @@ mod tests {
             batch_rows,
             batch_value_bytes: 8 * 1024 * 1024,
             progress_log_interval: super::PROGRESS_LOG_INTERVAL,
-            keep_data_root_keys: false,
         }
     }
 

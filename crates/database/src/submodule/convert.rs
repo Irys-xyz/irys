@@ -618,8 +618,10 @@ pub fn convert_mdbx_to_rocks_and_verify(
 /// there is no ledger to derive a tx path from.
 ///
 /// An earlier release can leave a schema v1 index part way through its in-place
-/// v1 to v2 migration. That migration is finished first, because the converter
-/// refuses a source in that state. Any other source is read without change.
+/// v1 to v2 migration, or a finished index still keyed by the data root.
+/// Startup opens that directory the way the node does. An empty index is
+/// upgraded. Data rows are refused: the network must reset. Any other source
+/// is read without change.
 ///
 /// A placement that the consensus database does not cover fails the run, as
 /// does any verify mismatch. The target then has no completed index.
@@ -667,7 +669,11 @@ pub fn convert_mdbx_to_rocks_at_startup(
     Ok((stats, report))
 }
 
-/// The v1 to v2 migration resumes on open. A finished index is left as is.
+/// A progress row or a data-root-keyed schema goes through the node open.
+///
+/// An empty index is stamped with the commitment-key schema. Data rows
+/// refuse the open: they stay keyed by the data root, so the network must
+/// reset. Every other schema is left for [`open_mdbx_source`].
 // MDBX-SUBMODULE-INDEX: delete this helper with the startup migration.
 fn finish_interrupted_v1_migration(mdbx_dir: &Path, options: &ConvertOptions) -> eyre::Result<()> {
     let schema = {
@@ -677,22 +683,21 @@ fn finish_interrupted_v1_migration(mdbx_dir: &Path, options: &ConvertOptions) ->
         )?;
         env.view_eyre(read_schema_bytes)?
     };
-    if !schema.is_some_and(|bytes| bytes.starts_with(migrate::PROGRESS_PREFIX.as_bytes())) {
+    let needs_open = schema.as_deref().is_some_and(|bytes| {
+        bytes.starts_with(migrate::PROGRESS_PREFIX.as_bytes())
+            || bytes == SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes()
+    });
+    if !needs_open {
         return Ok(());
     }
     tracing::info!(
         path = %mdbx_dir.display(),
-        "finishing an interrupted v1 to v2 migration before the RocksDB conversion"
+        "opening the MDBX index before the RocksDB conversion"
     );
     let (env, _) = super::db::open_submodule_index(
         mdbx_dir,
         options.mdbx.clone(),
-        migrate::SubmoduleMigrationOptions {
-            // Schema v2 keys infos by the data root. The copy below derives
-            // the commitment. The in-place upgrade would refuse these rows.
-            keep_data_root_keys: true,
-            ..migrate::SubmoduleMigrationOptions::default()
-        },
+        migrate::SubmoduleMigrationOptions::default(),
     )?;
     drop(env);
     Ok(())
@@ -1551,9 +1556,7 @@ fn prepare_v2_placement<S: SubmoduleStore>(
         let stored = tx.get_full_tx_path(interval.tx_path_hash)?;
         let binding = tx.get_tx_leaf_binding(interval.tx_path_hash)?;
         let infos = match &binding {
-            Some(binding) => {
-                infos_by_commitment_or_root(tx, binding.data_commitment, binding.data_root)?
-            }
+            Some(binding) => tx.get_data_root_infos_for_commitment(binding.data_commitment)?,
             None => None,
         };
         Ok((stored, binding, infos))
@@ -1572,42 +1575,27 @@ fn prepare_v2_placement<S: SubmoduleStore>(
             path_hash: interval.tx_path_hash,
             binding,
         },
-        |root, data_commitment| {
+        |_root, data_commitment| {
             if bound_commitment == Some(data_commitment) {
                 return Ok(infos.take().map(|infos| infos.0).unwrap_or_default());
             }
-            stored_infos_for(src, data_commitment, root)
+            stored_infos_for(src, data_commitment)
         },
     )
 }
 
 /// The stored infos for `data_commitment`. No row is an error: a placement
 /// must not be written under a commitment that has no stored infos.
-///
-/// A schema v2 source still keys the row by the data root. `data_root` is
-/// that second key. Schema 3 hits the commitment and does not read it.
 fn stored_infos_for<S: SubmoduleStore>(
     src: &S,
     data_commitment: DataCommitment,
-    data_root: H256,
 ) -> eyre::Result<Vec<DataRootInfo>> {
-    let infos = src.view(|tx| infos_by_commitment_or_root(tx, data_commitment, data_root))?;
+    let infos = src.view(|tx| tx.get_data_root_infos_for_commitment(data_commitment))?;
     infos.map(|DataRootInfos(infos)| infos).ok_or_else(|| {
         eyre::eyre!(
             "no tx leaf binding and no data-root info for data commitment {data_commitment}"
         )
     })
-}
-
-fn infos_by_commitment_or_root(
-    tx: &dyn super::store::SubmoduleRead,
-    data_commitment: DataCommitment,
-    data_root: H256,
-) -> eyre::Result<Option<DataRootInfos>> {
-    if let Some(infos) = tx.get_data_root_infos_for_commitment(data_commitment)? {
-        return Ok(Some(infos));
-    }
-    tx.get_data_root_infos_for_commitment(DataCommitment(data_root))
 }
 
 /// One RocksDB placement per tx inside a stored interval.
@@ -2218,12 +2206,8 @@ fn compare_one_placement<S: SubmoduleStore>(
         .as_ref()
         .map(|item| item.data_commitment)
         .unwrap_or(place.data_commitment);
-    let info_root = binding
-        .as_ref()
-        .map(|item| item.data_root)
-        .unwrap_or(place.data_tree_root.0);
     let infos = v2
-        .view(|tx| infos_by_commitment_or_root(tx, info_key, info_root))?
+        .view(|tx| tx.get_data_root_infos_for_commitment(info_key))?
         .map(|infos| infos.0)
         .unwrap_or_default();
     let segments = tx_segments(interval.start, interval.end, &infos);
@@ -2449,14 +2433,11 @@ fn verify_markers<S: SubmoduleStore>(
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     note_reset(report, v2.reset_in_progress()? != v3.reset_in_progress()?);
-    // Schema 3 keys the source by the commitment. A finished v1 migration
-    // stops at schema 2, which still keys infos by the data root. The copy
-    // derives the commitment, so both rows are a valid source.
+    // Only a commitment-keyed source is valid. A data-root-keyed row is
+    // refused before the copy.
     let source_ok = matches!(
         v2_schema.as_deref(),
-        Some(schema)
-            if schema == SUBMODULE_SCHEMA.as_bytes()
-                || schema == SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes()
+        Some(schema) if schema == SUBMODULE_SCHEMA.as_bytes()
     );
     let schema_ok =
         source_ok && v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
@@ -2964,11 +2945,13 @@ fn open_mdbx_source(path: &Path, args: DatabaseArguments) -> eyre::Result<Opened
                 path.display()
             )
         }
-        // Schema v2 still keys infos by the data root. The copy derives the
-        // commitment from the chain. The node open refuses this row when it
-        // has data: that open has no geometry and cannot re-key in place.
+        // Keys data by the data root. Startup upgrades an empty index before
+        // this open. The CLI has no upgrade step, so this row is refused.
         Some(schema) if schema == SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes() => {
-            Ok(OpenedMdbx::V2(MdbxSubmoduleStore::from_env(env, false)))
+            eyre::bail!(
+                "MDBX index {} keys data by the data root. This build keys data by the data commitment. The network must reset: reset this storage module",
+                path.display()
+            )
         }
         Some(schema) if schema.starts_with(migrate::PROGRESS_PREFIX.as_bytes()) => {
             eyre::bail!(
@@ -7607,10 +7590,11 @@ mod tests {
     }
 
     /// An earlier release stopped part way through the in-place v1 to v2
-    /// migration. The converter refuses that source, so startup finishes the
-    /// migration first and then converts.
+    /// migration. Those rows are keyed by the data root. Startup opens the
+    /// index the way the node does and refuses it. The network must reset.
+    /// The CLI still refuses the progress row and does not finish it.
     #[test]
-    fn startup_convert_finishes_an_interrupted_v1_migration() -> eyre::Result<()> {
+    fn startup_convert_refuses_an_interrupted_v1_migration_with_data_rows() -> eyre::Result<()> {
         use super::super::migrate::{PROGRESS_PREFIX, SubmoduleMigrationOptions};
         use super::super::tables::SubmoduleTables;
         use crate::submodule::db::read_schema_bytes;
@@ -7620,7 +7604,7 @@ mod tests {
         write_chain(&consensus)?;
         let mdbx = root.path().join("db");
         let rocks = root.path().join("rocks");
-        write_v1_source(&mdbx, &consensus, b"v1-data", true)?;
+        write_master_era_v1_rows(&mdbx)?;
         let interrupt = SubmoduleMigrationOptions {
             fail_after_commits: Some(1),
             batch_rows: 1,
@@ -7639,14 +7623,52 @@ mod tests {
         );
 
         let options = options_for(&consensus)?;
-        let err =
-            convert_mdbx_to_rocks(&mdbx, &root.path().join("cli-rocks"), &options).unwrap_err();
+        let cli_rocks = root.path().join("cli-rocks");
+        let err = convert_mdbx_to_rocks(&mdbx, &cli_rocks, &options).unwrap_err();
         assert!(
             format!("{err:#}").contains("in-progress v1 migration"),
             "{err:#}"
         );
+        assert!(!cli_rocks.exists(), "the CLI must not create a target");
 
         let db = open_consensus(&consensus)?;
+        let err = convert_mdbx_to_rocks_at_startup(
+            &mdbx,
+            &rocks,
+            &options,
+            &db,
+            Some((options.ledger_id, options.slot_index)),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("network must reset"), "{err:#}");
+        assert!(!rocks.exists(), "a refused source must not create rocks/");
+        assert!(mdbx.join("mdbx.dat").is_file(), "db/ must be kept");
+        Ok(())
+    }
+
+    /// An empty index keyed by the data root has no rows to re-key. Startup
+    /// stamps schema 3 and converts. The CLI still refuses that schema row.
+    #[test]
+    fn startup_convert_upgrades_an_empty_data_root_keyed_index() -> eyre::Result<()> {
+        use super::super::tables::{SUBMODULE_SCHEMA, SubmoduleTables};
+        use crate::submodule::db::read_schema_bytes;
+
+        let root = temp("startup-empty-schema-2");
+        let consensus = root.path().join("consensus");
+        write_chain(&consensus)?;
+        let mdbx = root.path().join("db");
+        write_empty_data_root_keyed_index(&mdbx)?;
+        let options = options_for(&consensus)?;
+        let cli_rocks = root.path().join("cli-rocks");
+        let err = convert_mdbx_to_rocks(&mdbx, &cli_rocks, &options).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reset this storage module"),
+            "{err:#}"
+        );
+        assert!(!cli_rocks.exists(), "the CLI must not create a target");
+
+        let db = open_consensus(&consensus)?;
+        let rocks = root.path().join("rocks");
         let (stats, report) = convert_mdbx_to_rocks_at_startup(
             &mdbx,
             &rocks,
@@ -7654,13 +7676,58 @@ mod tests {
             &db,
             Some((options.ledger_id, options.slot_index)),
         )?;
-        assert!(
-            !stats.source_v1,
-            "the source must be v2 after the migration finished"
-        );
-        assert_eq!(stats.intervals, 1);
+        assert_eq!(stats.intervals, 0);
         assert!(!report.has_mismatch(), "{report}");
         assert!(rocks.join("SCHEMA").is_file());
+        let schema = {
+            let env = open_or_create_db(&mdbx, SubmoduleTables::ALL, testing_args()?)?;
+            env.view_eyre(read_schema_bytes)?
+        };
+        assert_eq!(schema.as_deref(), Some(SUBMODULE_SCHEMA.as_bytes()));
+        Ok(())
+    }
+
+    /// Path-hash, data-path, and tx-path rows only. A master-era index does
+    /// not store `data_commitment` or `data_tree_root` on these tables.
+    fn write_master_era_v1_rows(mdbx: &Path) -> eyre::Result<()> {
+        use crate::submodule::tables::v1_fixture::master;
+        use reth_db::Database as _;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let data = b"v1-data";
+        let data_hash = H256::from(hash_sha256(data));
+        let path_hash = H256::repeat_byte(4);
+        let db = open_or_create_db(mdbx, master::MasterV1Tables::ALL, testing_args()?)?;
+        let tx = db.tx_mut()?;
+        tx.put::<master::ChunkPathHashesByOffset>(
+            PartitionChunkOffset(0),
+            ChunkPathHashes {
+                data_path_hash: Some(data_hash),
+                tx_path_hash: Some(path_hash),
+            },
+        )?;
+        tx.put::<master::ChunkDataPathByPathHash>(data_hash, data.to_vec())?;
+        tx.put::<master::TxPathByTxPathHash>(path_hash, b"master-era-path".to_vec())?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Schema row `irys-submodule-index 2` and no data rows.
+    fn write_empty_data_root_keyed_index(mdbx: &Path) -> eyre::Result<()> {
+        use crate::metadata::MetadataKey;
+        use crate::submodule::tables::{
+            Metadata, SUBMODULE_SCHEMA_DATA_ROOT_KEYS, SubmoduleTables,
+        };
+        use reth_db::Database as _;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let db = open_or_create_db(mdbx, SubmoduleTables::ALL, testing_args()?)?;
+        let tx = db.tx_mut()?;
+        tx.put::<Metadata>(
+            MetadataKey::DBSchemaVersion,
+            SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes().to_vec(),
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
