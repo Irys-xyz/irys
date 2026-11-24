@@ -3502,8 +3502,8 @@ impl StorageModule {
                 .map_err(|_| eyre::eyre!("partition-relative chunk offset exceeds u32"))?;
             let offset = PartitionChunkOffset::from(relative_offset);
             if self
-                .interval_data_root_at(offset)?
-                .is_none_or(|root| root == info.data_tree_root.0)
+                .interval_data_commitment_at(offset)?
+                .is_none_or(|commitment| commitment == data_commitment)
             {
                 offsets.push(offset);
             }
@@ -3514,11 +3514,25 @@ impl StorageModule {
     }
 
     /// A missing interval is a placement hole; a foreign interval owns the offset.
+    #[cfg(test)]
     fn interval_data_root_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
         let (_, submodule) = self.get_submodule_for_offset(offset)?;
         submodule.db.view(|tx| {
             tx.tx_interval_at(offset)?
                 .map(|interval| tx.interval_data_root(&interval))
+                .transpose()
+        })
+    }
+
+    /// Commitment of the live interval at `offset`. `None` is a placement hole.
+    fn interval_data_commitment_at(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<DataCommitment>> {
+        let (_, submodule) = self.get_submodule_for_offset(offset)?;
+        submodule.db.view(|tx| {
+            tx.tx_interval_at(offset)?
+                .map(|interval| tx.interval_data_commitment(&interval))
                 .transpose()
         })
     }
@@ -3652,9 +3666,7 @@ impl StorageModule {
     ) -> eyre::Result<bool> {
         let infos = self.collect_data_root_infos(data_commitment)?;
         for info in &infos.0 {
-            if info.data_size == data_size
-                && self.is_placement_persisted(info.data_tree_root.0, info)?
-            {
+            if info.data_size == data_size && self.is_placement_persisted(data_commitment, info)? {
                 return Ok(true);
             }
         }
@@ -3664,7 +3676,11 @@ impl StorageModule {
     /// True when `info` lies entirely inside this partition and every chunk
     /// of its `data_size` is persisted `Data`. A placement that starts before
     /// the partition or runs past its end is not a full copy here.
-    fn is_placement_persisted(&self, data_root: H256, info: &DataRootInfo) -> eyre::Result<bool> {
+    fn is_placement_persisted(
+        &self,
+        data_commitment: DataCommitment,
+        info: &DataRootInfo,
+    ) -> eyre::Result<bool> {
         let chunk_size = self.config.consensus.chunk_size;
         if chunk_size == 0 || info.data_size == 0 {
             return Ok(false);
@@ -3694,7 +3710,9 @@ impl StorageModule {
                     range.start().max(span.start()),
                     range.end().min(span.end()),
                 )? {
-                    if u64::from(row.start.0) > next || tx.interval_data_root(&row)? != data_root {
+                    if u64::from(row.start.0) > next
+                        || tx.interval_data_commitment(&row)? != data_commitment
+                    {
                         return Ok(None);
                     }
                     next = u64::from(row.end.0.min(end)) + 1;
@@ -3815,7 +3833,7 @@ impl StorageModule {
                             for row in tx.tx_intervals_in_range(start, end)? {
                                 owners.insert(
                                     row.start.max(start),
-                                    (row.end.min(end), tx.interval_data_root(&row)?),
+                                    (row.end.min(end), tx.interval_data_commitment(&row)?),
                                 );
                             }
                             Ok(())
@@ -3846,8 +3864,8 @@ impl StorageModule {
                     .range(..=offset)
                     .next_back()
                     .filter(|(_, (end, _))| offset <= *end)
-                    .map(|(_, (_, root))| *root);
-                if owner.is_some_and(|root| root != info.data_tree_root.0) {
+                    .map(|(_, (_, commitment))| *commitment);
+                if owner.is_some_and(|commitment| commitment != data_commitment) {
                     continue;
                 }
                 status.placed.insert(*tx_offset);
@@ -8363,7 +8381,7 @@ impl StorageModule {
                     },
                 )?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
-                    // Only the same root may replay live coverage. Data paths stay.
+                    // Only the same commitment may replay live coverage. Data paths stay.
                     tx.add_tx_path_hash_to_offset_range(
                         range.start(),
                         range.end(),
@@ -12091,25 +12109,25 @@ mod tests {
         }
         storage.force_sync_pending_chunks()?;
 
-        assert!(storage.is_placement_persisted(data_root, &placement(0, 64))?);
+        assert!(storage.is_placement_persisted(data_commitment, &placement(0, 64))?);
         assert!(
-            storage.is_placement_persisted(data_root, &placement(0, 40))?,
+            storage.is_placement_persisted(data_commitment, &placement(0, 40))?,
             "a partial last chunk still needs only two chunks"
         );
-        assert!(storage.is_placement_persisted(data_root, &placement(1, 32))?);
+        assert!(storage.is_placement_persisted(data_commitment, &placement(1, 32))?);
         assert!(
-            !storage.is_placement_persisted(data_root, &placement(0, 65))?,
+            !storage.is_placement_persisted(data_commitment, &placement(0, 65))?,
             "a third chunk is needed"
         );
         assert!(
-            !storage.is_placement_persisted(data_root, &placement(-1, 96))?,
+            !storage.is_placement_persisted(data_commitment, &placement(-1, 96))?,
             "starts before the partition"
         );
         assert!(
-            !storage.is_placement_persisted(data_root, &placement(6, 96))?,
+            !storage.is_placement_persisted(data_commitment, &placement(6, 96))?,
             "runs past the partition end"
         );
-        assert!(!storage.is_placement_persisted(data_root, &placement(0, 0))?);
+        assert!(!storage.is_placement_persisted(data_commitment, &placement(0, 0))?);
 
         assert_eq!(storage.collect_data_root_infos(data_commitment)?.0.len(), 2);
         assert!(

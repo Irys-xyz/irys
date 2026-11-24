@@ -4697,19 +4697,19 @@ impl<'a> Batch<'a> {
                         "RocksDB v1 interval requires a tx leaf binding in this batch before the interval is written"
                     )
                 })?;
-                // Live coverage can only be replayed by its owning data tree root.
-                // Two sizes of one root share that root and may replay the span.
+                // Two sizes of one root are two commitments. Only the commitment
+                // that owns the span may replay it.
                 for row in &existing {
                     if row.start <= end.0
                         && row.value.end >= start.0
-                        && row.value.data_root != binding.data_root.0
+                        && row.value.data_commitment != binding.data_commitment.0.0
                     {
-                        let existing_root = H256(row.value.data_root);
-                        tracing::error!(%start, %end, %existing_root, incoming_root = %binding.data_root,
-                            "refusing placement over a different data root");
+                        let existing = DataCommitment(H256(row.value.data_commitment));
+                        tracing::error!(%start, %end, %existing, incoming = %binding.data_commitment,
+                            "refusing placement over a different data commitment");
                         eyre::bail!(
-                            "placement [{start}, {end}] for {} overlaps live root {existing_root}",
-                            binding.data_root
+                            "placement [{start}, {end}] for {} overlaps live commitment {existing}",
+                            binding.data_commitment
                         );
                     }
                 }
@@ -6231,6 +6231,17 @@ impl SubmoduleRead for Rows<'_> {
         Ok(interval.tx_path_hash)
     }
 
+    fn interval_data_commitment(&self, interval: &IntervalRow) -> eyre::Result<DataCommitment> {
+        // The interval row keeps the tree root in `tx_path_hash`. The
+        // commitment is on the placement record at the interval start.
+        let key = encode_key(interval.start);
+        let Some(bytes) = self.get_raw(Cf::Interval, &key)? else {
+            eyre::bail!("live interval has no placement record");
+        };
+        let record = records::decode_placement(&bytes)?;
+        Ok(DataCommitment(H256(record.data_commitment)))
+    }
+
     fn tx_intervals_in_range(
         &self,
         start: PartitionChunkOffset,
@@ -6294,6 +6305,7 @@ macro_rules! impl_batch_read {
 impl_batch_read! {
     stores_tx_paths() -> bool;
     interval_data_root(interval: &IntervalRow) -> eyre::Result<H256>;
+    interval_data_commitment(interval: &IntervalRow) -> eyre::Result<DataCommitment>;
     stores_offset_crc() -> bool;
     get_data_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkDataPath>>;
     get_offset_meta(offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>>;

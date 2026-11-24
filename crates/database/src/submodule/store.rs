@@ -166,6 +166,16 @@ pub trait SubmoduleRead {
             .ok_or_else(|| eyre::eyre!("live interval has no data-root binding"))
     }
 
+    /// Commitment owning a live interval.
+    ///
+    /// Two sizes of one root are two commitments. Replay is allowed only for
+    /// the commitment that already owns the span.
+    fn interval_data_commitment(&self, interval: &IntervalRow) -> eyre::Result<DataCommitment> {
+        self.get_tx_leaf_binding(interval.tx_path_hash)?
+            .map(|binding| binding.data_commitment)
+            .ok_or_else(|| eyre::eyre!("live interval has no data-root binding"))
+    }
+
     /// Intervals that overlap the inclusive span `[start, end]`.
     ///
     /// A row that only touches a neighbor is not returned.
@@ -2260,7 +2270,10 @@ mod tests {
             let err = store
                 .update(|tx| index_tx_span(tx, foreign, 2, 4))
                 .unwrap_err();
-            assert!(err.to_string().contains("overlaps live root"), "{err}");
+            assert!(
+                err.to_string().contains("overlaps live commitment"),
+                "{err}"
+            );
             assert_eq!(
                 store
                     .view(|tx| tx
@@ -2309,6 +2322,56 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    /// Two sizes of one root are two commitments. An overlapping span is
+    /// refused until the live span is cleared. The same commitment may replay it.
+    #[test]
+    fn placement_registration_refuses_another_size_of_the_same_root() -> eyre::Result<()> {
+        use irys_types::data_tree::Geometry;
+        each_engine("placement_size_guard", |store| {
+            let root = H256::repeat_byte(9);
+            let small =
+                irys_types::data_tree::data_commitment(&Geometry::TESTING, DataTreeRoot(root), 32);
+            let large =
+                irys_types::data_tree::data_commitment(&Geometry::TESTING, DataTreeRoot(root), 64);
+            assert_ne!(small.0, root);
+            assert_ne!(small, large);
+            store.update(|tx| place_sized_span(tx, H256::repeat_byte(1), root, small, 1, 3))?;
+            let err = store
+                .update(|tx| place_sized_span(tx, H256::repeat_byte(2), root, large, 2, 4))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("overlaps live commitment"),
+                "{err}"
+            );
+            store.update(|tx| place_sized_span(tx, H256::repeat_byte(3), root, small, 2, 2))?;
+            Ok(())
+        })
+    }
+
+    fn place_sized_span(
+        tx: &mut dyn SubmoduleWrite,
+        path: H256,
+        root: H256,
+        commitment: DataCommitment,
+        start: u32,
+        end: u32,
+    ) -> eyre::Result<()> {
+        tx.add_full_tx_path(path, vec![path.0[0]])?;
+        tx.add_tx_leaf_binding(
+            path,
+            &TxLeafBinding {
+                data_root: root,
+                prefix_hash: path,
+                data_commitment: commitment,
+            },
+        )?;
+        tx.add_tx_path_hash_to_offset_range(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+            Some(path),
+        )
     }
 
     #[test]

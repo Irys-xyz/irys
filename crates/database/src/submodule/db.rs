@@ -875,18 +875,17 @@ fn assign_tx_interval<T: DbTxMut + DbTx>(
             if row.start > end || row.end < start || row.tx_path_hash == hash {
                 continue;
             }
-            let incoming_root = get_tx_leaf_binding(tx, hash)?
+            let incoming = get_tx_leaf_binding(tx, hash)?
                 .ok_or_else(|| eyre::eyre!("incoming interval has no data-root binding"))?
-                .data_root;
-            let existing_root = get_tx_leaf_binding(tx, row.tx_path_hash)?
+                .data_commitment;
+            let existing = get_tx_leaf_binding(tx, row.tx_path_hash)?
                 .ok_or_else(|| eyre::eyre!("live interval has no data-root binding"))?
-                .data_root;
-            // Different paths may replay the same root, but cannot replace another root.
-            if incoming_root != existing_root {
-                tracing::error!(%start, %end, %existing_root, %incoming_root,
-                    "refusing placement over a different data root");
+                .data_commitment;
+            if incoming != existing {
+                tracing::error!(%start, %end, %existing, %incoming,
+                    "refusing placement over a different data commitment");
                 eyre::bail!(
-                    "placement [{start}, {end}] for {incoming_root} overlaps live root {existing_root}"
+                    "placement [{start}, {end}] for {incoming} overlaps live commitment {existing}"
                 );
             }
         }
