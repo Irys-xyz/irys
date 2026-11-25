@@ -3,6 +3,7 @@ pub mod block_tree;
 pub mod chain_sync_state;
 pub mod chunk_provider;
 pub mod circular_buffer;
+pub mod drive_verdict;
 pub mod execution_payload_cache;
 pub mod forkchoice_markers;
 mod index_read_metrics;
