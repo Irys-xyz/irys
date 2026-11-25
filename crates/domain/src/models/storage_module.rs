@@ -2549,15 +2549,24 @@ impl StorageModule {
             params.assigned_height = None;
             params.write_to_disk(&path)?;
         }
+        // The service judges this drive from this in-memory copy. A read
+        // error leaves none: the drive is then left untouched at every epoch,
+        // which the operator must see.
         let initial_recorded = storage_module_info.submodules.first().and_then(|(_, dir)| {
-            PackingParams::from_toml(
-                config
-                    .node_config
-                    .base_directory
-                    .join(dir)
-                    .join(PACKING_PARAMS_FILE_NAME),
-            )
-            .ok()
+            let path = config
+                .node_config
+                .base_directory
+                .join(dir)
+                .join(PACKING_PARAMS_FILE_NAME);
+            PackingParams::from_toml(&path)
+                .inspect_err(|err| {
+                    error!(
+                        storage_module.id = storage_module_info.id,
+                        storage_module.path = %path.display(),
+                        "packing params could not be read back at open; the drive is left untouched until restart: {err:#}"
+                    );
+                })
+                .ok()
         });
 
         // Attempt to load a global set of intervals from the submodules
@@ -3345,6 +3354,13 @@ impl StorageModule {
     /// `true` while `reset` has not finished in this process.
     pub fn reset_incomplete(&self) -> bool {
         self.reset_incomplete.load(Ordering::SeqCst)
+    }
+
+    /// Forget the in-memory copy of `packing_params.toml`, as when open
+    /// could not read the file back after its rebind.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn forget_recorded_params_for_test(&self) {
+        *self.recorded_params.write().unwrap() = None;
     }
 
     /// The next `reset` returns an error before it writes.

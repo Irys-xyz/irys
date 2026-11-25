@@ -2918,6 +2918,18 @@ impl IrysNode {
             u64::from(config.consensus.block_migration_depth),
         );
         let epoch_is_final = epoch_snapshot.epoch_height <= finalized;
+        // A release, ledger exit or v2 stamp waits until its epoch is final.
+        // With an epoch no longer than the block tree, the next epoch can
+        // arrive first and replace the waiting update, so it never applies.
+        let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        let block_tree_depth = config.consensus.block_tree_depth;
+        if num_blocks_in_epoch <= block_tree_depth {
+            warn!(
+                consensus.num_blocks_in_epoch = num_blocks_in_epoch,
+                consensus.block_tree_depth = block_tree_depth,
+                "num_blocks_in_epoch <= block_tree_depth: drive releases, ledger exits and v2 stamps wait for their epoch to be final and may stay parked indefinitely"
+            );
+        }
 
         let miner = config.node_config.miner_address();
         let assignments = epoch_snapshot.get_partition_assignments(miner);

@@ -1931,9 +1931,9 @@ impl BlockTreeServiceInner {
 
     /// Send this miner's assignments from `epoch_snapshot` to the storage
     /// module service, which decides what each drive holds. The verdict is
-    /// judged on the snapshot's epoch height; `update_height` is the highest
-    /// epoch height whose local writes this update supersedes (the orphaned
-    /// epoch height after a reorg that orphaned the only epoch block).
+    /// judged on the snapshot's epoch height; `update_height` is only logged
+    /// (the orphaned epoch height after a reorg that orphaned the only epoch
+    /// block).
     fn send_partition_assignments(
         &self,
         epoch_snapshot: &EpochSnapshot,

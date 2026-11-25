@@ -54,14 +54,16 @@ pub enum StorageModuleServiceMessage {
         /// the block index holds this block at `epoch_height`: an update from
         /// a branch that was reorged out has the same height but another hash.
         epoch_block_hash: H256,
-        /// The highest epoch height whose local writes this update supersedes.
-        /// This is the epoch block height, except after a reorg that orphans the
-        /// only epoch block: then it is the orphaned epoch height, and the
-        /// assignments come from the new tip's epoch snapshot.
+        /// Informational, for logs only: the height of the event that sent
+        /// this update. This is the epoch block height, except after a reorg
+        /// that orphans the only epoch block: then it is the orphaned epoch
+        /// height, and the assignments come from the new tip's epoch
+        /// snapshot. Nothing is decided or written from it.
         update_height: u64,
         /// The node was in sync with the network head when the epoch was
-        /// processed. Only then is a v1 packing file of a drive that is ours
-        /// rewritten as v2.
+        /// processed. Only then, and once the epoch is final, is the packing
+        /// file of a drive that is ours stamped as v2 (a v1 file, another
+        /// genesis, or no trusted assigned height).
         in_sync: bool,
     },
     /// Rollback marked this span `Uninitialized` and the packing channel did
@@ -95,8 +97,8 @@ pub struct StorageModuleServiceInner {
     /// Assignment update whose reset did not finish. The next tick retries it.
     pending_assignment: Option<StorageModuleServiceMessage>,
     /// Last assignment update while a drive waits for its epoch to become
-    /// final (a ledger exit or a release). `tick` applies it again once the
-    /// epoch is at or below the finalized height.
+    /// final (a ledger exit, a release, or a v2 stamp). `tick` applies it
+    /// again once the epoch is at or below the finalized height.
     awaiting_finality: Option<StorageModuleServiceMessage>,
     /// Configured drives that startup could not read, so did not open. They
     /// stay out of every runtime verdict but still block new placements:
@@ -493,8 +495,8 @@ impl StorageModuleServiceInner {
         if let Err(e) = self.start_partition_resize() {
             error!("finalized partition resize failed; will retry: {e:?}");
         }
-        // A drive waits for its epoch to become final (ledger exit or
-        // release). Once it is, the same update is applied again; a stored
+        // A drive waits for its epoch to become final (ledger exit, release
+        // or v2 stamp). Once it is, the same update is applied again; a stored
         // retry already does that from the run loop.
         // An update whose height became final on another branch is stale:
         // it is dropped, never applied.
@@ -761,7 +763,7 @@ impl StorageModuleServiceInner {
                 storage_module.id = id,
                 storage_module.path = %decision.path.display(),
                 drive.verdict = decision.verdict.name(),
-                drive.reason = decision.verdict.reason(),
+                drive.reason = %decision.verdict.reason(),
                 drive.action = decision.action.name(),
                 partition.hash = ?target.map(|pa| pa.partition_hash),
                 partition.ledger_id = ?target.and_then(|pa| pa.ledger_id),
@@ -771,6 +773,17 @@ impl StorageModuleServiceInner {
                 update.height = update_height,
                 "drive verdict changed"
             );
+            // A drive the service will not touch (no recorded packing params
+            // in memory, or a foreign or unreadable file) is an operator
+            // problem: an ERROR once, when the service first sees it.
+            if let Verdict::Foreign(why) = &decision.verdict {
+                error!(
+                    storage_module.id = id,
+                    storage_module.path = %decision.path.display(),
+                    drive.reason = %why,
+                    "drive is left untouched: {why}"
+                );
+            }
             self.last_decisions.insert(id, now);
         }
         let hashes: Vec<H256> = unplaced.iter().map(|a| a.partition_hash).collect();
@@ -1100,9 +1113,9 @@ impl StorageModuleServiceInner {
         &self,
         module: &Arc<StorageModule>,
         next: Option<irys_types::partition::PartitionAssignment>,
-        update_height: u64,
+        epoch_height: u64,
     ) -> eyre::Result<PartitionChunkRange> {
-        self.map_reset(module, module.reset_with_assignment(next, update_height))
+        self.map_reset(module, module.reset_with_assignment(next, epoch_height))
     }
 
     fn map_reset(
@@ -2108,9 +2121,10 @@ mod assignment_reset_tests {
         assert_full_partition_span(&request);
     }
 
-    /// Replace `packing_params.toml` with bytes `from_toml` rejects.
-    /// `validate_packing_params` skips a parse error. `reset` does not read
-    /// the file. `store_assignment` does, after the wipe.
+    /// Replace `packing_params.toml` with bytes `from_toml` rejects. The
+    /// service judges drives from the module's in-memory record, so it does
+    /// not read the file. `reset` does not read it either. `store_assignment`
+    /// does, after the wipe.
     fn corrupt_packing_params(path: &std::path::Path) -> Vec<u8> {
         let file = path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
         let saved = std::fs::read(&file).expect("packing params");
@@ -4920,6 +4934,146 @@ mod assignment_reset_tests {
         assert_eq!(params.slot, Some(0));
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// The orphaned-epoch resend shape for a ledger exit: the drive recorded
+    /// slot 1 of Publish at epoch 50, and a final snapshot at epoch 40 says
+    /// capacity. The drive's own state is newer than that epoch, so it is
+    /// parked with its bytes, labels and file intact, and the update does
+    /// not wait for finality (finality cannot make it apply).
+    #[tokio::test]
+    async fn ledger_exit_against_an_older_final_epoch_parks_the_drive() {
+        use irys_domain::storage_module::ChunkType;
+        const CANONICAL_EPOCH_HEIGHT: u64 = 40;
+        const ORPHANED_EPOCH_HEIGHT: u64 = 50;
+
+        let (mut harness, hash, miner) =
+            store_slot_one_with_data(ORPHANED_EPOCH_HEIGHT, 0xE2).await;
+        let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
+        let file_before = std::fs::read(&params_path).expect("file");
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                assignments: capacity_update(hash, miner),
+                epoch_height: CANONICAL_EPOCH_HEIGHT,
+                epoch_block_hash: epoch_hash(CANONICAL_EPOCH_HEIGHT),
+                update_height: ORPHANED_EPOCH_HEIGHT,
+                in_sync: true,
+            })
+            .await
+            .expect("orphaned-epoch resend");
+        assert_parked_on_slot_one(&harness, hash);
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
+        assert!(!harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert!(harness.receivers.packing.try_recv().is_err());
+        assert_eq!(std::fs::read(&params_path).expect("file"), file_before);
+        assert!(harness.inner.awaiting_finality.is_none());
+        assert!(harness.inner.pending_assignment.is_none());
+        assert_eq!(
+            harness
+                .inner
+                .last_decisions
+                .get(&0)
+                .map(|(v, _)| v.reason()),
+            Some("recorded state is newer than the epoch".to_owned())
+        );
+    }
+
+    /// An in-sync epoch that is not final yet does not stamp a v1 drive that
+    /// is ours: the update waits for finality, and `tick` stamps the drive
+    /// once the epoch is final, with `assigned_height` = that epoch. Bytes stay.
+    #[tokio::test]
+    async fn in_sync_stamp_waits_until_the_epoch_is_final() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
+        write_synced_data(&harness.module, 0x66);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let config = harness.inner.config.clone();
+        let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
+        set_index_tip(&harness.inner.block_index, 7);
+
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                assignments: publish_update(hash, miner),
+                epoch_height: 7,
+                epoch_block_hash: epoch_hash(7),
+                update_height: 7,
+                in_sync: true,
+            })
+            .await
+            .expect("in-sync epoch, not final");
+        assert!(
+            !PackingParams::from_toml(&params_path).expect("v1").is_v2(),
+            "an epoch that is not final does not stamp"
+        );
+        assert_eq!(
+            harness
+                .module
+                .partition_assignment()
+                .map(|a| a.partition_hash),
+            Some(hash),
+            "the drive stays ours"
+        );
+        assert!(harness.inner.awaiting_finality.is_some());
+
+        set_index_tip(&harness.inner.block_index, final_tip_for(&config, 7));
+        harness.inner.tick().await;
+        let params = PackingParams::from_toml(&params_path).expect("v2");
+        assert!(params.is_v2());
+        assert_eq!(params.assigned_height, Some(7));
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
+        assert!(harness.receivers.packing.try_recv().is_err());
+        assert!(harness.inner.awaiting_finality.is_none());
+    }
+
+    /// An open module with no in-memory packing params (open could not read
+    /// its file back) is left untouched, and that is an ERROR the first time
+    /// the service sees it, not only an INFO verdict line.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn module_without_recorded_params_is_an_error() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        harness.module.forget_recorded_params_for_test();
+        apply_update(&mut harness, publish_update(hash, miner), 5).await;
+        assert_eq!(
+            harness
+                .module
+                .partition_assignment()
+                .map(|a| a.partition_hash),
+            Some(hash),
+            "the module is not touched"
+        );
+        logs_assert(|lines: &[&str]| {
+            let n = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("ERROR") && l.contains("open module has no recorded packing params")
+                })
+                .count();
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(format!("{n} ERROR lines"))
+            }
+        });
+        apply_update(&mut harness, publish_update(hash, miner), 6).await;
+        logs_assert(|lines: &[&str]| {
+            let n = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("ERROR") && l.contains("open module has no recorded packing params")
+                })
+                .count();
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(format!("{n} ERROR lines after a second update"))
+            }
+        });
     }
 
     /// A marker wipe on a stale unassign publishes `Uninitialized` on a

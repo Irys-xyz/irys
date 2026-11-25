@@ -54,7 +54,54 @@ pub enum Verdict {
     Ours,
     Empty,
     Released,
-    Wait(String),
+    Wait(WaitReason),
+}
+
+/// Why a drive is left idle and untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitReason {
+    /// Another drive (lower id) holds the same assigned partition.
+    DuplicateHolder(H256),
+    /// The drive leaves its ledger slot at an epoch that is not final yet.
+    LedgerExitPendingFinality,
+    /// The chain released the drive's partition at an epoch that is not
+    /// final yet.
+    ReleasePendingFinality,
+    /// The drive's file records an assignment installed after the epoch it
+    /// is judged on (for example a final snapshot older than an orphaned
+    /// epoch the drive applied). Only a later epoch can change that.
+    RecordedNewerThanEpoch,
+    /// The drive is unassigned and its v2 file records no trusted assigned
+    /// height, so a release cannot be proven. A final in-sync epoch that
+    /// assigns it to this miner stamps one.
+    NoTrustedHeight,
+    /// The drive is unassigned and its file is v1 or names another chain.
+    NotProvablyReleased,
+}
+
+impl WaitReason {
+    /// A wait that the epoch becoming final lifts without a new epoch.
+    pub fn pending_finality(self) -> bool {
+        matches!(
+            self,
+            Self::LedgerExitPendingFinality | Self::ReleasePendingFinality
+        )
+    }
+}
+
+impl std::fmt::Display for WaitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateHolder(hash) => write!(f, "duplicate holder of {hash}"),
+            Self::LedgerExitPendingFinality => f.write_str("ledger exit pending finality"),
+            Self::ReleasePendingFinality => f.write_str("release pending finality"),
+            Self::RecordedNewerThanEpoch => f.write_str("recorded state is newer than the epoch"),
+            Self::NoTrustedHeight => f.write_str("no trusted assigned height"),
+            Self::NotProvablyReleased => {
+                f.write_str("unassigned, but not provably released on this chain")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +122,11 @@ pub struct DriveDecision {
     pub path: PathBuf,
     pub verdict: Verdict,
     pub action: DriveAction,
+    /// Rewrite the drive's file as v2 at this epoch (ours, in sync, final).
     pub stamp_v2: bool,
+    /// The drive would be stamped if the epoch were final (ours, in sync).
+    pub stamp_pending_finality: bool,
 }
-
-/// Reason suffix of every `Wait` that finality alone can lift.
-const PENDING_FINALITY: &str = "pending finality";
 
 impl Verdict {
     /// Lower-case name for logs.
@@ -94,10 +141,11 @@ impl Verdict {
     }
 
     /// Why a drive is Foreign or Wait; empty otherwise.
-    pub fn reason(&self) -> &str {
+    pub fn reason(&self) -> String {
         match self {
-            Self::Foreign(why) | Self::Wait(why) => why,
-            Self::Ours | Self::Empty | Self::Released => "",
+            Self::Foreign(why) => why.clone(),
+            Self::Wait(why) => why.to_string(),
+            Self::Ours | Self::Empty | Self::Released => String::new(),
         }
     }
 }
@@ -115,10 +163,12 @@ impl DriveAction {
 }
 
 impl DriveDecision {
-    /// A `Wait` that a later finalized height can turn into a wipe-causing
-    /// action (ledger exit or release) without a new epoch.
+    /// The epoch becoming final changes this decision without a new epoch:
+    /// a `Wait` that finality lifts (ledger exit or release), or a stamp
+    /// that waits for finality.
     pub fn waits_for_finality(&self) -> bool {
-        matches!(&self.verdict, Verdict::Wait(why) if why.ends_with(PENDING_FINALITY))
+        self.stamp_pending_finality
+            || matches!(self.verdict, Verdict::Wait(why) if why.pending_finality())
     }
 }
 
@@ -208,21 +258,21 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
         .iter()
         .enumerate()
         .map(|(id, (path, file))| {
-            let (verdict, action, stamp_v2) = match file {
-                DriveFile::Unreadable(e) => (
+            let c = match file {
+                DriveFile::Unreadable(e) => Classified::new(
                     Verdict::Foreign(format!("unreadable: {e}")),
                     DriveAction::Skip,
-                    false,
                 ),
-                DriveFile::Missing => (Verdict::Empty, DriveAction::Idle, false),
+                DriveFile::Missing => Classified::new(Verdict::Empty, DriveAction::Idle),
                 DriveFile::Recorded(p) => classify(inputs, id, p, &holders, &by_hash),
             };
             DriveDecision {
                 id,
                 path: path.clone(),
-                verdict,
-                action,
-                stamp_v2,
+                verdict: c.verdict,
+                action: c.action,
+                stamp_v2: c.stamp_v2,
+                stamp_pending_finality: c.stamp_pending_finality,
             }
         })
         .collect();
@@ -240,61 +290,90 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
     out
 }
 
+/// One drive's verdict, action and stamp flags.
+struct Classified {
+    verdict: Verdict,
+    action: DriveAction,
+    stamp_v2: bool,
+    stamp_pending_finality: bool,
+}
+
+impl Classified {
+    fn new(verdict: Verdict, action: DriveAction) -> Self {
+        Self {
+            verdict,
+            action,
+            stamp_v2: false,
+            stamp_pending_finality: false,
+        }
+    }
+
+    fn wait(reason: WaitReason) -> Self {
+        Self::new(Verdict::Wait(reason), DriveAction::Idle)
+    }
+}
+
 fn classify(
     inputs: &VerdictInputs<'_>,
     id: usize,
     p: &PackingParams,
     holders: &HashMap<H256, usize>,
     by_hash: &HashMap<H256, PartitionAssignment>,
-) -> (Verdict, DriveAction, bool) {
+) -> Classified {
     let ident = inputs.identity;
     if let Some(why) = is_foreign(p, ident) {
-        return (Verdict::Foreign(why), DriveAction::Skip, false);
+        return Classified::new(Verdict::Foreign(why), DriveAction::Skip);
     }
     let Some(hash) = p.partition_hash else {
-        return (Verdict::Empty, DriveAction::Idle, false);
+        return Classified::new(Verdict::Empty, DriveAction::Idle);
     };
+    // The file records an assignment installed after the epoch judged here.
+    let recorded_newer = p
+        .trusted_assigned_height()
+        .is_some_and(|h| h > inputs.epoch_height);
     if let Some(&new) = by_hash.get(&hash) {
         if holders.get(&hash) != Some(&id) {
-            return (
-                Verdict::Wait(format!("duplicate holder of {hash}")),
-                DriveAction::Idle,
-                false,
-            );
+            return Classified::wait(WaitReason::DuplicateHolder(hash));
         }
         let leaving = p.ledger.is_some() && (p.ledger, p.slot) != (new.ledger_id, new.slot_index);
-        if leaving && !inputs.epoch_is_final {
-            return (
-                Verdict::Wait(format!("ledger exit {PENDING_FINALITY}")),
-                DriveAction::Idle,
-                false,
-            );
+        if leaving && recorded_newer {
+            return Classified::wait(WaitReason::RecordedNewerThanEpoch);
         }
-        let stamp = inputs.in_sync && (!p.is_v2() || p.genesis_hash != Some(ident.genesis_hash));
-        return (Verdict::Ours, DriveAction::Assign(new), stamp);
+        if leaving && !inputs.epoch_is_final {
+            return Classified::wait(WaitReason::LedgerExitPendingFinality);
+        }
+        // A v1 file, a file of another genesis, or a v2 file with no trusted
+        // height is stamped. Only at an in-sync epoch that is final: an old
+        // binary reads a fresh `last_updated_height` as its own, and an
+        // epoch that is not final may still be reorged out.
+        let needs_stamp = !p.is_v2()
+            || p.genesis_hash != Some(ident.genesis_hash)
+            || p.trusted_assigned_height().is_none();
+        let stamp = inputs.in_sync && needs_stamp;
+        return Classified {
+            verdict: Verdict::Ours,
+            action: DriveAction::Assign(new),
+            stamp_v2: stamp && inputs.epoch_is_final,
+            stamp_pending_finality: stamp && !inputs.epoch_is_final,
+        };
     }
     // Not assigned to this miner.
     let same_chain = p.is_v2()
         && p.chain_id == Some(ident.chain_id)
         && p.genesis_hash == Some(ident.genesis_hash);
     if !same_chain {
-        return (
-            Verdict::Wait("unassigned, but not provably released on this chain".into()),
-            DriveAction::Idle,
-            false,
-        );
+        return Classified::wait(WaitReason::NotProvablyReleased);
     }
-    let old_enough = p
-        .trusted_assigned_height()
-        .is_some_and(|h| h <= inputs.epoch_height);
-    if !old_enough || !inputs.epoch_is_final {
-        return (
-            Verdict::Wait(format!("release {PENDING_FINALITY}")),
-            DriveAction::Idle,
-            false,
-        );
+    if p.trusted_assigned_height().is_none() {
+        return Classified::wait(WaitReason::NoTrustedHeight);
     }
-    (Verdict::Released, DriveAction::Clear, false)
+    if recorded_newer {
+        return Classified::wait(WaitReason::RecordedNewerThanEpoch);
+    }
+    if !inputs.epoch_is_final {
+        return Classified::wait(WaitReason::ReleasePendingFinality);
+    }
+    Classified::new(Verdict::Released, DriveAction::Clear)
 }
 
 /// Assignments that no drive holds or receives, in placement order.
@@ -441,6 +520,7 @@ pub fn log_decisions(
             .find(|info| info.id == decision.id)
             .and_then(|info| info.partition_assignment);
         let (verdict, reason) = (decision.verdict.name(), decision.verdict.reason());
+        let reason = reason.as_str();
         let action = match &decision.action {
             DriveAction::Skip => "skip",
             DriveAction::Idle => "idle",
@@ -789,7 +869,7 @@ mod tests {
             for x in &d {
                 let (verdict, action) = match x.path.to_str().unwrap() {
                     "/d0" | "/d1" | "/d2" => (
-                        Verdict::Wait("unassigned, but not provably released on this chain".into()),
+                        Verdict::Wait(WaitReason::NotProvablyReleased),
                         DriveAction::Idle,
                     ),
                     "/d3" => (Verdict::Ours, DriveAction::Assign(a[1])),
@@ -806,7 +886,11 @@ mod tests {
     fn released_only_when_final() {
         let f = rec(v2(1, Some(DataLedger::Publish), Some(0), 10));
         let (d, _) = run(&[drive(0, f.clone())], &[], false, true);
-        assert!(matches!(d[0].verdict, Verdict::Wait(_)));
+        assert_eq!(
+            d[0].verdict,
+            Verdict::Wait(WaitReason::ReleasePendingFinality)
+        );
+        assert!(d[0].waits_for_finality());
         assert_eq!(d[0].action, DriveAction::Idle);
         let (d, _) = run(&[drive(0, f)], &[], true, true);
         assert_eq!(d[0].verdict, Verdict::Released);
@@ -818,7 +902,11 @@ mod tests {
         let f = rec(v2(1, Some(DataLedger::Submit), Some(0), 10));
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, _) = run(&[drive(0, f.clone())], &a, false, true);
-        assert!(matches!(d[0].verdict, Verdict::Wait(_)));
+        assert_eq!(
+            d[0].verdict,
+            Verdict::Wait(WaitReason::LedgerExitPendingFinality)
+        );
+        assert!(d[0].waits_for_finality());
         assert_eq!(d[0].action, DriveAction::Idle);
         let (d, _) = run(&[drive(0, f)], &a, true, true);
         assert_eq!(d[0].verdict, Verdict::Ours);
@@ -904,6 +992,93 @@ mod tests {
         let ok = rec(v2(1, Some(DataLedger::Publish), Some(0), 10));
         let (d, _) = run(&[drive(0, ok)], &a, true, true);
         assert!(!d[0].stamp_v2);
+    }
+
+    /// A drive whose file records a ledger slot installed after the epoch it
+    /// is judged on (the orphaned-epoch resend: a final snapshot older than
+    /// the drive's own state) does not leave that ledger: it waits, idle, and
+    /// finality alone does not lift it. A drive that keeps its ledger stays
+    /// ours whatever its recorded height.
+    #[test]
+    fn ledger_exit_against_an_older_epoch_waits() {
+        let newer = rec(v2(1, Some(DataLedger::Publish), Some(1), 150));
+        let a = [pa(1, None, None)];
+        for fin in [true, false] {
+            let (d, _) = run(&[drive(0, newer.clone())], &a, fin, true);
+            assert_eq!(
+                d[0].verdict,
+                Verdict::Wait(WaitReason::RecordedNewerThanEpoch),
+                "{fin}"
+            );
+            assert_eq!(
+                d[0].verdict.reason(),
+                "recorded state is newer than the epoch"
+            );
+            assert_eq!(d[0].action, DriveAction::Idle);
+            assert!(!d[0].waits_for_finality(), "{fin}");
+            assert!(!d[0].stamp_v2);
+        }
+        let keep = [pa(1, Some(DataLedger::Publish), Some(1))];
+        let (d, _) = run(&[drive(0, newer)], &keep, true, true);
+        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert_eq!(d[0].action, DriveAction::Assign(keep[0]));
+    }
+
+    /// A v2 file that records no trusted assigned height (open rebound it) is
+    /// re-stamped when it is ours at a final in-sync epoch. Unassigned, it
+    /// waits with its own reason: finality alone does not release it.
+    #[test]
+    fn v2_without_a_trusted_height_is_restamped_and_not_pending_finality() {
+        let mut p = v2(1, Some(DataLedger::Publish), Some(0), 10);
+        p.assigned_height = None;
+        let a = [pa(1, Some(DataLedger::Publish), Some(0))];
+        let (d, _) = run(&[drive(0, rec(p))], &a, true, true);
+        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert!(d[0].stamp_v2, "a missing trusted height is stamped");
+
+        let (d, _) = run(&[drive(0, rec(p))], &[], true, true);
+        assert_eq!(d[0].verdict, Verdict::Wait(WaitReason::NoTrustedHeight));
+        assert_eq!(d[0].verdict.reason(), "no trusted assigned height");
+        assert_eq!(d[0].action, DriveAction::Idle);
+        assert!(!d[0].waits_for_finality());
+    }
+
+    /// A release judged on an epoch older than the drive's assigned height
+    /// is not pending finality: only a later epoch can prove it.
+    #[test]
+    fn release_against_an_older_epoch_is_not_pending_finality() {
+        let f = rec(v2(1, Some(DataLedger::Publish), Some(0), 150));
+        let (d, _) = run(&[drive(0, f)], &[], true, true);
+        assert_eq!(
+            d[0].verdict,
+            Verdict::Wait(WaitReason::RecordedNewerThanEpoch)
+        );
+        assert_eq!(
+            d[0].verdict.reason(),
+            "recorded state is newer than the epoch"
+        );
+        assert!(!d[0].waits_for_finality());
+    }
+
+    /// A stamp (v1 to v2, or a re-stamp) is written only at an epoch that is
+    /// final as well as in sync. Before finality the decision says it waits
+    /// for finality, so the service applies the update again once final.
+    #[test]
+    fn stamp_only_when_final() {
+        let a = [pa(1, Some(DataLedger::Publish), Some(0))];
+        let f = rec(v1(1, Some(DataLedger::Publish), Some(0)));
+        let (d, _) = run(&[drive(0, f.clone())], &a, false, true);
+        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert!(!d[0].stamp_v2, "not final, never stamp");
+        assert!(d[0].waits_for_finality(), "the stamp waits for finality");
+        let (d, _) = run(&[drive(0, f.clone())], &a, false, false);
+        assert!(
+            !d[0].waits_for_finality(),
+            "not in sync: nothing to wait for"
+        );
+        let (d, _) = run(&[drive(0, f)], &a, true, true);
+        assert!(d[0].stamp_v2);
+        assert!(!d[0].waits_for_finality());
     }
 
     /// Startup reads each drive's file without writing: no file is Missing,
