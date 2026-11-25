@@ -572,6 +572,40 @@ impl StorageModuleServiceInner {
                 .get(&sm_info.id)
                 .ok_or_eyre("StorageModuleInfo must reference an existing storage module id")?;
 
+            // A parked module (opened without an assignment, its packing file
+            // still naming a partition) that is now assigned that same partition
+            // takes it back without a reset: the bytes are that partition's.
+            // Only its Uninitialized spans are packed.
+            if existing.partition_assignment().is_none()
+                && let Some(assignment) = sm_info.partition_assignment
+                && !existing.reset_incomplete()
+                && self.holds_partition_on_disk(sm_info.id, &assignment)
+            {
+                if let Err(err) = existing.assign_partition(assignment, update_height) {
+                    warn!(
+                        storage_module.id = existing.id,
+                        "held partition was not stored; the update will be retried: {err:#}"
+                    );
+                    reset_not_finished.get_or_insert(ResetNotFinished.into());
+                    continue;
+                }
+                let mut deferred = Vec::new();
+                for interval in existing.get_intervals(irys_domain::ChunkType::Uninitialized) {
+                    self.enqueue_uninitialized_span(
+                        existing,
+                        PartitionChunkRange(interval),
+                        &mut deferred,
+                    );
+                }
+                if !deferred.is_empty() {
+                    self.pending_ranges
+                        .entry(existing.id)
+                        .or_default()
+                        .extend(deferred);
+                }
+                continue;
+            }
+
             // Did this storage module from our state get assigned a new partition_hash ?
             if existing.partition_assignment().is_none()
                 && let Some(assignment) = sm_info.partition_assignment
@@ -788,6 +822,32 @@ impl StorageModuleServiceInner {
 
     /// Reset and install `next` as one critical section. A failed reset
     /// leaves the previous assignment in place so the update can be retried.
+    /// True when the module's packing file names `assignment`'s partition and
+    /// taking it keeps the stored bytes: the same ledger and slot, or capacity
+    /// gaining a ledger. Leaving a ledger, or an unfinished reset, is not.
+    fn holds_partition_on_disk(
+        &self,
+        module_id: usize,
+        assignment: &irys_types::partition::PartitionAssignment,
+    ) -> bool {
+        let Some(path) = self.submodules_config.submodule_paths.get(module_id) else {
+            return false;
+        };
+        let params_path = self
+            .config
+            .node_config
+            .base_directory
+            .join(path)
+            .join(PACKING_PARAMS_FILE_NAME);
+        let Ok(params) = PackingParams::from_toml(&params_path) else {
+            return false;
+        };
+        let same_slot =
+            params.ledger == assignment.ledger_id && params.slot == assignment.slot_index;
+        params.partition_hash == Some(assignment.partition_hash)
+            && (same_slot || params.ledger.is_none())
+    }
+
     fn reset_and_install(
         &self,
         module: &Arc<StorageModule>,
@@ -1419,6 +1479,116 @@ mod assignment_reset_tests {
             modules,
             paths,
         }
+    }
+
+    /// A capacity module with entropy at offset 0, closed and reopened without
+    /// an assignment: the module the epoch mapping parks because it cannot
+    /// place the partition it holds. Returns the held hash and the miner.
+    fn parked_harness() -> (Harness, H256, irys_types::IrysAddress) {
+        let held = harness(None);
+        write_synced_entropy(&held.module);
+        let (hash, miner) = assigned_hash_and_miner(&held.module);
+        let config = held.inner.config.clone();
+        let path = held.path.clone();
+        let paths = held.paths.clone();
+        let tmp = held._tmp;
+        drop(held.inner);
+        drop(held.module);
+        drop(held.modules);
+
+        let parked = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 0,
+                    partition_assignment: None,
+                    submodules: vec![(partition_chunk_offset_ie!(0, 10), path.clone())],
+                },
+                &config,
+            )
+            .expect("parked open"),
+        );
+        assert!(parked.partition_assignment().is_none());
+        assert_eq!(chunk_type(&parked), Some(irys_domain::ChunkType::Entropy));
+
+        let db_env = DatabaseProvider::for_testing(
+            &(tmp.path().join("chain-db-parked")),
+            &(tmp.path().join("chain-db-parked")).join("cache"),
+        )
+        .expect("chain db");
+        let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db_env));
+        let block_tree = BlockTree::new(&new_mock_signed_header(), config.consensus.clone());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let (service_senders, receivers) = ServiceSenders::new();
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let modules = vec![Arc::clone(&parked)];
+        let inner = StorageModuleServiceInner::new(
+            Arc::new(RwLock::new(modules.clone())),
+            block_index_guard,
+            block_tree_guard,
+            service_senders,
+            config,
+            shutdown_rx,
+        );
+        (
+            Harness {
+                _tmp: tmp,
+                _shutdown_tx: shutdown_tx,
+                receivers,
+                inner,
+                module: parked,
+                path,
+                modules,
+                paths,
+            },
+            hash,
+            miner,
+        )
+    }
+
+    /// A parked module that is later assigned the partition it holds takes it
+    /// back without a reset: its entropy stays and is not packed again.
+    #[tokio::test]
+    async fn parked_module_assigned_its_own_partition_keeps_its_entropy() {
+        use irys_domain::storage_module::ChunkType;
+
+        let (mut harness, hash, miner) = parked_harness();
+        let path = harness.path.clone();
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness.module.partition_hash(),
+            Some(hash),
+            "the held partition is installed"
+        );
+        assert_eq!(
+            chunk_type(&harness.module),
+            Some(ChunkType::Entropy),
+            "taking back the held partition must not reset it"
+        );
+        assert!(!harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        while let Ok(request) = harness.receivers.packing.try_recv() {
+            let range = request.chunk_range();
+            assert!(
+                range.0.start() > PartitionChunkOffset::from(0),
+                "only Uninitialized offsets are packed again, got {range:?}"
+            );
+        }
+        assert_reopen_chunk(harness, ChunkType::Entropy);
+    }
+
+    /// A parked module assigned a different partition is reset and packed.
+    #[tokio::test]
+    async fn parked_module_assigned_another_partition_resets() {
+        use irys_domain::storage_module::ChunkType;
+
+        let (mut harness, hash, miner) = parked_harness();
+        let other = H256::repeat_byte(0x7E);
+        assert_ne!(other, hash);
+        let path = harness.path.clone();
+        apply_update(&mut harness, capacity_update(&path, other, miner), 5).await;
+        assert_eq!(harness.module.partition_hash(), Some(other));
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert!(harness.receivers.packing.try_recv().is_ok());
     }
 
     fn capacity_update(

@@ -2351,10 +2351,19 @@ impl StorageModule {
             if let Some(params) = existing_params {
                 // Derive the desired state from the epoch snapshot.
                 // Address, partition hash, and packing identity already matched.
+                //
+                // No assignment parks the module: the file, labels and index
+                // stay. The epoch mapping opens a module without an assignment
+                // when it cannot place the partition the module holds (an
+                // old-format file, or a partition recorded after this epoch),
+                // and that partition may still be the miner's. Wiping here
+                // destroyed held partitions (mainnet 2026-11-06). A partition
+                // the chain has really released is wiped when the module is
+                // given a different one, or by the service's unassign path.
                 let (want_hash, want_ledger, want_slot) =
                     match storage_module_info.partition_assignment {
                         Some(pa) => (Some(pa.partition_hash), pa.ledger_id, pa.slot_index),
-                        None => (None, None, None),
+                        None => (params.partition_hash, params.ledger, params.slot),
                     };
 
                 // A different partition clears the old labels and index rows.
@@ -21077,6 +21086,18 @@ mod tests {
         }
     }
 
+    /// The same partition moved to capacity. A module that leaves its ledger is
+    /// wiped at open. Since an open without an assignment parks the module,
+    /// this is the open-time wipe the reset-marker tests drive.
+    fn leave_ledger(config: &Config, hash: H256) -> PartitionAssignment {
+        PartitionAssignment {
+            ledger_id: None,
+            slot_index: None,
+            miner_address: config.node_config.miner_address(),
+            partition_hash: hash,
+        }
+    }
+
     fn module_info(path: &Path, assignment: Option<PartitionAssignment>) -> StorageModuleInfo {
         one_span(3, path, assignment)
     }
@@ -21149,11 +21170,11 @@ mod tests {
         Ok(rows.len())
     }
 
-    /// A packing refusal on the unassign arm must not store the reset marker.
+    /// A packing refusal on the ledger-exit arm must not store the reset marker.
     /// The next open that still assigns the old hash keeps the entropy. A
-    /// later unassign whose packing matches still wipes.
+    /// later ledger exit whose packing matches still wipes.
     #[test]
-    fn refused_unassign_open_does_not_leave_a_reset_marker() -> eyre::Result<()> {
+    fn refused_ledger_exit_open_does_not_leave_a_reset_marker() -> eyre::Result<()> {
         {
             let engine = "RocksDB";
             let hash = H256::repeat_byte(0x61);
@@ -21167,8 +21188,11 @@ mod tests {
             params.entropy_packing_iterations = Some(recorded + 1);
             params.write_to_disk(&params_path)?;
 
-            let err = StorageModule::new(&module_info(&sub, None), &config)
-                .expect_err("iterations do not match this module");
+            let err = StorageModule::new(
+                &module_info(&sub, Some(leave_ledger(&config, hash))),
+                &config,
+            )
+            .expect_err("iterations do not match this module");
             assert!(
                 err.to_string().contains("packing identity"),
                 "{engine:?}: {err}"
@@ -21176,23 +21200,23 @@ mod tests {
             assert_eq!(
                 PackingParams::from_toml(&params_path)?.partition_hash,
                 Some(hash),
-                "{engine:?}: refused unassign rewrote the packing file"
+                "{engine:?}: refused ledger exit rewrote the packing file"
             );
             assert_eq!(
                 interval_label(&sub, 0)?,
                 Some(ChunkType::Entropy),
-                "{engine:?}: refused unassign rewrote intervals"
+                "{engine:?}: refused ledger exit rewrote intervals"
             );
             {
                 let index = open_submodule_index(&sub, &config.node_config.database)?;
                 assert!(
                     !index.reset_in_progress()?,
-                    "{engine:?}: refused unassign left a reset marker"
+                    "{engine:?}: refused ledger exit left a reset marker"
                 );
                 if index.stores_offset_crc() {
                     assert!(
                         index.chunk_crc_complete()?,
-                        "{engine:?}: refused unassign cleared crc_complete"
+                        "{engine:?}: refused ledger exit cleared crc_complete"
                     );
                 }
                 let rows = index.view(|tx| {
@@ -21203,7 +21227,7 @@ mod tests {
                 })?;
                 assert!(
                     !rows.is_empty(),
-                    "{engine:?}: refused unassign cleared the tx row"
+                    "{engine:?}: refused ledger exit cleared the tx row"
                 );
             }
 
@@ -21230,38 +21254,44 @@ mod tests {
             }
             drop(reopened);
 
-            let unassigned = StorageModule::new(&module_info(&sub, None), &config)?;
+            let exited = StorageModule::new(
+                &module_info(&sub, Some(leave_ledger(&config, hash))),
+                &config,
+            )?;
             assert_eq!(
-                unassigned.get_chunk_type(&PartitionChunkOffset::from(0)),
+                exited.get_chunk_type(&PartitionChunkOffset::from(0)),
                 Some(ChunkType::Uninitialized),
-                "{engine:?}: a matching unassign must still wipe"
+                "{engine:?}: a matching ledger exit must still wipe"
             );
             assert!(
-                !unassigned
+                !exited
                     .get_submodule_for_offset(PartitionChunkOffset::from(0))?
                     .1
                     .db
                     .reset_in_progress()?,
-                "{engine:?}: a finished unassign left the marker"
+                "{engine:?}: a finished ledger exit left the marker"
             );
             assert_eq!(
-                live_tx_rows(&unassigned)?,
+                live_tx_rows(&exited)?,
                 0,
-                "{engine:?}: a finished unassign kept the tx row"
+                "{engine:?}: a finished ledger exit kept the tx row"
             );
         }
         Ok(())
     }
 
-    /// The file has no chain id. A Rocks unassign must compare the stored
-    /// packing record before it wipes. The same chain id still unassigns.
+    /// The file has no chain id. A Rocks ledger exit must compare the stored
+    /// packing record before it wipes. The same chain id still wipes on a ledger exit.
     #[test]
-    fn rocks_unassign_with_a_different_chain_id_does_not_wipe() -> eyre::Result<()> {
+    fn rocks_ledger_exit_with_a_different_chain_id_does_not_wipe() -> eyre::Result<()> {
         let hash = H256::repeat_byte(0x62);
         let (_tmp, config, sub) = seed_assigned_entropy("refuse_chain", hash)?;
         let other = config_with_chain_id(&config, config.consensus.chain_id + 1);
-        let err = StorageModule::new(&module_info(&sub, None), &other)
-            .expect_err("stored chain id does not match this open");
+        let err = StorageModule::new(
+            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &other,
+        )
+        .expect_err("stored chain id does not match this open");
         let message = err.to_string();
         assert!(message.contains("packing identity"), "{message}");
         assert!(
@@ -21302,11 +21332,14 @@ mod tests {
         );
         drop(reopened);
 
-        let unassigned = StorageModule::new(&module_info(&sub, None), &config)?;
+        let exited = StorageModule::new(
+            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &config,
+        )?;
         assert_eq!(
-            unassigned.get_chunk_type(&PartitionChunkOffset::from(0)),
+            exited.get_chunk_type(&PartitionChunkOffset::from(0)),
             Some(ChunkType::Uninitialized),
-            "the same chain id still unassigns"
+            "the same chain id still wipes on a ledger exit"
         );
         Ok(())
     }
@@ -21327,17 +21360,20 @@ mod tests {
         }
     }
 
-    /// A crash after the unassign marker, and before `crc_complete` is
+    /// A crash after the ledger-exit marker, and before `crc_complete` is
     /// cleared, must leave the flag set. The next open finishes the wipe.
-    /// An unassign that is not interrupted still wipes and clears the flag.
+    /// A ledger exit that is not interrupted still wipes and clears the flag.
     #[test]
     fn crash_after_open_reset_marker_keeps_crc_complete() -> eyre::Result<()> {
         let hash = H256::repeat_byte(0x63);
         let (_tmp, config, sub) = seed_assigned_entropy("open_marker_crc", hash)?;
         {
             let _fail = OpenResetMarkerFail::arm();
-            let err = StorageModule::new(&module_info(&sub, None), &config)
-                .expect_err("the open stops after the marker");
+            let err = StorageModule::new(
+                &module_info(&sub, Some(leave_ledger(&config, hash))),
+                &config,
+            )
+            .expect_err("the open stops after the marker");
             assert!(
                 err.to_string()
                     .contains("injected failure after the open reset marker"),
@@ -21347,7 +21383,7 @@ mod tests {
         assert_eq!(
             PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
             Some(hash),
-            "the interrupted unassign published the packing file"
+            "the interrupted ledger exit published the packing file"
         );
         assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Entropy));
         {
@@ -21366,7 +21402,7 @@ mod tests {
             })?;
             assert!(
                 !rows.is_empty(),
-                "the interrupted unassign cleared the index"
+                "the interrupted ledger exit cleared the index"
             );
         }
 
@@ -21386,17 +21422,20 @@ mod tests {
         drop(recovered);
 
         let (_kept, config, sub) = seed_assigned_entropy("open_marker_done", hash)?;
-        let unassigned = StorageModule::new(&module_info(&sub, None), &config)?;
+        let exited = StorageModule::new(
+            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &config,
+        )?;
         assert_eq!(
-            unassigned.get_chunk_type(&PartitionChunkOffset::from(0)),
+            exited.get_chunk_type(&PartitionChunkOffset::from(0)),
             Some(ChunkType::Uninitialized),
-            "an uninterrupted unassign must still wipe"
+            "an uninterrupted ledger exit must still wipe"
         );
-        let (_, submodule) = unassigned.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let (_, submodule) = exited.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         assert!(!submodule.db.reset_in_progress()?);
         assert!(
             !submodule.db.chunk_crc_complete()?,
-            "a finished unassign must clear crc_complete"
+            "a finished ledger exit must clear crc_complete"
         );
         Ok(())
     }
@@ -22445,10 +22484,14 @@ mod tests {
         Ok(())
     }
 
-    /// Unassign while the process is down, then bind a new partition.
-    /// The old labels must not survive either open. Both index engines.
+    /// An open with no assignment parks the module: the epoch mapping gives no
+    /// assignment to a module whose partition it cannot place (an old-format
+    /// file, or a partition from a newer epoch), and that partition may still
+    /// be the miner's. The packing file, labels and index stay. Opening again
+    /// with the same partition keeps them; a different partition is refused
+    /// and changes nothing.
     #[test]
-    fn unassign_then_rebind_drops_old_labels() -> eyre::Result<()> {
+    fn open_without_assignment_parks_the_held_partition() -> eyre::Result<()> {
         {
             let engine = "RocksDB";
             let prefix = format!("unassign_rebind_{engine:?}");
@@ -22501,39 +22544,56 @@ mod tests {
             );
             drop(first);
 
-            let unassigned = StorageModule::new(&info(None), &config)?;
-            let params = PackingParams::from_toml(&params_path)?;
+            let params_before = PackingParams::from_toml(&params_path)?;
+            let parked = StorageModule::new(&info(None), &config)?;
             assert_eq!(
-                params.partition_hash, None,
-                "{engine:?}: hash was not cleared"
+                PackingParams::from_toml(&params_path)?,
+                params_before,
+                "{engine:?}: a parked open rewrote the packing file"
+            );
+            assert!(parked.partition_assignment().is_none());
+            assert_eq!(
+                parked.get_intervals(ChunkType::Entropy),
+                vec![partition_chunk_offset_ii!(0, 0)],
+                "{engine:?}: a parked open dropped the entropy labels"
             );
             assert!(
-                unassigned.get_intervals(ChunkType::Entropy).is_empty(),
-                "{engine:?}: unassign kept entropy labels {:?}",
-                unassigned.get_intervals(ChunkType::Entropy)
+                !parked
+                    .get_submodule_for_offset(PartitionChunkOffset::from(0))?
+                    .1
+                    .db
+                    .reset_in_progress()?,
+                "{engine:?}: a parked open left a reset marker"
             );
-            assert_eq!(
-                unassigned.get_intervals(ChunkType::Uninitialized),
-                vec![partition_chunk_offset_ii!(0, 7)],
-                "{engine:?}"
-            );
-            drop(unassigned);
+            drop(parked);
 
-            let rebound = StorageModule::new(&info(Some(assignment(hash_b))), &config)?;
+            let same = StorageModule::new(&info(Some(assignment(hash_a))), &config)?;
             assert_eq!(
-                PackingParams::from_toml(&params_path)?.partition_hash,
-                Some(hash_b),
-                "{engine:?}"
+                same.get_intervals(ChunkType::Entropy),
+                vec![partition_chunk_offset_ii!(0, 0)],
+                "{engine:?}: reopening the held partition dropped its labels"
             );
+            drop(same);
+
+            let Err(err) = StorageModule::new(&info(Some(assignment(hash_b))), &config) else {
+                panic!(
+                    "{engine:?}: a module that records a partition is never given another at open"
+                );
+            };
             assert!(
-                rebound.get_intervals(ChunkType::Entropy).is_empty(),
-                "{engine:?}: rebind kept entropy labels {:?}",
-                rebound.get_intervals(ChunkType::Entropy)
+                err.to_string().contains("Partition hash mismatch"),
+                "{engine:?}: {err}"
             );
             assert_eq!(
-                rebound.get_intervals(ChunkType::Uninitialized),
-                vec![partition_chunk_offset_ii!(0, 7)],
-                "{engine:?}"
+                PackingParams::from_toml(&params_path)?,
+                params_before,
+                "{engine:?}: a refused open rewrote the packing file"
+            );
+            let kept = StorageModule::new(&info(None), &config)?;
+            assert_eq!(
+                kept.get_intervals(ChunkType::Entropy),
+                vec![partition_chunk_offset_ii!(0, 0)],
+                "{engine:?}: a refused open dropped the entropy labels"
             );
         }
         Ok(())
