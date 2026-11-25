@@ -1929,19 +1929,24 @@ impl BlockTreeServiceInner {
         self.send_partition_assignments(&epoch_snapshot, epoch_block.height)
     }
 
-    /// Let the node know about any newly assigned partition hashes to local storage
-    /// modules. `update_height` is the highest epoch height whose local writes this
-    /// update supersedes.
+    /// Send this miner's assignments from `epoch_snapshot` to the storage
+    /// module service, which decides what each drive holds. The verdict is
+    /// judged on the snapshot's epoch height; `update_height` is the highest
+    /// epoch height whose local writes this update supersedes (the orphaned
+    /// epoch height after a reorg that orphaned the only epoch block).
     fn send_partition_assignments(
         &self,
         epoch_snapshot: &EpochSnapshot,
         update_height: u64,
     ) -> eyre::Result<()> {
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
+        let assignments =
+            epoch_snapshot.get_partition_assignments(self.config.node_config.miner_address());
         self.service_senders.storage_modules.send_traced(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                storage_module_infos: storage_module_infos.into(),
+                assignments: Arc::new(assignments),
+                epoch_height: epoch_snapshot.epoch_height,
                 update_height,
+                in_sync: !self.chain_sync_state.is_syncing(),
             },
         )?;
         Ok(())

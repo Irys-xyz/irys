@@ -2914,6 +2914,33 @@ impl StorageModule {
         *self.recorded_params.read().unwrap()
     }
 
+    /// Drop the in-memory assignment and leave the file, labels and index as
+    /// they are: the module is idle (not mined, not synced into) until a
+    /// verdict gives it a partition again. Returns the assignment it held.
+    pub fn park_assignment(&self) -> Option<PartitionAssignment> {
+        self.partition_assignment.write().unwrap().take()
+    }
+
+    /// Take back the partition this module's file records, in memory only.
+    /// Applies when the module holds no assignment in memory and the file
+    /// records `assignment`'s hash, ledger and slot; the file is not
+    /// rewritten. Returns whether the assignment was installed.
+    pub fn adopt_recorded(&self, assignment: PartitionAssignment) -> bool {
+        let mut current = self.partition_assignment.write().unwrap();
+        if current.is_some() {
+            return false;
+        }
+        let matches = self.recorded_params.read().unwrap().is_some_and(|params| {
+            params.partition_hash == Some(assignment.partition_hash)
+                && params.ledger == assignment.ledger_id
+                && params.slot == assignment.slot_index
+        });
+        if matches {
+            *current = Some(assignment);
+        }
+        matches
+    }
+
     /// Set the genesis hash that later assignment writes stamp into the file.
     /// Call once right after open.
     pub fn set_chain_identity(&self, genesis_hash: H256) {

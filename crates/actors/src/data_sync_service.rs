@@ -2659,7 +2659,7 @@ mod storage_module_lookup_tests {
     #[test]
     fn storage_module_by_id_ignores_vec_index() {
         let tmp = TempDirBuilder::new().with_tracing().build();
-        // Mimic map_storage_modules_to_partition_assignments order:
+        // Mimic the drive verdict placement order (ledger priority):
         // Publish(id=0), Submit(id=1), OneYear(id=7), ThirtyDay(id=6).
         let modules = vec![
             test_sm(0, Some(DataLedger::Publish.into()), tmp.path()),

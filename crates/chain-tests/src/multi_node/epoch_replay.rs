@@ -141,13 +141,15 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         );
 
         // Store partition assignments before peer shutdown
-        peer_sm_infos_before = peer1_node
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .canonical_epoch_snapshot()
-            .map_storage_modules_to_partition_assignments()
-            .expect("packing params");
+        peer_sm_infos_before = irys_domain::drive_verdict::startup_storage_module_infos(
+            &peer1_node
+                .node_ctx
+                .block_tree_guard
+                .read()
+                .canonical_epoch_snapshot(),
+            H256::zero(),
+            true,
+        );
 
         assert!(peer_sm_infos_before[0].partition_assignment.is_some());
         assert_eq!(
@@ -263,13 +265,15 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     assert_eq!(signer1_parts_after, signer1_parts_before);
 
     // Verify peer has correct data ledger assignment from offline period
-    let sm_infos_after = restarted_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_epoch_snapshot()
-        .map_storage_modules_to_partition_assignments()
-        .expect("packing params");
+    let sm_infos_after = irys_domain::drive_verdict::startup_storage_module_infos(
+        &restarted_node
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot(),
+        H256::zero(),
+        true,
+    );
 
     let peer_assignment_before = peer_sm_infos_before[0].partition_assignment.unwrap();
     let peer_assignment_after = sm_infos_after

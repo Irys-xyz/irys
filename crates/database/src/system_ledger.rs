@@ -49,7 +49,7 @@ async fn create_pledge_commitment_transaction(
 /// A vector of commitment transactions (one stake + multiple pledges)
 ///
 /// # Note
-/// This function has the same configuration dependency as EpochSnapshot::map_storage_modules_to_partition_assignments.
+/// This function has the same configuration dependency as `drive_verdict::decide` (storage module placement).
 /// When updating configuration related to StorageModule/submodule functionality, both functions
 /// will need corresponding updates.
 ///
@@ -82,7 +82,7 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     // many-to-one relationship. For testnet, each submodule path is treated as
     // a complete HDD capable of providing all storage for a StorageModule.
     // When the configuration catches up to the StorageModule functionality,
-    // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
+    // this method as well as `drive_verdict::decide`
     // will have to be updated.
     let mut anchor = stake_commitment.id();
     for i in 0..num_submodules {

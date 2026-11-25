@@ -292,7 +292,7 @@ impl BlockTree {
     /// * `epoch_replay_data` - Genesis state and historical epoch blocks for state reconstruction
     /// * `reth_service_actor` - Actor handle for sending fork choice updates to Reth
     /// * `db` - Database provider for querying block and transaction data
-    /// * `storage_submodules_config` - Storage configuration for epoch snapshot creation (only ever used with `map_storage_modules_to_partition_assignments()`, could probably be refactored out)
+    /// * `storage_submodules_config` - Storage configuration for epoch snapshot creation (the drive verdict reads its submodule paths)
     /// * `config` - Full node configuration including consensus and epoch settings
     ///
     /// ## Returns

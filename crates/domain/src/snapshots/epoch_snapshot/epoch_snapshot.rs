@@ -2,8 +2,7 @@
 mod partition_resize;
 
 use super::{CommitmentState, PartitionAssignments, PledgeEntry, StakeEntry};
-use crate::drive_verdict::{self, ChainIdentity, VerdictInputs};
-use crate::{EpochBlockData, StorageModuleInfo};
+use crate::EpochBlockData;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{ExpiringPartitionInfo, Ledgers};
@@ -1338,50 +1337,6 @@ impl EpochSnapshot {
         assignments
     }
 
-    /// Maps the configured drives to this epoch's assignments for the local
-    /// miner, reading each drive's packing file. One [`StorageModuleInfo`] per
-    /// drive that startup opens (a Foreign or unreadable drive is left out),
-    /// with module id = configured path index.
-    ///
-    /// The epoch update's view until the storage module service runs the
-    /// verdict itself. It releases nothing: the genesis hash it passes matches
-    /// no drive, so a drive holding an unassigned partition is Wait and gets no
-    /// assignment, as before. A held partition stays on its drive (ledger and
-    /// slot moves included), and partitions no drive holds go to drives that
-    /// record none, by ledger priority then hash.
-    ///
-    /// Never fails; the `Result` is kept for its callers.
-    pub fn map_storage_modules_to_partition_assignments(
-        &self,
-    ) -> eyre::Result<Vec<StorageModuleInfo>> {
-        // Existing module paths retain their physical layout; logical bounds are
-        // resolved separately and the finalized migration removes their suffix.
-        let num_chunks = self.config.consensus.num_chunks_in_partition as u32;
-        let paths = &self
-            .storage_submodules_config
-            .as_ref()
-            .unwrap()
-            .submodule_paths;
-        let identity = ChainIdentity {
-            chain_id: self.config.consensus.chain_id,
-            genesis_hash: H256::zero(),
-            miner: self.config.node_config.miner_address(),
-        };
-        let assignments = self.get_partition_assignments(identity.miner);
-        let drives = drive_verdict::drive_verdict_inputs_from_disk(&self.config, paths);
-        let decisions = drive_verdict::decide(&VerdictInputs {
-            drives: &drives,
-            assignments: &assignments,
-            epoch_height: self.epoch_height,
-            epoch_is_final: true,
-            in_sync: false,
-            identity: &identity,
-        });
-        Ok(drive_verdict::storage_module_infos(
-            &drives, &decisions, num_chunks,
-        ))
-    }
-
     /// Returns partitions expiring at height + 1 to this [EpochSnapshot]. Empty unless next block is an epoch block with expiring partitions.
     ///
     /// Used during block production to produce epoch blocks with the correct term fee distributions.
@@ -1598,7 +1553,10 @@ fn bigfloat_truncate_to_3_decimals(value: &num_bigfloat::BigFloat) -> num_bigflo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CommitmentState, PACKING_PARAMS_FILE_NAME, PackingParams, PartitionAssignments};
+    use crate::{
+        CommitmentState, PACKING_PARAMS_FILE_NAME, PackingParams, PartitionAssignments,
+        StorageModuleInfo,
+    };
     use irys_config::submodules::StorageSubmodulesConfig;
     use irys_database::data_ledger::Ledgers;
     use std::path::PathBuf;
@@ -1700,6 +1658,14 @@ mod tests {
         assert!(snapshot.expired_partition_infos.is_none());
     }
 
+    impl EpochSnapshot {
+        /// What startup opens for this snapshot (zero genesis hash: nothing
+        /// is released; final epoch).
+        fn startup_infos(&self) -> Vec<StorageModuleInfo> {
+            crate::drive_verdict::startup_storage_module_infos(self, H256::zero(), true)
+        }
+    }
+
     fn snapshot_with_submodules(config: Config, submodule_paths: Vec<PathBuf>) -> EpochSnapshot {
         EpochSnapshot {
             ledgers: Ledgers::new(&config.consensus, ForBlock::inactive()),
@@ -1736,9 +1702,7 @@ mod tests {
         std::fs::write(sub_dir.join(PACKING_PARAMS_FILE_NAME), b"not = toml [[[").unwrap();
 
         let snapshot = snapshot_with_submodules(config, vec![PathBuf::from("absent"), sub]);
-        let infos = snapshot
-            .map_storage_modules_to_partition_assignments()
-            .expect("mapping never fails");
+        let infos = snapshot.startup_infos();
         assert_eq!(infos.len(), 1, "{infos:#?}");
         assert_eq!(infos[0].id, 0, "a missing packing file is an empty module");
         assert!(infos[0].partition_assignment.is_none());
@@ -2391,9 +2355,7 @@ mod tests {
             );
         }
 
-        let infos = snapshot
-            .map_storage_modules_to_partition_assignments()
-            .expect("mapping reads the packing files");
+        let infos = snapshot.startup_infos();
         let mapping: Vec<(usize, Option<H256>)> = infos
             .iter()
             .map(|info| {
@@ -2458,9 +2420,7 @@ mod tests {
             .unwrap()
             .submodule_paths
             .clone();
-        let infos = snapshot
-            .map_storage_modules_to_partition_assignments()
-            .expect("mapping reads the packing files");
+        let infos = snapshot.startup_infos();
         let mut by_path = std::collections::BTreeMap::new();
         for info in &infos {
             let path = info.submodules[0].1.clone();

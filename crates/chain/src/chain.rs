@@ -6,7 +6,7 @@ use actix_web::dev::Server;
 use eyre::{Context as _, OptionExt as _};
 use futures::FutureExt as _;
 use irys_actors::{
-    BlockValidationTracker, DataSyncService, StorageModuleService,
+    BlockValidationTracker, DataSyncService, StorageModuleService, StorageModuleServiceMessage,
     block_discovery::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
@@ -1986,12 +1986,13 @@ impl IrysNode {
                 ledger.total_chunks
             );
         }
-        let (storage_module_infos, chain_genesis_hash) = Self::drive_verdicts_at_startup(
-            &config,
-            &storage_submodules_config.submodule_paths,
-            &epoch_snapshot,
-            &block_index_guard,
-        )?;
+        let (storage_module_infos, chain_genesis_hash, unreadable_drive_ids) =
+            Self::drive_verdicts_at_startup(
+                &config,
+                &storage_submodules_config.submodule_paths,
+                &epoch_snapshot,
+                &block_index_guard,
+            )?;
         let logical_chunks = epoch_snapshot.partition_chunks();
 
         let storage_modules = Self::init_storage_modules(
@@ -2393,8 +2394,26 @@ impl IrysNode {
             block_tree_guard.clone(),
             service_senders.clone(),
             &config,
+            unreadable_drive_ids,
             runtime_handle.clone(),
         );
+        // Apply the startup verdict's destructive half now, not at the next
+        // epoch block: clear released drives, place partitions on empty or
+        // released drives, and exit ledgers whose epoch is final (or once it
+        // becomes final). Startup is never in sync, so no file is stamped v2.
+        {
+            let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+            let assignments =
+                epoch_snapshot.get_partition_assignments(config.node_config.miner_address());
+            service_senders.storage_modules.send_traced(
+                StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                    assignments: Arc::new(assignments),
+                    epoch_height: epoch_snapshot.epoch_height,
+                    update_height: epoch_snapshot.epoch_height,
+                    in_sync: false,
+                },
+            )?;
+        }
 
         // Production chunk fetcher is the HTTP chunk fetcher
         let max_peer_response_bytes = config.node_config.max_peer_response_bytes;
@@ -2871,15 +2890,17 @@ impl IrysNode {
 
     /// Decides what every configured drive holds before any is opened, logs
     /// the verdicts, and returns the modules to open (a Foreign or unreadable
-    /// drive is not opened) with the genesis hash later writes stamp. Nothing
-    /// is written here. Startup is never in sync, and the epoch is final only
-    /// when it is at or below the finalized height of the block-index tip.
+    /// drive is not opened), the genesis hash later writes stamp, and the ids
+    /// of the drives whose file could not be read (they keep blocking new
+    /// placements at runtime). Nothing is written here. Startup is never in
+    /// sync, and the epoch is final only when it is at or below the finalized
+    /// height of the block-index tip.
     fn drive_verdicts_at_startup(
         config: &Config,
         paths: &[std::path::PathBuf],
         epoch_snapshot: &irys_domain::EpochSnapshot,
         block_index_guard: &BlockIndexReadGuard,
-    ) -> eyre::Result<(Vec<StorageModuleInfo>, H256)> {
+    ) -> eyre::Result<(Vec<StorageModuleInfo>, H256, Vec<usize>)> {
         use irys_domain::drive_verdict;
 
         let (genesis_hash, index_tip) = {
@@ -2920,7 +2941,13 @@ impl IrysNode {
             .wrap_err("num_chunks_in_partition exceeds u32")?;
         let infos = drive_verdict::storage_module_infos(&drives, &decisions, num_chunks);
         drive_verdict::log_decisions(&inputs, &decisions, &infos);
-        Ok((infos, genesis_hash))
+        let unreadable = drives
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, file))| matches!(file, drive_verdict::DriveFile::Unreadable(_)))
+            .map(|(id, _)| id)
+            .collect();
+        Ok((infos, genesis_hash, unreadable))
     }
 
     async fn init_storage_modules(

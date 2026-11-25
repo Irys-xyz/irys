@@ -78,6 +78,50 @@ pub struct DriveDecision {
     pub stamp_v2: bool,
 }
 
+/// Reason suffix of every `Wait` that finality alone can lift.
+const PENDING_FINALITY: &str = "pending finality";
+
+impl Verdict {
+    /// Lower-case name for logs.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Foreign(_) => "foreign",
+            Self::Ours => "ours",
+            Self::Empty => "empty",
+            Self::Released => "released",
+            Self::Wait(_) => "wait",
+        }
+    }
+
+    /// Why a drive is Foreign or Wait; empty otherwise.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Foreign(why) | Self::Wait(why) => why,
+            Self::Ours | Self::Empty | Self::Released => "",
+        }
+    }
+}
+
+impl DriveAction {
+    /// Lower-case name for logs.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Idle => "idle",
+            Self::Assign(_) => "assign",
+            Self::Clear => "clear",
+        }
+    }
+}
+
+impl DriveDecision {
+    /// A `Wait` that a later finalized height can turn into a wipe-causing
+    /// action (ledger exit or release) without a new epoch.
+    pub fn waits_for_finality(&self) -> bool {
+        matches!(&self.verdict, Verdict::Wait(why) if why.ends_with(PENDING_FINALITY))
+    }
+}
+
 fn is_foreign(p: &PackingParams, id: &ChainIdentity) -> Option<String> {
     if p.version.is_some_and(|v| v > PACKING_PARAMS_VERSION) {
         return Some(format!("newer file version {:?}", p.version));
@@ -221,7 +265,7 @@ fn classify(
         let leaving = p.ledger.is_some() && (p.ledger, p.slot) != (new.ledger_id, new.slot_index);
         if leaving && !inputs.epoch_is_final {
             return (
-                Verdict::Wait("ledger exit pending finality".into()),
+                Verdict::Wait(format!("ledger exit {PENDING_FINALITY}")),
                 DriveAction::Idle,
                 false,
             );
@@ -245,7 +289,7 @@ fn classify(
         .is_some_and(|h| h <= inputs.epoch_height);
     if !old_enough || !inputs.epoch_is_final {
         return (
-            Verdict::Wait("release pending finality".into()),
+            Verdict::Wait(format!("release {PENDING_FINALITY}")),
             DriveAction::Idle,
             false,
         );
@@ -340,6 +384,43 @@ pub fn storage_module_infos(
         .collect()
 }
 
+/// The modules startup would open for `snapshot`'s assignments to this
+/// miner, reading the configured drives' files: [`decide`] then
+/// [`storage_module_infos`]. Startup is never in sync. For tests that open
+/// drives without a running node; a node applies verdicts at startup
+/// (`chain.rs`) and in the storage module service.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn startup_storage_module_infos(
+    snapshot: &crate::EpochSnapshot,
+    genesis_hash: H256,
+    epoch_is_final: bool,
+) -> Vec<StorageModuleInfo> {
+    let config = &snapshot.config;
+    let paths = snapshot
+        .storage_submodules_config
+        .as_ref()
+        .map(|submodules| submodules.submodule_paths.clone())
+        .unwrap_or_default();
+    let identity = ChainIdentity {
+        chain_id: config.consensus.chain_id,
+        genesis_hash,
+        miner: config.node_config.miner_address(),
+    };
+    let assignments = snapshot.get_partition_assignments(identity.miner);
+    let drives = drive_verdict_inputs_from_disk(config, &paths);
+    let decisions = decide(&VerdictInputs {
+        drives: &drives,
+        assignments: &assignments,
+        epoch_height: snapshot.epoch_height,
+        epoch_is_final,
+        in_sync: false,
+        identity: &identity,
+    });
+    let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
+        .expect("num_chunks_in_partition fits u32");
+    storage_module_infos(&drives, &decisions, num_chunks)
+}
+
 /// Logs one INFO line per drive (id, path, verdict, action, recorded and
 /// applied partition, reason), an ERROR for each drive that is not opened, a
 /// WARN for each drive left waiting, and a WARN for each assignment no drive
@@ -359,13 +440,7 @@ pub fn log_decisions(
             .iter()
             .find(|info| info.id == decision.id)
             .and_then(|info| info.partition_assignment);
-        let (verdict, reason) = match &decision.verdict {
-            Verdict::Foreign(why) => ("foreign", why.as_str()),
-            Verdict::Ours => ("ours", ""),
-            Verdict::Empty => ("empty", ""),
-            Verdict::Released => ("released", ""),
-            Verdict::Wait(why) => ("wait", why.as_str()),
-        };
+        let (verdict, reason) = (decision.verdict.name(), decision.verdict.reason());
         let action = match &decision.action {
             DriveAction::Skip => "skip",
             DriveAction::Idle => "idle",
