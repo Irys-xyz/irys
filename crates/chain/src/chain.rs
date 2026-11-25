@@ -3,7 +3,7 @@ use crate::metrics;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use crate::vdf_seed_source::DbVdfSeedSource;
 use actix_web::dev::Server;
-use eyre::Context as _;
+use eyre::{Context as _, OptionExt as _};
 use futures::FutureExt as _;
 use irys_actors::{
     BlockValidationTracker, DataSyncService, StorageModuleService,
@@ -1986,7 +1986,12 @@ impl IrysNode {
                 ledger.total_chunks
             );
         }
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
+        let (storage_module_infos, chain_genesis_hash) = Self::drive_verdicts_at_startup(
+            &config,
+            &storage_submodules_config.submodule_paths,
+            &epoch_snapshot,
+            &block_index_guard,
+        )?;
         let logical_chunks = epoch_snapshot.partition_chunks();
 
         let storage_modules = Self::init_storage_modules(
@@ -1997,6 +2002,7 @@ impl IrysNode {
         )
         .await?;
         for module in storage_modules.read().unwrap().iter() {
+            module.set_chain_identity(chain_genesis_hash);
             module.set_partition_chunks(logical_chunks)?;
             // Drives already carry a finalized resize the chain view has not
             // reached (DB restored or wiped): mine and pack the retained prefix
@@ -2861,6 +2867,60 @@ impl IrysNode {
             block_discovery_rx,
             runtime_handle,
         )
+    }
+
+    /// Decides what every configured drive holds before any is opened, logs
+    /// the verdicts, and returns the modules to open (a Foreign or unreadable
+    /// drive is not opened) with the genesis hash later writes stamp. Nothing
+    /// is written here. Startup is never in sync, and the epoch is final only
+    /// when it is at or below the finalized height of the block-index tip.
+    fn drive_verdicts_at_startup(
+        config: &Config,
+        paths: &[std::path::PathBuf],
+        epoch_snapshot: &irys_domain::EpochSnapshot,
+        block_index_guard: &BlockIndexReadGuard,
+    ) -> eyre::Result<(Vec<StorageModuleInfo>, H256)> {
+        use irys_domain::drive_verdict;
+
+        let (genesis_hash, index_tip) = {
+            let index = block_index_guard.read();
+            let genesis = index
+                .get_item(0)
+                .ok_or_eyre("block index has no genesis item")?
+                .block_hash;
+            (genesis, index.latest_height())
+        };
+        let finalized = irys_domain::forkchoice_markers::finalized_height(
+            index_tip,
+            config.consensus.block_tree_depth,
+            u64::from(config.consensus.block_migration_depth),
+        );
+        let epoch_is_final = epoch_snapshot.epoch_height <= finalized;
+
+        let miner = config.node_config.miner_address();
+        let assignments = epoch_snapshot.get_partition_assignments(miner);
+        let identity = drive_verdict::ChainIdentity {
+            chain_id: config.consensus.chain_id,
+            genesis_hash,
+            miner,
+        };
+        let drives = drive_verdict::drive_verdict_inputs_from_disk(config, paths);
+        let inputs = drive_verdict::VerdictInputs {
+            drives: &drives,
+            assignments: &assignments,
+            epoch_height: epoch_snapshot.epoch_height,
+            epoch_is_final,
+            in_sync: false,
+            identity: &identity,
+        };
+        let decisions = drive_verdict::decide(&inputs);
+        // Existing module paths retain their physical layout; logical bounds are
+        // resolved separately and the finalized migration removes their suffix.
+        let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
+            .wrap_err("num_chunks_in_partition exceeds u32")?;
+        let infos = drive_verdict::storage_module_infos(&drives, &decisions, num_chunks);
+        drive_verdict::log_decisions(&inputs, &decisions, &infos);
+        Ok((infos, genesis_hash))
     }
 
     async fn init_storage_modules(

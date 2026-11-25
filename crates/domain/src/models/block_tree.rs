@@ -1957,10 +1957,12 @@ mod tests {
         EmaSnapshot::genesis(&genesis_header)
     }
 
-    /// A corrupt packing file must come back from restore as an error.
-    /// Genesis still builds. The packing read is the failure.
+    /// Restore does not read drives: a corrupt packing file does not stop
+    /// the epoch replay (startup judges that drive Foreign and does not open
+    /// it). This test stores no start block header, so restore stops at that
+    /// read, after the replay.
     #[test]
-    fn corrupt_packing_file_is_a_restore_error() -> eyre::Result<()> {
+    fn corrupt_packing_file_does_not_stop_restore() -> eyre::Result<()> {
         use crate::{BlockIndex, BlockIndexReadGuard, EpochReplayData, PACKING_PARAMS_FILE_NAME};
         use irys_database::DatabaseProviderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
@@ -2007,9 +2009,14 @@ mod tests {
             &submodules,
             config,
         )
-        .expect_err("a corrupt packing file must not abort restore");
+        .expect_err("no start block header is stored");
         let text = format!("{err:#}");
-        assert!(text.contains("packing params"), "{text}");
+        assert!(text.contains("start block header not found"), "{text}");
+        assert_eq!(
+            std::fs::read(sub_dir.join(PACKING_PARAMS_FILE_NAME))?,
+            b"not = toml [[[",
+            "restore must not touch the packing file"
+        );
         Ok(())
     }
 

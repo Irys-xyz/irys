@@ -8,9 +8,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use irys_types::{DataLedger, H256, IrysAddress, partition::PartitionAssignment};
+use irys_types::{
+    Config, DataLedger, H256, IrysAddress, PartitionChunkOffset, partition::PartitionAssignment,
+    partition_chunk_offset_ie,
+};
+use tracing::{error, info, warn};
 
-use super::storage_module::{PACKING_PARAMS_VERSION, PackingParams};
+use super::storage_module::{
+    PACKING_PARAMS_FILE_NAME, PACKING_PARAMS_VERSION, PackingParams, StorageModuleInfo,
+};
 
 /// What was found at a drive's `packing_params.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +269,149 @@ pub fn unplaced(
         .into_iter()
         .filter(|a| !received.contains(&a.partition_hash))
         .collect()
+}
+
+/// Reads each configured drive's `packing_params.toml`, in configured order
+/// (index = module id). A relative path resolves against the base directory.
+/// No file is `Missing`; a file that cannot be checked, read or parsed is
+/// `Unreadable`. Never writes.
+pub fn drive_verdict_inputs_from_disk(
+    config: &Config,
+    paths: &[PathBuf],
+) -> Vec<(PathBuf, DriveFile)> {
+    paths
+        .iter()
+        .map(|path| {
+            let file = config
+                .node_config
+                .base_directory
+                .join(path)
+                .join(PACKING_PARAMS_FILE_NAME);
+            let found = match file.try_exists() {
+                Ok(false) => DriveFile::Missing,
+                Ok(true) => match PackingParams::from_toml(&file) {
+                    Ok(params) => DriveFile::Recorded(params),
+                    Err(err) => DriveFile::Unreadable(format!("{err:#}")),
+                },
+                Err(err) => DriveFile::Unreadable(format!("stat {}: {err}", file.display())),
+            };
+            (path.clone(), found)
+        })
+        .collect()
+}
+
+/// The assignment a drive is opened (or kept) with, or `None` when it is
+/// opened idle. Opening never replaces a recorded partition: `Assign` applies
+/// only to a drive that records no partition or records that same hash. A
+/// Released drive that receives a new partition, and a `Clear` drive, open
+/// idle; the storage module service wipes and reassigns them.
+fn applied_assignment(decision: &DriveDecision, file: &DriveFile) -> Option<PartitionAssignment> {
+    let DriveAction::Assign(assignment) = decision.action else {
+        return None;
+    };
+    let recorded = match file {
+        DriveFile::Recorded(params) => params.partition_hash,
+        DriveFile::Missing | DriveFile::Unreadable(_) => None,
+    };
+    recorded
+        .is_none_or(|hash| hash == assignment.partition_hash)
+        .then_some(assignment)
+}
+
+/// One [`StorageModuleInfo`] per drive that is opened, in id order. `Skip`
+/// drives are left out, so a module id is always its configured path index
+/// and ids can have gaps.
+pub fn storage_module_infos(
+    drives: &[(PathBuf, DriveFile)],
+    decisions: &[DriveDecision],
+    num_chunks: u32,
+) -> Vec<StorageModuleInfo> {
+    decisions
+        .iter()
+        .filter(|decision| decision.action != DriveAction::Skip)
+        .map(|decision| StorageModuleInfo {
+            id: decision.id,
+            partition_assignment: applied_assignment(decision, &drives[decision.id].1),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, num_chunks),
+                decision.path.clone(),
+            )],
+        })
+        .collect()
+}
+
+/// Logs one INFO line per drive (id, path, verdict, action, recorded and
+/// applied partition, reason), an ERROR for each drive that is not opened, a
+/// WARN for each drive left waiting, and a WARN for each assignment no drive
+/// holds or receives.
+pub fn log_decisions(
+    inputs: &VerdictInputs<'_>,
+    decisions: &[DriveDecision],
+    infos: &[StorageModuleInfo],
+) {
+    for decision in decisions {
+        let file = &inputs.drives[decision.id].1;
+        let recorded = match file {
+            DriveFile::Recorded(params) => params.partition_hash,
+            DriveFile::Missing | DriveFile::Unreadable(_) => None,
+        };
+        let applied = infos
+            .iter()
+            .find(|info| info.id == decision.id)
+            .and_then(|info| info.partition_assignment);
+        let (verdict, reason) = match &decision.verdict {
+            Verdict::Foreign(why) => ("foreign", why.as_str()),
+            Verdict::Ours => ("ours", ""),
+            Verdict::Empty => ("empty", ""),
+            Verdict::Released => ("released", ""),
+            Verdict::Wait(why) => ("wait", why.as_str()),
+        };
+        let action = match &decision.action {
+            DriveAction::Skip => "skip",
+            DriveAction::Idle => "idle",
+            DriveAction::Assign(_) if applied.is_none() => "idle until the service reassigns",
+            DriveAction::Assign(_) => "assign",
+            DriveAction::Clear => "idle until the service clears",
+        };
+        info!(
+            storage_module.id = decision.id,
+            storage_module.path = %decision.path.display(),
+            drive.verdict = verdict,
+            drive.action = action,
+            partition.recorded = ?recorded,
+            partition.hash = ?applied.map(|pa| pa.partition_hash),
+            partition.ledger_id = ?applied.and_then(|pa| pa.ledger_id),
+            partition.slot_index = ?applied.and_then(|pa| pa.slot_index),
+            drive.reason = reason,
+            epoch.height = inputs.epoch_height,
+            epoch.is_final = inputs.epoch_is_final,
+            "drive verdict"
+        );
+        match &decision.verdict {
+            Verdict::Foreign(why) => error!(
+                storage_module.id = decision.id,
+                storage_module.path = %decision.path.display(),
+                drive.reason = %why,
+                "drive is not opened and is left untouched"
+            ),
+            Verdict::Wait(why) => warn!(
+                storage_module.id = decision.id,
+                storage_module.path = %decision.path.display(),
+                partition.recorded = ?recorded,
+                drive.reason = %why,
+                "drive is opened idle and left untouched"
+            ),
+            Verdict::Ours | Verdict::Empty | Verdict::Released => {}
+        }
+    }
+    for assignment in unplaced(inputs, decisions) {
+        warn!(
+            partition.hash = %assignment.partition_hash,
+            partition.ledger_id = ?assignment.ledger_id,
+            partition.slot_index = ?assignment.slot_index,
+            "no configured drive holds or receives this assigned partition"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -644,5 +793,99 @@ mod tests {
         let ok = rec(v2(1, Some(DataLedger::Publish), Some(0), 10));
         let (d, _) = run(&[drive(0, ok)], &a, true, true);
         assert!(!d[0].stamp_v2);
+    }
+
+    /// Startup reads each drive's file without writing: no file is Missing,
+    /// a corrupt file is Unreadable, and a relative path resolves against the
+    /// base directory.
+    #[test]
+    fn inputs_from_disk_reads_missing_unreadable_and_recorded() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("drive_inputs")
+            .build();
+        let mut node_config = irys_types::NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let missing = PathBuf::from("missing");
+        let corrupt = PathBuf::from("corrupt");
+        let held = tmp.path().join("held");
+        for dir in [
+            tmp.path().join(&missing),
+            tmp.path().join(&corrupt),
+            held.clone(),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let corrupt_file = tmp.path().join(&corrupt).join(PACKING_PARAMS_FILE_NAME);
+        std::fs::write(&corrupt_file, b"not = toml [[[").unwrap();
+        let params = v2(1, Some(DataLedger::Publish), Some(0), 10);
+        let held_file = held.join(PACKING_PARAMS_FILE_NAME);
+        params.write_to_disk(&held_file).unwrap();
+        let held_bytes = std::fs::read(&held_file).unwrap();
+
+        let inputs = drive_verdict_inputs_from_disk(
+            &config,
+            &[missing.clone(), corrupt.clone(), held.clone()],
+        );
+
+        assert_eq!(inputs[0], (missing.clone(), DriveFile::Missing));
+        assert!(
+            matches!(&inputs[1], (p, DriveFile::Unreadable(e)) if *p == corrupt && e.contains("packing params")),
+            "{inputs:?}"
+        );
+        assert_eq!(inputs[2], (held, DriveFile::Recorded(params)));
+        assert!(
+            !tmp.path()
+                .join(&missing)
+                .join(PACKING_PARAMS_FILE_NAME)
+                .exists()
+        );
+        assert_eq!(std::fs::read(&held_file).unwrap(), held_bytes);
+    }
+
+    /// Skipped drives are not opened and ids keep their path index. Open
+    /// never replaces a recorded partition: a Released drive that receives a
+    /// new partition opens idle, as does a Clear drive.
+    #[test]
+    fn infos_leave_out_skipped_and_never_replace_a_recorded_partition() {
+        let mut foreign = v2(9, None, None, 10);
+        foreign.packing_address = IrysAddress::from([0xBB; 20]);
+        let drives = [
+            drive(0, rec(foreign)),
+            drive(1, rec(v2(1, Some(DataLedger::Publish), Some(0), 10))),
+            drive(2, DriveFile::Missing),
+            drive(3, rec(v2(7, None, None, 10))),
+            drive(4, rec(v2(8, None, None, 10))),
+        ];
+        let assignments = [
+            pa(1, Some(DataLedger::Publish), Some(0)),
+            pa(2, None, None),
+            pa(3, None, None),
+        ];
+        let (d, _) = run(&drives, &assignments, true, false);
+        assert_eq!(d[3].verdict, Verdict::Released);
+        assert_eq!(assigned_hash(&d[3]), Some(h(3)));
+        assert_eq!(d[4].action, DriveAction::Clear);
+
+        let infos = storage_module_infos(&drives, &d, 10);
+        let got: Vec<(usize, Option<H256>, PathBuf)> = infos
+            .iter()
+            .map(|i| {
+                (
+                    i.id,
+                    i.partition_assignment.map(|a| a.partition_hash),
+                    i.submodules[0].1.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, Some(h(1)), PathBuf::from("/d1")),
+                (2, Some(h(2)), PathBuf::from("/d2")),
+                (3, None, PathBuf::from("/d3")),
+                (4, None, PathBuf::from("/d4")),
+            ]
+        );
     }
 }
