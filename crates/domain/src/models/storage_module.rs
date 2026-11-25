@@ -24261,7 +24261,7 @@ mod tests {
             ledger_id: None,
             slot_index: None,
         };
-        let storage = StorageModule::new(&one_span(3, sub.clone(), Some(capacity)), &config)?;
+        let storage = StorageModule::new(&one_span(3, sub, Some(capacity)), &config)?;
         let loaded = PackingParams::from_toml(&params_path)?;
         assert_eq!(loaded.ledger, None, "the rebind ran");
         assert_eq!(loaded.assigned_height, None);
