@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795548138917,
+  "lastUpdate": 1795626033224,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -24343,6 +24343,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "f1be18d405d0be9ea1a0fa31d6bc158478d97dfe",
+          "message": "fix(storage): decide each drive's partition with one verdict; never wipe on non-final or uncertain information",
+          "timestamp": "2026-11-24T09:00:25Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1849/commits/f1be18d405d0be9ea1a0fa31d6bc158478d97dfe"
+        },
+        "date": 1795626031058,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011969,
+            "range": "± 0.000192",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119453,
+            "range": "± 0.002752",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.20766,
+            "range": "± 0.002366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.876674,
+            "range": "± 0.02221",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065425,
+            "range": "± 0.000094",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 651.975095,
+            "range": "± 5.122064",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 847.26746,
+            "range": "± 0.46872",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120128,
+            "range": "± 0.000757",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1278.049046,
+            "range": "± 132.533125",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1563.778927,
+            "range": "± 26.406269",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027395,
+            "range": "± 0.001003",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 136.809924,
+            "range": "± 19.624425",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 257.439919,
+            "range": "± 6.92983",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000151,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
