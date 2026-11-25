@@ -1945,6 +1945,7 @@ impl BlockTreeServiceInner {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: Arc::new(assignments),
                 epoch_height: epoch_snapshot.epoch_height,
+                epoch_block_hash: epoch_snapshot.epoch_block.block_hash(),
                 update_height,
                 in_sync: !self.chain_sync_state.is_syncing(),
             },
