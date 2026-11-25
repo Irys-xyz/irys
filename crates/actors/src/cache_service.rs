@@ -1,3 +1,4 @@
+use crate::anchor_validation::validate_ingress_proof_anchor_for_inclusion;
 use crate::chunk_ingress_service::ChunkIngressServiceInner;
 use crate::chunk_ingress_service::ingress_proofs::{
     IngressProofGenerationState, RegenAction, generate_and_store_ingress_proof,
@@ -1767,6 +1768,10 @@ impl InnerCacheTask {
     ///   fails the stored-copy check, so the proof stops once the cache
     ///   bodies are gone.
     /// - (c) Unpromoted + expired + under capacity + local author: regenerate
+    /// - (d) Unpromoted + not expired + local author, anchored on a block in
+    ///   the window that is not canonical: reanchor where (b) or (c) would
+    ///   reanchor, never delete. A producer skips that anchor, so until the
+    ///   reanchor the proof cannot promote the tx.
     ///
     /// [`Self::restore_submit_ingress_proofs`] recreates a local proof that is
     /// already gone; `prune_cache` runs it after chunk reclamation.
@@ -1804,13 +1809,16 @@ impl InnerCacheTask {
         let mut processed = 0_usize;
         // Local unpromoted proofs whose cached bodies are already persisted
         // (or gone). Stored-copy IO runs after `tx` is dropped so a module
-        // scan cannot pin MDBX free-page reclamation.
+        // scan cannot pin MDBX free-page reclamation. The bool is true when
+        // the anchor is expired: only then does a missing stored copy delete
+        // the proof.
         let mut stored_copy_candidates: Vec<(
             DataRoot,
             CompactCachedIngressProof,
             IngressProof,
             RegenAction,
             u64,
+            bool,
         )> = Vec::new();
         let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
 
@@ -1850,21 +1858,55 @@ impl InnerCacheTask {
                     &self.config,
                     &proof,
                 );
-                if !check_result.expired_or_invalid {
+                let anchor_expired = check_result.expired_or_invalid;
+                let is_locally_produced = address == local_addr;
+                // The expiry check accepts an anchor on a fork block, because
+                // that fork can still become canonical, so the proof is not
+                // deleted. But a producer includes only a proof with a
+                // canonical anchor, so this node reanchors its own proof.
+                let local_anchor_off_canonical_chain = !anchor_expired
+                    && is_locally_produced
+                    && !self.anchor_is_canonical_in_window(&proof);
+                if !anchor_expired && !local_anchor_off_canonical_chain {
                     continue;
                 }
                 let mut any_unpromoted = false;
                 for txid in cached_data_root.txid_set.iter() {
-                    if let Some(tx_header) = tx_header_by_txid(&consensus_tx, txid)?
-                        && tx_header.promoted_height().is_none()
-                    {
+                    let tx_header = tx_header_by_txid(&consensus_tx, txid)?;
+                    let tx_is_unpromoted = tx_header
+                        .as_ref()
+                        .is_some_and(|header| header.promoted_height().is_none());
+                    let pending_tx_header_not_migrated =
+                        local_anchor_off_canonical_chain && tx_header.is_none();
+                    if tx_is_unpromoted || pending_tx_header_not_migrated {
                         any_unpromoted = true;
-                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?txid, "Found unpromoted tx for data root");
                         break;
                     }
                 }
 
-                let is_locally_produced = address == local_addr;
+                if local_anchor_off_canonical_chain {
+                    // This node's proof, anchored inside the window but off
+                    // the canonical chain. Reanchor it only where an expired
+                    // proof would be reanchored; never delete it.
+                    if !any_unpromoted {
+                        continue;
+                    }
+                    if !at_capacity || self.cached_body_still_unpersisted(tx.inner(), data_root)? {
+                        to_reanchor.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = at_capacity, "Marking local proof for reanchoring; its anchor is not on the canonical chain");
+                    } else {
+                        stored_copy_candidates.push((
+                            data_root,
+                            compact,
+                            proof,
+                            RegenAction::Reanchor,
+                            cached_data_root.data_size,
+                            false,
+                        ));
+                    }
+                    continue;
+                }
 
                 if at_capacity {
                     // The cap is for chunk bytes. A local unpromoted proof
@@ -1901,6 +1943,7 @@ impl InnerCacheTask {
                             proof,
                             check_result.regeneration_action,
                             cached_data_root.data_size,
+                            true,
                         ));
                     }
                 } else if is_locally_produced && any_unpromoted {
@@ -1946,7 +1989,31 @@ impl InnerCacheTask {
 
         if !stored_copy_candidates.is_empty() {
             let modules = self.proof_submit_modules();
-            for (data_root, compact, proof, regen, data_size) in stored_copy_candidates {
+            for (data_root, compact, proof, regen, data_size, anchor_expired) in
+                stored_copy_candidates
+            {
+                if !anchor_expired {
+                    // A reanchor signs a new proof, so it needs a confirmed
+                    // stored copy. Unreadable metadata keeps the proof as it is.
+                    let stored = modules.iter().any(|storage_module| {
+                        storage_module
+                            .holds_full_persisted_data_root(data_root, data_size)
+                            .unwrap_or_else(|error| {
+                                warn!(
+                                    ingress_proof.data_root = ?data_root,
+                                    storage_module = %storage_module.id,
+                                    ?error,
+                                    "Not reanchoring local ingress proof: storage metadata is unreadable"
+                                );
+                                false
+                            })
+                    });
+                    if stored {
+                        to_reanchor.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking local proof for reanchoring; its anchor is not on the canonical chain and a live Submit module stores the full data root");
+                    }
+                    continue;
+                }
                 if self.live_submit_module_holds_full_copy(&modules, data_root, data_size) {
                     info!(
                         ingress_proof.data_root = ?data_root,
@@ -2015,6 +2082,7 @@ impl InnerCacheTask {
         for proof in to_reanchor.iter() {
             if let Err(error) = reanchor_and_store_ingress_proof(
                 &self.block_tree_guard,
+                &self.block_index_guard,
                 &self.db,
                 &self.config,
                 &signer,
@@ -2033,6 +2101,7 @@ impl InnerCacheTask {
         for proof in to_regen.iter() {
             if let Err(error) = generate_and_store_ingress_proof(
                 &self.block_tree_guard,
+                &self.block_index_guard,
                 &self.db,
                 &self.config,
                 proof.data_root,
@@ -2056,6 +2125,32 @@ impl InnerCacheTask {
         }
 
         Ok(())
+    }
+
+    /// True when `proof`'s anchor is a canonical block inside the anchor
+    /// window that [`ChunkIngressServiceInner::is_ingress_proof_expired_static`]
+    /// uses. A producer includes only such a proof. A failed lookup counts as
+    /// canonical, so it changes nothing.
+    fn anchor_is_canonical_in_window(&self, proof: &IngressProof) -> bool {
+        let Some(latest_height) = self.block_tree_guard.latest_canonical_block_height() else {
+            return true;
+        };
+        let min_anchor_height = latest_height.saturating_sub(
+            self.config
+                .consensus
+                .mempool
+                .ingress_proof_anchor_expiry_depth as u64,
+        );
+        validate_ingress_proof_anchor_for_inclusion(
+            &self.block_tree_guard,
+            &self.db,
+            min_anchor_height,
+            proof,
+        )
+        .unwrap_or_else(|error| {
+            warn!(ingress_proof.data_root = ?proof.data_root, "Failed to check the ingress proof anchor against the canonical chain: {error}");
+            true
+        })
     }
 
     /// Local modules whose stored copy keeps or restores this node's proof:
@@ -2248,6 +2343,7 @@ impl InnerCacheTask {
             attempted += 1;
             match generate_and_store_ingress_proof(
                 &self.block_tree_guard,
+                &self.block_index_guard,
                 &self.db,
                 &self.config,
                 data_root,
@@ -6058,7 +6154,7 @@ mod tests {
 
     /// At capacity with no cached body, a live Submit module that durably
     /// stores the full placement keeps the local proof, and the staked node
-    /// reanchors it to the tip.
+    /// reanchors it to the latest migrated block.
     #[tokio::test]
     async fn prune_ingress_proofs_at_capacity_keeps_local_proof_for_stored_submit_copy()
     -> eyre::Result<()> {
@@ -6074,8 +6170,8 @@ mod tests {
         );
         assert_eq!(
             pass.author_anchor,
-            Some(pass.tip_hash),
-            "the kept proof is reanchored to the tip"
+            Some(pass.migrated_anchor),
+            "the kept proof is reanchored to the latest migrated block"
         );
         Ok(())
     }
@@ -6092,7 +6188,10 @@ mod tests {
         })?;
         assert!(pass.remaining.contains(&pass.author_addr));
         let anchor = pass.author_anchor.expect("the local proof is kept");
-        assert_ne!(anchor, pass.tip_hash, "the reanchor did not run");
+        assert_eq!(
+            anchor, pass.author_anchor_before_pass,
+            "the reanchor did not run"
+        );
         Ok(())
     }
 
@@ -6143,6 +6242,109 @@ mod tests {
             vec![pass.sibling_addr],
             "the expired proof must be deleted; only the sibling survives"
         );
+        Ok(())
+    }
+
+    /// After a reorg, this node's proof can keep an anchor on a fork block
+    /// inside the window. Producers skip it, so the pass reanchors it to the
+    /// latest migrated block while its tx is unpromoted. At capacity the existing
+    /// keep rules still apply: with no cached body and no stored copy, the
+    /// proof stays as it is until it expires.
+    #[rstest::rstest]
+    #[case::under_capacity(
+        AtCapacityCase { under_capacity: true, ..AtCapacityCase::default() },
+        true
+    )]
+    #[case::at_capacity_with_stored_submit_copy(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), ..AtCapacityCase::default() },
+        true
+    )]
+    #[case::at_capacity_without_stored_copy(AtCapacityCase::default(), false)]
+    #[tokio::test]
+    async fn prune_ingress_proofs_reanchors_local_proof_anchored_off_canonical_chain(
+        #[case] case: AtCapacityCase,
+        #[case] expect_reanchor: bool,
+    ) -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            author_anchor: AuthorProofAnchor::ForkBlock,
+            ..case
+        })?;
+        let mut expected = vec![pass.author_addr, pass.sibling_addr];
+        expected.sort();
+        assert_eq!(pass.remaining, expected, "no proof is deleted");
+        let expected_anchor = if expect_reanchor {
+            pass.migrated_anchor
+        } else {
+            pass.author_anchor_before_pass
+        };
+        assert_eq!(pass.author_anchor, Some(expected_anchor));
+        Ok(())
+    }
+
+    /// A tx in the cached root remains pending before its header's block
+    /// migrates. A local proof on a fork is reanchored without that header.
+    #[tokio::test]
+    async fn prune_ingress_proofs_reanchors_fork_proof_when_tx_header_has_not_migrated()
+    -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            tx_header_not_migrated: true,
+            author_anchor: AuthorProofAnchor::ForkBlock,
+            under_capacity: true,
+            ..AtCapacityCase::default()
+        })?;
+        let mut expected = vec![pass.author_addr, pass.sibling_addr];
+        expected.sort();
+        assert_eq!(pass.remaining, expected, "no proof is deleted");
+        assert_eq!(pass.author_anchor, Some(pass.migrated_anchor));
+        Ok(())
+    }
+
+    /// A missing consensus header does not make an expired proof eligible for
+    /// reanchoring. The expired-proof path keeps its prior behavior.
+    #[tokio::test]
+    async fn prune_ingress_proofs_does_not_reanchor_expired_proof_with_missing_tx_header()
+    -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            tx_header_not_migrated: true,
+            under_capacity: true,
+            ..AtCapacityCase::default()
+        })?;
+        assert_eq!(pass.remaining, vec![pass.sibling_addr]);
+        assert_eq!(pass.author_anchor, None);
+        Ok(())
+    }
+
+    /// A proof anchored inside the window is neither deleted nor reanchored
+    /// when it is another signer's, its anchor is canonical, or every tx is
+    /// promoted. A fork anchor alone does not make it expire.
+    #[rstest::rstest]
+    #[case::remote_author_on_fork_block(AtCapacityCase {
+        remote_author: true,
+        author_anchor: AuthorProofAnchor::ForkBlock,
+        ..AtCapacityCase::default()
+    })]
+    #[case::local_author_on_canonical_genesis(AtCapacityCase {
+        author_anchor: AuthorProofAnchor::CanonicalGenesis,
+        ..AtCapacityCase::default()
+    })]
+    #[case::local_author_on_fork_block_every_tx_promoted(AtCapacityCase {
+        promoted: true,
+        author_anchor: AuthorProofAnchor::ForkBlock,
+        ..AtCapacityCase::default()
+    })]
+    #[tokio::test]
+    async fn prune_ingress_proofs_leaves_unexpired_proof_unchanged(
+        #[case] case: AtCapacityCase,
+        #[values(false, true)] under_capacity: bool,
+    ) -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            under_capacity,
+            ..case
+        })?;
+        let mut expected = vec![pass.author_addr, pass.sibling_addr];
+        expected.sort();
+        assert_eq!(pass.remaining, expected, "no proof is deleted");
+        assert_eq!(pass.author_anchor, Some(pass.author_anchor_before_pass));
         Ok(())
     }
 
@@ -6234,9 +6436,11 @@ mod tests {
     }
 
     /// A staked miner whose live Submit module stores the root, with every
-    /// leaf and no proof row, gets the row back anchored to the tip.
+    /// leaf and no proof row, gets the row back anchored to the latest
+    /// migrated block even when the canonical tip is ahead.
     #[tokio::test]
-    async fn restore_regenerates_a_missing_local_proof() -> eyre::Result<()> {
+    async fn restore_regenerates_a_missing_local_proof_at_latest_migrated_block() -> eyre::Result<()>
+    {
         let fixture = proof_fixture(AtCapacityCase {
             module: Some(StoredCopy::FULL_SUBMIT),
             ..AtCapacityCase::RESTORE
@@ -6255,7 +6459,8 @@ mod tests {
         assert_eq!(local_anchor(&fixture.db)?, None);
 
         fixture.task.restore_submit_ingress_proofs()?;
-        assert_eq!(local_anchor(&fixture.db)?, Some(fixture.tip_hash));
+        assert_ne!(fixture.migrated_anchor, fixture.canonical_tip);
+        assert_eq!(local_anchor(&fixture.db)?, Some(fixture.migrated_anchor));
         Ok(())
     }
 
@@ -6337,6 +6542,8 @@ mod tests {
         module: Option<StoredCopy>,
         /// The root's only tx is promoted.
         promoted: bool,
+        /// The tx header's block has not migrated into the consensus database.
+        tx_header_not_migrated: bool,
         /// The expired proof is signed by another address, not this node.
         remote_author: bool,
         /// No expired proof is stored, as on a node that already lost it.
@@ -6351,6 +6558,23 @@ mod tests {
         unconfirmed_size: bool,
         /// CDR `block_set` is empty (restore skip).
         empty_block_set: bool,
+        /// Anchor of the author's proof.
+        author_anchor: AuthorProofAnchor,
+        /// The cache has room, so the pass runs under capacity.
+        under_capacity: bool,
+    }
+
+    /// The block tree is genesis with two children: the canonical tip and a
+    /// fork block that is not on the canonical chain.
+    #[derive(Clone, Copy, Debug, Default)]
+    enum AuthorProofAnchor {
+        /// An unknown block: the proof is expired.
+        #[default]
+        Unknown,
+        /// The fork block, inside the anchor window.
+        ForkBlock,
+        /// Genesis: canonical, inside the anchor window, and not the tip.
+        CanonicalGenesis,
     }
 
     impl AtCapacityCase {
@@ -6358,6 +6582,7 @@ mod tests {
         const RESTORE: Self = Self {
             module: None,
             promoted: false,
+            tx_header_not_migrated: false,
             remote_author: false,
             no_expired_proof: true,
             expire_submit_slot_0: false,
@@ -6365,6 +6590,8 @@ mod tests {
             missing_leaf: false,
             unconfirmed_size: false,
             empty_block_set: false,
+            author_anchor: AuthorProofAnchor::Unknown,
+            under_capacity: false,
         };
     }
 
@@ -6374,9 +6601,11 @@ mod tests {
         author_addr: IrysAddress,
         /// Anchor of the author's proof after the pass, if it is still there.
         author_anchor: Option<H256>,
+        /// Anchor of the author's proof before the pass.
+        author_anchor_before_pass: H256,
         sibling_addr: IrysAddress,
-        /// Canonical tip, the anchor a reanchor or restore signs.
-        tip_hash: H256,
+        /// Latest migrated block, the anchor a reanchor or restore signs.
+        migrated_anchor: H256,
     }
 
     /// One `prune_ingress_proofs` pass at capacity with no cached body.
@@ -6397,8 +6626,9 @@ mod tests {
             remaining,
             author_addr: fixture.author_addr,
             author_anchor,
+            author_anchor_before_pass: fixture.author_anchor,
             sibling_addr: fixture.sibling_addr,
-            tip_hash: fixture.tip_hash,
+            migrated_anchor: fixture.migrated_anchor,
         })
     }
 
@@ -6407,21 +6637,27 @@ mod tests {
         db: DatabaseProvider,
         data_root: DataRoot,
         author_addr: IrysAddress,
+        /// Anchor of the author's proof as stored.
+        author_anchor: H256,
         sibling_addr: IrysAddress,
-        tip_hash: H256,
+        migrated_anchor: H256,
+        canonical_tip: H256,
         _db_dir: irys_testing_utils::utils::tempfile::TempDir,
         _sm_dir: irys_testing_utils::utils::tempfile::TempDir,
     }
 
-    /// A cache at capacity with no cached body: one 64-byte cached data root
-    /// with one tx, an expired proof (this node's unless `remote_author`, and
-    /// absent with `no_expired_proof`), and a sibling proof anchored to
+    /// A cache at capacity (unless `under_capacity`) with no cached body: one
+    /// 64-byte cached data root with one tx, the author's proof (this node's
+    /// unless `remote_author`, expired unless `author_anchor` says otherwise,
+    /// and absent with `no_expired_proof`), and a sibling proof anchored to
     /// genesis that never expires. This node is staked and holds both leaves
     /// unless `unstaked` or `missing_leaf` says otherwise.
     fn proof_fixture(case: AtCapacityCase) -> eyre::Result<ProofFixture> {
         let mut node_config = NodeConfig::testing();
-        // Force at_capacity = true: chunk_cache_size (0) >= 0.
-        node_config.cache.max_cache_size_bytes = 0;
+        if !case.under_capacity {
+            // Force at_capacity = true: chunk_cache_size (0) >= 0.
+            node_config.cache.max_cache_size_bytes = 0;
+        }
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
@@ -6443,8 +6679,25 @@ mod tests {
         // Build the genesis block; its hash is a valid anchor (not expired).
         let genesis_block = new_mock_signed_header();
         let valid_anchor = genesis_block.block_hash;
-        // Unknown anchor → expired.
-        let expired_anchor = H256::random();
+        // Two children of genesis: the canonical tip, and a fork block that is
+        // in the tree but not on the canonical chain.
+        let child_block = |cumulative_diff: u64| {
+            let mut header = new_mock_signed_header();
+            header.height = genesis_block.height + 1;
+            header.previous_block_hash = genesis_block.block_hash;
+            header.cumulative_diff =
+                genesis_block.cumulative_diff + irys_types::U256::from(cumulative_diff);
+            header.test_sign();
+            header
+        };
+        let fork_block = child_block(1);
+        let tip_block = child_block(2);
+        let author_anchor = match case.author_anchor {
+            // Unknown anchor → expired.
+            AuthorProofAnchor::Unknown => H256::random(),
+            AuthorProofAnchor::ForkBlock => fork_block.block_hash,
+            AuthorProofAnchor::CanonicalGenesis => valid_anchor,
+        };
 
         db.update(|wtx| -> eyre::Result<()> {
             db.update_cache_eyre(|cache_tx| {
@@ -6463,32 +6716,35 @@ mod tests {
                 };
                 cache_tx.put::<CachedDataRoots>(data_root, cdr)?;
 
-                // Unpromoted tx header (promoted_height = None by default).
-                let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                    tx: DataTransactionHeaderV1 {
-                        id: txid,
-                        data_root,
-                        data_size: 64,
-                        ..Default::default()
-                    },
-                    metadata: DataTransactionMetadata::new(),
-                });
-                database::insert_tx_header(wtx, &tx_header)?;
-                if case.promoted {
-                    irys_database::set_data_tx_included_height(wtx, &txid, 1)
-                        .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
-                    irys_database::set_data_tx_promoted_height(wtx, &txid, 2)
-                        .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+                if !case.tx_header_not_migrated {
+                    // Unpromoted tx header (promoted_height = None by default).
+                    let tx_header =
+                        DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                            tx: DataTransactionHeaderV1 {
+                                id: txid,
+                                data_root,
+                                data_size: 64,
+                                ..Default::default()
+                            },
+                            metadata: DataTransactionMetadata::new(),
+                        });
+                    database::insert_tx_header(wtx, &tx_header)?;
+                    if case.promoted {
+                        irys_database::set_data_tx_included_height(wtx, &txid, 1)
+                            .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                        irys_database::set_data_tx_promoted_height(wtx, &txid, 2)
+                            .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+                    }
                 }
 
-                // Proof with expired anchor.
+                // The author's proof.
                 if !case.no_expired_proof {
-                    let mut expired_proof = IngressProof::default();
-                    expired_proof.data_root = data_root;
-                    expired_proof.anchor = expired_anchor;
+                    let mut author_proof = IngressProof::default();
+                    author_proof.data_root = data_root;
+                    author_proof.anchor = author_anchor;
                     irys_database::store_external_ingress_proof_checked(
                         cache_tx,
-                        &expired_proof,
+                        &author_proof,
                         author_addr,
                     )?;
                 }
@@ -6561,14 +6817,44 @@ mod tests {
                 "keep/restore happy path uses a live Submit slot"
             );
         }
+        let snapshot = Arc::new(snapshot);
         block_tree
             .blocks
             .get_mut(&genesis_block.block_hash)
             .expect("genesis entry")
-            .epoch_snapshot = Arc::new(snapshot);
+            .epoch_snapshot = Arc::clone(&snapshot);
+        for (child, chain_state) in [
+            (
+                &fork_block,
+                irys_domain::ChainState::Validated(irys_domain::BlockState::ValidBlock),
+            ),
+            (&tip_block, irys_domain::ChainState::Onchain),
+        ] {
+            let sealed = Arc::new(irys_types::SealedBlock::new_unchecked(
+                Arc::new(child.clone()),
+                irys_types::BlockTransactions::default(),
+            ));
+            block_tree.add_common(
+                child.block_hash,
+                &sealed,
+                Arc::new(irys_domain::CommitmentSnapshot::default()),
+                Arc::clone(&snapshot),
+                irys_domain::dummy_ema_snapshot(),
+                chain_state,
+            )?;
+        }
+        block_tree.mark_tip(&tip_block.block_hash)?;
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
+        block_index.push_item(
+            &irys_types::BlockIndexItem {
+                block_hash: genesis_block.block_hash,
+                num_ledgers: 0,
+                ledgers: Vec::new(),
+            },
+            genesis_block.height,
+        )?;
         let block_index_guard =
             irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
@@ -6604,8 +6890,10 @@ mod tests {
             db,
             data_root,
             author_addr,
+            author_anchor,
             sibling_addr,
-            tip_hash: valid_anchor,
+            migrated_anchor: genesis_block.block_hash,
+            canonical_tip: tip_block.block_hash,
             _db_dir: _temp_dir,
             _sm_dir: sm_dir,
         })

@@ -413,6 +413,7 @@ impl GossipServiceTestFixture {
                     db.clone(),
                     modules,
                     &block_tree,
+                    BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone())),
                     chunk_ingress_rx,
                     &config,
                     &service_senders,
