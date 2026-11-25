@@ -892,6 +892,11 @@ pub struct StorageModule {
     pub id: usize,
     /// The (Optional) info about a partition assigned to this storage module
     pub partition_assignment: RwLock<Option<PartitionAssignment>>,
+    /// In-memory copy of the first submodule's `packing_params.toml`. Set at
+    /// open and by every write path.
+    recorded_params: RwLock<Option<PackingParams>>,
+    /// Genesis hash stamped into v2 params. Set once after open.
+    genesis_hash: RwLock<Option<H256>>,
     /// Bumped under the assignment write lock at the start of
     /// [`Self::rollback_unassigned_range`], before the index clear.
     /// A registration captured at the previous value does not commit.
@@ -1129,7 +1134,21 @@ pub struct PackingParams {
     pub partition_hash: Option<H256>,
     pub ledger: Option<u32>,
     pub slot: Option<usize>,
+    /// Height of the last write. Not trusted as the assignment height in a v1
+    /// file (see [`Self::trusted_assigned_height`]).
     pub last_updated_height: Option<u64>,
+    /// File format version. Absent in a v1 file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    /// Chain this module was assigned on. Written by v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<u64>,
+    /// Genesis block hash of the chain this module was assigned on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genesis_hash: Option<H256>,
+    /// Epoch height at which the current assignment was installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_height: Option<u64>,
     /// Iterations this module was packed with. Absent on a file written
     /// before the field existed. Open fills it from the current consensus
     /// and writes the file back.
@@ -1140,7 +1159,36 @@ pub struct PackingParams {
     pub chunk_size: Option<u64>,
 }
 
+/// Current `packing_params.toml` format version.
+pub const PACKING_PARAMS_VERSION: u32 = 2;
+
 impl PackingParams {
+    /// True when the file declares version 2 or newer.
+    pub fn is_v2(&self) -> bool {
+        self.version.is_some_and(|v| v >= PACKING_PARAMS_VERSION)
+    }
+
+    /// The assignment height, trusted only in a v2 file. A v1 file's
+    /// `last_updated_height` was also written at open, so it proves nothing.
+    pub fn trusted_assigned_height(&self) -> Option<u64> {
+        if self.is_v2() {
+            self.assigned_height
+        } else {
+            None
+        }
+    }
+
+    /// Mark these params as a v2 assignment installed at `assigned_height`.
+    /// `last_updated_height` is kept equal to it so old binaries read the same height.
+    pub fn stamped(mut self, chain_id: u64, genesis_hash: H256, assigned_height: u64) -> Self {
+        self.version = Some(PACKING_PARAMS_VERSION);
+        self.chain_id = Some(chain_id);
+        self.genesis_hash = Some(genesis_hash);
+        self.assigned_height = Some(assigned_height);
+        self.last_updated_height = Some(assigned_height);
+        self
+    }
+
     /// Loads the [`PackingParams`] from a TOML file at the given path.
     /// A read or parse error names `path`.
     pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
@@ -2496,8 +2544,21 @@ impl StorageModule {
             params.ledger = ledger;
             params.slot = slot;
             params.last_updated_height = Some(0);
+            if params.is_v2() {
+                params.assigned_height = Some(0);
+            }
             params.write_to_disk(&path)?;
         }
+        let initial_recorded = storage_module_info.submodules.first().and_then(|(_, dir)| {
+            PackingParams::from_toml(
+                config
+                    .node_config
+                    .base_directory
+                    .join(dir)
+                    .join(PACKING_PARAMS_FILE_NAME),
+            )
+            .ok()
+        });
 
         // Attempt to load a global set of intervals from the submodules
         let mut loaded_intervals: NoditMap<
@@ -2574,6 +2635,8 @@ impl StorageModule {
         let module = Self {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
+            recorded_params: RwLock::new(initial_recorded),
+            genesis_hash: RwLock::new(None),
             rollback_generation: AtomicU64::new(0),
             index_recovery: RwLock::new(()),
             pending_writes: RwLock::new(PendingWrites::default()),
@@ -2846,6 +2909,17 @@ impl StorageModule {
         self.store_assignment(&mut pa, Some(partition_assignment), update_height)
     }
 
+    /// In-memory copy of this module's `packing_params.toml`.
+    pub fn recorded_params(&self) -> Option<PackingParams> {
+        *self.recorded_params.read().unwrap()
+    }
+
+    /// Set the genesis hash that later assignment writes stamp into the file.
+    /// Call once right after open.
+    pub fn set_chain_identity(&self, genesis_hash: H256) {
+        *self.genesis_hash.write().unwrap() = Some(genesis_hash);
+    }
+
     /// Clears the current partition assignment and persists the change on disk.
     ///
     /// Writes `packing_params.toml` with `partition_hash = None`, `ledger = None`,
@@ -2868,6 +2942,7 @@ impl StorageModule {
         self.inject_sync_failure(SyncFailurePoint::AssignmentStore)?;
         let old_hash = assignment.as_ref().map(|current| current.partition_hash);
         let new_hash = next.map(|current| current.partition_hash);
+        let genesis_hash = *self.genesis_hash.read().unwrap();
         let mut updated = Vec::new();
         for (_, submodule) in self.submodules.iter() {
             let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
@@ -2883,7 +2958,18 @@ impl StorageModule {
             params.partition_hash = next.map(|assignment| assignment.partition_hash);
             params.ledger = next.and_then(|assignment| assignment.ledger_id);
             params.slot = next.and_then(|assignment| assignment.slot_index);
-            params.last_updated_height = Some(update_height);
+            match genesis_hash {
+                Some(genesis_hash) => {
+                    params =
+                        params.stamped(self.config.consensus.chain_id, genesis_hash, update_height);
+                }
+                None => {
+                    params.last_updated_height = Some(update_height);
+                    if params.is_v2() {
+                        params.assigned_height = Some(update_height);
+                    }
+                }
+            }
             // Keep the iterations this module was packed with. Fill them only
             // when the file never recorded them.
             params.backfill_recorded_packing(&self.config.consensus);
@@ -2891,6 +2977,9 @@ impl StorageModule {
         }
         for (path, params) in &updated {
             params.write_to_disk(path)?;
+        }
+        if let Some((_, params)) = updated.first() {
+            *self.recorded_params.write().unwrap() = Some(*params);
         }
         *assignment = next;
         if old_hash != new_hash {
@@ -24055,5 +24144,92 @@ mod tests {
             assert_eq!(live_label(storage_ref, 0), Some(ChunkType::Entropy));
             Ok(())
         })
+    }
+
+    #[test]
+    fn v1_file_parses_with_untrusted_height() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("pp_v1").build();
+        let path = tmp.path().join(PACKING_PARAMS_FILE_NAME);
+        let hash = H256::repeat_byte(0x11);
+        let toml = format!(
+            "packing_address = \"{}\"\npartition_hash = \"{}\"\nledger = 0\nslot = 1\nlast_updated_height = 0\n",
+            IrysAddress::default(),
+            hash
+        );
+        fs::write(&path, toml)?;
+        let loaded = PackingParams::from_toml(&path)?;
+        assert!(!loaded.is_v2());
+        assert_eq!(loaded.last_updated_height, Some(0));
+        assert_eq!(loaded.trusted_assigned_height(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn v2_round_trips() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("pp_v2").build();
+        let path = tmp.path().join(PACKING_PARAMS_FILE_NAME);
+        let params = PackingParams {
+            partition_hash: Some(H256::repeat_byte(0x22)),
+            ledger: Some(1),
+            slot: Some(3),
+            entropy_packing_iterations: Some(7),
+            chunk_size: Some(32),
+            ..PackingParams::default()
+        }
+        .stamped(1270, H256::repeat_byte(0x33), 42);
+        params.write_to_disk(&path)?;
+        let loaded = PackingParams::from_toml(&path)?;
+        assert_eq!(loaded, params);
+        assert!(loaded.is_v2());
+        assert_eq!(loaded.trusted_assigned_height(), Some(42));
+        let text = fs::read_to_string(&path)?;
+        assert!(text.contains("version = 2"), "{text}");
+        assert!(text.contains("assigned_height = 42"), "{text}");
+        assert!(text.contains("last_updated_height = 42"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn newer_version_parses() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("pp_v3").build();
+        let path = tmp.path().join(PACKING_PARAMS_FILE_NAME);
+        let toml = format!(
+            "version = 3\npacking_address = \"{}\"\nfuture_field = 1\nlast_updated_height = 9\n",
+            IrysAddress::default()
+        );
+        fs::write(&path, toml)?;
+        let loaded = PackingParams::from_toml(&path)?;
+        assert_eq!(loaded.version, Some(3));
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_params_follow_writes() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("pp_recorded").build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x61);
+        let sub = tmp.path().join("chunks");
+        let storage = StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
+            &config,
+        )?;
+        let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+        let on_disk = || PackingParams::from_toml(&params_path);
+        assert_eq!(storage.recorded_params(), Some(on_disk()?));
+
+        storage.set_chain_identity(H256::repeat_byte(0x77));
+        storage.assign_partition(submit_slot(&config, hash, 1), 9)?;
+        let recorded = storage.recorded_params().expect("recorded");
+        assert_eq!(recorded, on_disk()?);
+        assert_eq!(recorded.slot, Some(1));
+        assert_eq!(recorded.trusted_assigned_height(), Some(9));
+        assert_eq!(recorded.genesis_hash, Some(H256::repeat_byte(0x77)));
+
+        storage.clear_assignment(11)?;
+        let recorded = storage.recorded_params().expect("recorded");
+        assert_eq!(recorded, on_disk()?);
+        assert_eq!(recorded.partition_hash, None);
+        assert_eq!(recorded.trusted_assigned_height(), Some(11));
+        Ok(())
     }
 }

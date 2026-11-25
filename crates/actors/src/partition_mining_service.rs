@@ -1918,6 +1918,7 @@ mod tests {
                 last_updated_height: Some(20),
                 entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
                 chunk_size: Some(32),
+                ..Default::default()
             },
         );
         inner.finish_expiry_reset();
@@ -1974,6 +1975,7 @@ mod tests {
                 last_updated_height: Some(10),
                 entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
                 chunk_size: Some(32),
+                ..Default::default()
             },
         );
         inner.finish_expiry_reset();
