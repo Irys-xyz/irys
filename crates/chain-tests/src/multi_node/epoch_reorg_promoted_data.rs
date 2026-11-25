@@ -23,11 +23,16 @@ use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::DatabaseProviderCacheExt as _;
-use irys_domain::ChunkType;
+use irys_domain::forkchoice_markers::finalized_height;
+use irys_domain::{
+    BlockIndexReadGuard, ChunkType, PACKING_PARAMS_FILE_NAME, StorageModulesReadGuard,
+};
+use irys_types::storage::Interval;
 use irys_types::{
-    DataLedger, DataTransaction, NodeConfig, TxChunkOffset, UnixTimestamp,
+    DataLedger, DataTransaction, NodeConfig, PartitionChunkOffset, TxChunkOffset, UnixTimestamp,
     hardfork_config::Cascade, irys::IrysSigner,
 };
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -427,4 +432,341 @@ async fn post_publish_tx(
         warn!("tx promoted before any block — unexpected");
     }
     Ok(tx)
+}
+
+/// What one storage module holds: (Data intervals, Entropy intervals, reset flag).
+type ModuleView = (
+    Vec<Interval<PartitionChunkOffset>>,
+    Vec<Interval<PartitionChunkOffset>>,
+    bool,
+);
+
+fn module_views(guard: &StorageModulesReadGuard) -> BTreeMap<usize, ModuleView> {
+    guard
+        .read()
+        .iter()
+        .map(|sm| {
+            (
+                sm.id,
+                (
+                    sm.get_intervals(ChunkType::Data),
+                    sm.get_intervals(ChunkType::Entropy),
+                    sm.reset_incomplete(),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// Every offset in `before` is still in `after` (intervals are merged, so
+/// each old interval must sit inside one new interval).
+fn covers(
+    before: &[Interval<PartitionChunkOffset>],
+    after: &[Interval<PartitionChunkOffset>],
+) -> bool {
+    before.iter().all(|old| {
+        after
+            .iter()
+            .any(|new| new.start() <= old.start() && old.end() <= new.end())
+    })
+}
+
+/// Whether the block at `height` is final on this index: at or below the
+/// finalized height of the index tip.
+fn is_final_on(index: &BlockIndexReadGuard, config: &irys_types::Config, height: u64) -> bool {
+    finalized_height(
+        index.read().latest_height(),
+        config.consensus.block_tree_depth,
+        u64::from(config.consensus.block_migration_depth),
+    ) >= height
+}
+
+/// A shallow reorg across an epoch boundary whose two sides differ in a
+/// pledge-driven partition assignment must not wipe any drive before that
+/// epoch is final.
+///
+/// The peer pledges a second partition on its own fork; the fork's epoch block
+/// assigns it and the peer packs it onto an empty drive. The genesis fork,
+/// longer by one block and without that pledge, wins. The reorg (2 blocks) is
+/// within the migration depth. On the peer, from before the reorg until the
+/// genesis-fork epoch is final, every module's Data and Entropy intervals only
+/// grow, no module is reset, and the released drive's packing file is
+/// untouched. Once the epoch is final the drive is released (non-vacuity).
+///
+/// The epoch is longer than the block tree depth so that an epoch becomes
+/// final before the next one replaces its pending update.
+#[test_log::test(tokio::test)]
+async fn heavy4_shallow_epoch_reorg_wipes_no_drive() -> eyre::Result<()> {
+    const NUM_BLOCKS_IN_EPOCH: u64 = 6;
+    const MIGRATION_DEPTH: u32 = 3;
+    const BLOCK_TREE_DEPTH: u64 = 5;
+    const PEER_DRIVES: usize = 3;
+    let seconds_to_wait = 30;
+
+    let mut genesis_config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH as usize);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = MIGRATION_DEPTH;
+    genesis_config.consensus.get_mut().block_tree_depth = BLOCK_TREE_DEPTH;
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    let peer_test = IrysNodeTest::new(genesis.testing_peer_with_signer(&peer_signer));
+    let peer_paths =
+        StorageSubmodulesConfig::load_for_test(peer_test.cfg.base_directory.clone(), PEER_DRIVES)?
+            .submodule_paths;
+    let peer = peer_test.start_with_name("PEER").await;
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+    let peer_addr = peer_signer.address();
+
+    // ─── Shared chain: the peer stakes and pledges one partition ───
+    let assigned_at = genesis
+        .stake_and_pledge_peers(&[&peer], seconds_to_wait)
+        .await?;
+    // Fork two blocks before the next epoch boundary.
+    let fork_height = (assigned_at / NUM_BLOCKS_IN_EPOCH + 1) * NUM_BLOCKS_IN_EPOCH - 2;
+    let epoch_height = fork_height + 2;
+    while genesis.get_canonical_chain_height().await < fork_height {
+        genesis.mine_block().await?;
+    }
+    let fork_block = genesis.get_block_by_height(fork_height).await?;
+    peer.wait_for_block(&fork_block.block_hash, seconds_to_wait)
+        .await?;
+    peer.wait_until_height(fork_height, seconds_to_wait).await?;
+    genesis.wait_for_packing(seconds_to_wait).await;
+    peer.wait_for_packing(seconds_to_wait).await;
+    let shared_assignments = peer.get_partition_assignments(peer_addr);
+    assert_eq!(shared_assignments.len(), 1, "{shared_assignments:?}");
+    info!(fork_height, epoch_height, "Shared chain ready");
+
+    // ─── Fork B (peer): a second pledge, assigned at the fork's epoch block ───
+    genesis.gossip_disable();
+    peer.gossip_disable();
+    let pledge2 = peer
+        .post_pledge_commitment_without_gossip(Some(peer.get_anchor().await?))
+        .await?;
+    peer.wait_for_mempool(pledge2.id(), seconds_to_wait).await?;
+    let (peer_block, _, _) = peer.mine_block_without_gossip().await?;
+    assert_eq!(peer_block.height, fork_height + 1);
+    assert!(
+        peer_block.commitment_tx_ids().contains(&pledge2.id()),
+        "the peer's pledge must be included before its fork's epoch block"
+    );
+    let (peer_epoch, _, _) = peer.mine_block_without_gossip().await?;
+    assert_eq!(peer_epoch.height, epoch_height);
+    peer.wait_until_height(epoch_height, seconds_to_wait)
+        .await?;
+    let deadline = Instant::now() + Duration::from_secs(seconds_to_wait as u64);
+    let fork_b_assignments = loop {
+        let assignments = peer.get_partition_assignments(peer_addr);
+        if assignments.len() == 2 {
+            break assignments;
+        }
+        eyre::ensure!(
+            Instant::now() < deadline,
+            "the peer's fork epoch did not assign its second pledge: {assignments:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    // By hash: the fork's epoch may also move the shared partition into a
+    // ledger slot.
+    let fork_only = fork_b_assignments
+        .iter()
+        .find(|pa| {
+            !shared_assignments
+                .iter()
+                .any(|shared| shared.partition_hash == pa.partition_hash)
+        })
+        .expect("the fork-only partition")
+        .partition_hash;
+    peer.wait_for_packing(seconds_to_wait).await;
+    let released = {
+        let sms = peer.node_ctx.storage_modules_guard.read();
+        let sm = sms
+            .iter()
+            .find(|sm| sm.partition_hash() == Some(fork_only))
+            .expect("an empty peer drive takes the fork-only partition");
+        assert!(
+            !sm.get_intervals(ChunkType::Entropy).is_empty(),
+            "the fork-only partition is packed before the reorg"
+        );
+        info!(id = sm.id, params = ?sm.recorded_params(), "Peer drive holding the fork-only partition");
+        sm.id
+    };
+    let released_file = peer
+        .node_ctx
+        .config
+        .node_config
+        .base_directory
+        .join(&peer_paths[released])
+        .join(PACKING_PARAMS_FILE_NAME);
+    let released_bytes = std::fs::read(&released_file)?;
+
+    // Watch the peer's modules from here until the genesis-fork epoch is final.
+    let watcher = {
+        let modules = peer.node_ctx.storage_modules_guard.clone();
+        let index = peer.node_ctx.block_index_guard.clone();
+        let config = peer.node_ctx.config.clone();
+        let released_file = released_file.clone();
+        let released_bytes = released_bytes.clone();
+        tokio::spawn(async move {
+            let mut previous = module_views(&modules);
+            let mut observations = 0_usize;
+            let mut violations = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(300);
+            loop {
+                // Read the modules first: if the epoch is not final after the
+                // read, it was not final during it.
+                let now = module_views(&modules);
+                let file = std::fs::read(&released_file).ok();
+                if is_final_on(&index, &config, epoch_height) || Instant::now() >= deadline {
+                    break;
+                }
+                observations += 1;
+                for (id, (data, entropy, reset)) in &now {
+                    if *reset {
+                        violations.push(format!("module {id} has a reset in progress"));
+                    }
+                    if let Some((old_data, old_entropy, _)) = previous.get(id) {
+                        if !covers(old_data, data) {
+                            violations
+                                .push(format!("module {id} Data shrank: {old_data:?} -> {data:?}"));
+                        }
+                        if !covers(old_entropy, entropy) {
+                            violations.push(format!(
+                                "module {id} Entropy shrank: {old_entropy:?} -> {entropy:?}"
+                            ));
+                        }
+                    }
+                }
+                if previous.keys().any(|id| !now.contains_key(id)) {
+                    violations.push(format!(
+                        "a module disappeared: {:?} -> {:?}",
+                        previous.keys().collect::<Vec<_>>(),
+                        now.keys().collect::<Vec<_>>()
+                    ));
+                }
+                if file.as_deref() != Some(released_bytes.as_slice()) {
+                    violations.push("the released drive's packing file changed".to_string());
+                }
+                if !violations.is_empty() {
+                    break;
+                }
+                previous = now;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            (observations, violations)
+        })
+    };
+
+    // ─── Fork A (genesis): no second pledge, one block longer ───
+    let mut genesis_blocks = Vec::new();
+    for _ in 0..3 {
+        let (block, _, _) = genesis.mine_block_without_gossip().await?;
+        genesis_blocks.push(block);
+    }
+    let genesis_epoch_hash = genesis_blocks[1].block_hash;
+    assert_eq!(genesis_blocks[1].height, epoch_height);
+    assert_ne!(genesis_epoch_hash, peer_epoch.block_hash);
+
+    // ─── Reorg the peer onto fork A ───
+    genesis.gossip_enable();
+    peer.gossip_enable();
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+    for block in &genesis_blocks {
+        genesis.gossip_block_to_peers(block)?;
+        peer.wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+    }
+    let reorg_tip = genesis_blocks.last().expect("three blocks");
+    let deadline = Instant::now() + Duration::from_secs(seconds_to_wait as u64);
+    loop {
+        if peer
+            .get_block_by_height(reorg_tip.height)
+            .await
+            .is_ok_and(|b| b.block_hash == reorg_tip.block_hash)
+        {
+            break;
+        }
+        eyre::ensure!(
+            Instant::now() < deadline,
+            "peer did not adopt the genesis fork"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        peer.get_partition_assignments(peer_addr).len(),
+        1,
+        "the fork-only partition is gone from the canonical snapshot"
+    );
+    info!("Peer reorged onto the genesis fork");
+
+    // ─── Mine until the genesis-fork epoch is final on the peer ───
+    let config = peer.node_ctx.config.clone();
+    let mut mined = 0;
+    while !is_final_on(&peer.node_ctx.block_index_guard, &config, epoch_height) {
+        eyre::ensure!(
+            mined < 20,
+            "epoch {epoch_height} not final after {mined} blocks"
+        );
+        let block = genesis.mine_block().await?;
+        peer.wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+        mined += 1;
+        // Let migration catch up before checking again.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let final_item = peer
+        .node_ctx
+        .block_index_guard
+        .read()
+        .get_item(epoch_height)
+        .expect("final epoch is in the index");
+    assert_eq!(
+        final_item.block_hash, genesis_epoch_hash,
+        "the genesis fork's epoch block is final on the peer"
+    );
+
+    let (observations, violations) = watcher.await?;
+    info!(
+        observations,
+        "Watched the peer's modules until the epoch was final"
+    );
+    assert!(
+        violations.is_empty(),
+        "a drive was wiped before the epoch was final: {violations:#?}"
+    );
+    assert!(observations > 10, "too few observations: {observations}");
+
+    // Non-vacuity: once final, the drive holding the fork-only partition is
+    // released.
+    let deadline = Instant::now() + Duration::from_secs(seconds_to_wait as u64);
+    loop {
+        let holds = peer
+            .node_ctx
+            .storage_modules_guard
+            .read()
+            .iter()
+            .find(|sm| sm.id == released)
+            .and_then(|sm| sm.recorded_params())
+            .and_then(|p| p.partition_hash);
+        if holds != Some(fork_only) {
+            info!(
+                ?holds,
+                "Released drive cleared after the epoch became final"
+            );
+            break;
+        }
+        eyre::ensure!(
+            Instant::now() < deadline,
+            "the drive holding the fork-only partition was not released once final"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    genesis.stop().await;
+    peer.stop().await;
+    Ok(())
 }

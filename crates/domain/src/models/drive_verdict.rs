@@ -766,6 +766,42 @@ mod tests {
         assert_eq!(d[0].action, DriveAction::Idle);
     }
 
+    /// A drive holding a partition this epoch does not assign (old format with
+    /// no height, an older or a newer height) is never given the unheld
+    /// partition, whatever the drive order: only the empty drive takes it.
+    #[test]
+    fn unassigned_holder_is_not_reused_whatever_the_order() {
+        let mut legacy = v1(9, None, None);
+        legacy.last_updated_height = None;
+        let mut newer = v1(8, None, None);
+        newer.last_updated_height = Some(200);
+        let files = [
+            rec(legacy),
+            rec(newer),
+            rec(v1(7, None, None)),
+            rec(v1(2, None, None)),
+            DriveFile::Missing,
+        ];
+        let a = [pa(1, None, None), pa(2, None, None)];
+        for order in [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0], [2, 4, 0, 3, 1]] {
+            let drives: Vec<_> = order.iter().map(|&i| drive(i, files[i].clone())).collect();
+            let (d, u) = run(&drives, &a, true, true);
+            for x in &d {
+                let (verdict, action) = match x.path.to_str().unwrap() {
+                    "/d0" | "/d1" | "/d2" => (
+                        Verdict::Wait("unassigned, but not provably released on this chain".into()),
+                        DriveAction::Idle,
+                    ),
+                    "/d3" => (Verdict::Ours, DriveAction::Assign(a[1])),
+                    "/d4" => (Verdict::Empty, DriveAction::Assign(a[0])),
+                    other => panic!("unexpected drive {other}"),
+                };
+                assert_eq!((&x.verdict, &x.action), (&verdict, &action), "{order:?}");
+            }
+            assert!(u.is_empty(), "{order:?}: {u:?}");
+        }
+    }
+
     #[test]
     fn released_only_when_final() {
         let f = rec(v2(1, Some(DataLedger::Publish), Some(0), 10));

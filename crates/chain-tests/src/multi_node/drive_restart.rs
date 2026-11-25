@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use irys_chain::IrysNodeCtx;
 use irys_config::submodules::{SUBMODULES_CONFIG_FILE_NAME, StorageSubmodulesConfig};
 use irys_domain::{ChunkType, PACKING_PARAMS_FILE_NAME};
 use irys_types::storage::Interval;
@@ -27,7 +28,7 @@ struct DriveState {
 }
 
 fn drive_states(
-    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    node: &IrysNodeTest<IrysNodeCtx>,
     paths: &[PathBuf],
 ) -> BTreeMap<PathBuf, DriveState> {
     let base = node.node_ctx.config.node_config.base_directory.clone();
@@ -72,19 +73,22 @@ fn write_submodule_paths(base: &Path, paths: &[PathBuf]) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Starts a genesis node with five drives, mines through two epochs, stops it,
-/// rewrites the submodule list with `edit`, starts it again and checks that
-/// every configured drive kept its partition, entropy and packing file.
-async fn restart_with_edited_paths(
-    edit: impl FnOnce(&[PathBuf]) -> Vec<PathBuf>,
-) -> eyre::Result<()> {
+/// A genesis node with five drives, mined through two epochs with every drive
+/// packed. Returns the node, its base directory, the configured paths and
+/// what each drive holds.
+async fn mined_node() -> eyre::Result<(
+    IrysNodeTest<IrysNodeCtx>,
+    PathBuf,
+    Vec<PathBuf>,
+    BTreeMap<PathBuf, DriveState>,
+)> {
     let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH as usize);
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().block_migration_depth = MIGRATION_DEPTH;
 
     let node = IrysNodeTest::new_genesis(config);
     let base = node.cfg.base_directory.clone();
-    let paths_before =
+    let paths =
         StorageSubmodulesConfig::load_for_test(base.clone(), NUM_SUBMODULES)?.submodule_paths;
     let node = node
         .start_and_wait_for_packing("GENESIS", SECONDS_TO_WAIT)
@@ -99,7 +103,7 @@ async fn restart_with_edited_paths(
         .await?;
     node.wait_for_packing(SECONDS_TO_WAIT).await;
 
-    let before = drive_states(&node, &paths_before);
+    let before = drive_states(&node, &paths);
     assert_eq!(before.len(), NUM_SUBMODULES, "{before:#?}");
     for (path, state) in &before {
         assert!(
@@ -108,6 +112,34 @@ async fn restart_with_edited_paths(
         );
         assert!(!state.entropy.is_empty(), "{path:?} is not packed");
     }
+    Ok((node, base, paths, before))
+}
+
+/// Every drive in `after` holds what it held in `before`, and none was reset.
+fn assert_unchanged(before: &BTreeMap<PathBuf, DriveState>, after: &BTreeMap<PathBuf, DriveState>) {
+    for (path, state) in after {
+        let old = &before[path];
+        assert_eq!(
+            state.partition_hash, old.partition_hash,
+            "{path:?} changed partition"
+        );
+        assert_eq!(state.entropy, old.entropy, "{path:?} entropy changed");
+        assert!(!state.reset_incomplete, "{path:?} was reset");
+        assert_eq!(
+            String::from_utf8_lossy(&state.packing_params),
+            String::from_utf8_lossy(&old.packing_params),
+            "{path:?} packing params file changed"
+        );
+    }
+}
+
+/// Starts a genesis node with five drives, mines through two epochs, stops it,
+/// rewrites the submodule list with `edit`, starts it again and checks that
+/// every configured drive kept its partition, entropy and packing file.
+async fn restart_with_edited_paths(
+    edit: impl FnOnce(&[PathBuf]) -> Vec<PathBuf>,
+) -> eyre::Result<()> {
+    let (node, base, paths_before, before) = mined_node().await?;
 
     let stopped = node.stop().await;
     let paths_after = edit(&paths_before);
@@ -125,20 +157,76 @@ async fn restart_with_edited_paths(
         },
         "every configured drive is opened"
     );
-    for (path, state) in &after {
-        let old = &before[path];
-        assert_eq!(
-            state.partition_hash, old.partition_hash,
-            "{path:?} changed partition"
-        );
-        assert_eq!(state.entropy, old.entropy, "{path:?} entropy changed");
-        assert!(!state.reset_incomplete, "{path:?} was reset");
-        assert_eq!(
-            String::from_utf8_lossy(&state.packing_params),
-            String::from_utf8_lossy(&old.packing_params),
-            "{path:?} packing params file changed"
-        );
+    assert_unchanged(&before, &after);
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Every file under `dir`, by path relative to it, with its bytes.
+fn files_under(dir: &Path) -> eyre::Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.insert(path.strip_prefix(dir)?.to_path_buf(), std::fs::read(&path)?);
+            }
+        }
     }
+    Ok(files)
+}
+
+/// A drive whose packing file is garbage at startup is left alone: the node
+/// starts and keeps mining, that drive is not opened and nothing on it
+/// changes (no reset marker, no rewritten file), and every other drive keeps
+/// its partition, entropy and packing file.
+#[test_log::test(tokio::test)]
+async fn heavy_restart_with_a_corrupt_drive_file_still_starts() -> eyre::Result<()> {
+    let (node, base, paths, before) = mined_node().await?;
+
+    let stopped = node.stop().await;
+    let corrupt = paths[1].clone();
+    let corrupt_dir = base.join(&corrupt);
+    let garbage: &[u8] = b"partition_hash = [[[ not toml \xff\x00";
+    std::fs::write(corrupt_dir.join(PACKING_PARAMS_FILE_NAME), garbage)?;
+    let corrupt_files = files_under(&corrupt_dir)?;
+    let node = stopped.start().await;
+    node.wait_for_packing(SECONDS_TO_WAIT).await;
+
+    // One more epoch, migrated, so the storage module service applies a
+    // runtime assignment update with the unreadable drive configured.
+    let next_epoch = 3 * NUM_BLOCKS_IN_EPOCH;
+    let tip = node.get_canonical_chain_height().await;
+    let to_mine = (next_epoch + u64::from(MIGRATION_DEPTH)).saturating_sub(tip);
+    node.mine_blocks(to_mine as usize).await?;
+    node.wait_for_block_in_index(next_epoch, false, SECONDS_TO_WAIT)
+        .await?;
+    node.wait_for_packing(SECONDS_TO_WAIT).await;
+
+    assert_eq!(
+        std::fs::read(corrupt_dir.join(PACKING_PARAMS_FILE_NAME))?,
+        garbage,
+        "the corrupt packing file is left as it was"
+    );
+    assert!(
+        files_under(&corrupt_dir)? == corrupt_files,
+        "nothing on the corrupt drive changed (no reset marker, no write)"
+    );
+
+    let after = drive_states(&node, &paths);
+    let mut opened: Vec<&PathBuf> = after.keys().collect();
+    opened.sort();
+    let mut expected: Vec<&PathBuf> = paths.iter().filter(|p| **p != corrupt).collect();
+    expected.sort();
+    assert_eq!(
+        opened, expected,
+        "every drive but the corrupt one is opened"
+    );
+    assert_unchanged(&before, &after);
 
     node.stop().await;
     Ok(())
