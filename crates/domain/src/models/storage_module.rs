@@ -2544,9 +2544,9 @@ impl StorageModule {
             params.ledger = ledger;
             params.slot = slot;
             params.last_updated_height = Some(0);
-            if params.is_v2() {
-                params.assigned_height = Some(0);
-            }
+            // Open does not know when this assignment was installed, so a v2
+            // file must not claim a trusted height.
+            params.assigned_height = None;
             params.write_to_disk(&path)?;
         }
         let initial_recorded = storage_module_info.submodules.first().and_then(|(_, dir)| {
@@ -24230,6 +24230,44 @@ mod tests {
         assert_eq!(recorded, on_disk()?);
         assert_eq!(recorded.partition_hash, None);
         assert_eq!(recorded.trusted_assigned_height(), Some(11));
+        Ok(())
+    }
+
+    #[test]
+    fn open_rebind_does_not_record_a_trusted_height() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("pp_rebind_height").build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x62);
+        let sub = tmp.path().join("chunks");
+        let storage = StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
+            &config,
+        )?;
+        drop(storage);
+        let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+        let mut params = PackingParams::from_toml(&params_path)?.stamped(
+            config.consensus.chain_id,
+            H256::repeat_byte(0x78),
+            500,
+        );
+        params.ledger = Some(1);
+        params.slot = Some(0);
+        params.write_to_disk(&params_path)?;
+        assert_eq!(params.trusted_assigned_height(), Some(500));
+
+        let capacity = PartitionAssignment {
+            partition_hash: hash,
+            miner_address: config.node_config.miner_address(),
+            ledger_id: None,
+            slot_index: None,
+        };
+        let storage = StorageModule::new(&one_span(3, sub.clone(), Some(capacity)), &config)?;
+        let loaded = PackingParams::from_toml(&params_path)?;
+        assert_eq!(loaded.ledger, None, "the rebind ran");
+        assert_eq!(loaded.assigned_height, None);
+        assert_eq!(loaded.trusted_assigned_height(), None);
+        assert_eq!(loaded.last_updated_height, Some(0));
+        assert_eq!(storage.recorded_params(), Some(loaded));
         Ok(())
     }
 }
