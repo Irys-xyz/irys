@@ -1,8 +1,9 @@
 //! Pure verdict on what each configured drive should hold.
 //!
 //! The verdict depends only on what is recorded on each drive and on the
-//! canonical epoch assignments, never on drive order, so appending, removing
-//! or reordering drives cannot change which partition a drive keeps.
+//! canonical epoch assignments, never on drive order, except which duplicate
+//! holder wins and which free drive receives a new placement. So appending,
+//! removing or reordering drives cannot change which partition a drive keeps.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -84,15 +85,15 @@ fn is_foreign(p: &PackingParams, id: &ChainIdentity) -> Option<String> {
     None
 }
 
-/// Ledger priority for placement: Publish, Submit, OneYear, ThirtyDay, then
-/// capacity. Equals ascending ledger id with capacity last.
+/// Ledger priority for placement: known ledgers in id order (Publish, Submit,
+/// OneYear, ThirtyDay), then other ids, then capacity.
 fn placement_key(a: &PartitionAssignment) -> (u32, H256) {
     let rank = match a.ledger_id {
         Some(l) if l == DataLedger::Publish => 0,
         Some(l) if l == DataLedger::Submit => 1,
         Some(l) if l == DataLedger::OneYear => 2,
         Some(l) if l == DataLedger::ThirtyDay => 3,
-        Some(l) => 4 + l,
+        Some(l) => 4_u32.saturating_add(l),
         None => u32::MAX,
     };
     (rank, a.partition_hash)
@@ -135,7 +136,6 @@ fn unheld(inputs: &VerdictInputs<'_>) -> Vec<PartitionAssignment> {
         .copied()
         .collect();
     v.sort_by_key(placement_key);
-    v.dedup_by_key(|a| a.partition_hash);
     v
 }
 
@@ -234,7 +234,9 @@ fn classify(
             false,
         );
     }
-    let old_enough = p.assigned_height.is_some_and(|h| h <= inputs.epoch_height);
+    let old_enough = p
+        .trusted_assigned_height()
+        .is_some_and(|h| h <= inputs.epoch_height);
     if !old_enough || !inputs.epoch_is_final {
         return (
             Verdict::Wait("release pending finality".into()),
@@ -395,12 +397,15 @@ mod tests {
         let drives = [
             drive(0, DriveFile::Unreadable("EIO".into())),
             drive(1, DriveFile::Missing),
+            drive(2, rec(v2(60, Some(DataLedger::Submit), Some(0), 10))),
         ];
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, u) = run(&drives, &a, true, true);
         assert_eq!(d[0].action, DriveAction::Skip);
         assert_eq!(d[1].verdict, Verdict::Empty);
         assert_eq!(d[1].action, DriveAction::Idle);
+        assert_eq!(d[2].verdict, Verdict::Released);
+        assert_eq!(d[2].action, DriveAction::Clear);
         assert_eq!(u, a.to_vec());
     }
 
@@ -412,12 +417,14 @@ mod tests {
             (2, rec(v1(3, None, None))),
             (3, DriveFile::Missing),
             (4, rec(v1(4, Some(DataLedger::OneYear), Some(1)))),
+            (5, rec(v2(60, Some(DataLedger::Submit), Some(9), 10))),
         ];
         let a = [
             pa(1, Some(DataLedger::Publish), Some(0)),
             pa(2, Some(DataLedger::Submit), Some(0)),
             pa(3, None, None),
             pa(4, Some(DataLedger::OneYear), Some(1)),
+            pa(50, None, None),
         ];
         let by_path = |order: &[usize]| {
             let drives: Vec<_> = order
@@ -425,16 +432,20 @@ mod tests {
                 .map(|&i| drive(i, files[i].1.clone()))
                 .collect();
             let (d, _) = run(&drives, &a, true, true);
+            // Only held drives: which free drive takes the unheld assignment
+            // legitimately depends on order.
             let mut m: Vec<_> = d
                 .into_iter()
+                .filter(|x| x.verdict == Verdict::Ours)
                 .map(|x| (x.path, x.verdict, x.action, x.stamp_v2))
                 .collect();
             m.sort_by(|a, b| a.0.cmp(&b.0));
             m
         };
-        let base = by_path(&[0, 1, 2, 3, 4]);
-        assert_eq!(base, by_path(&[4, 3, 2, 1, 0]));
-        assert_eq!(base, by_path(&[2, 4, 0, 3, 1]));
+        let base = by_path(&[0, 1, 2, 3, 4, 5]);
+        assert_eq!(base.len(), 4);
+        assert_eq!(base, by_path(&[5, 4, 3, 2, 1, 0]));
+        assert_eq!(base, by_path(&[2, 5, 4, 0, 3, 1]));
         assert_eq!(base[0].2, DriveAction::Assign(a[0]));
     }
 
@@ -476,7 +487,11 @@ mod tests {
         let orphan = pa(1, Some(DataLedger::Publish), Some(7));
         let (drives, a) = node1(orphan);
         let (d, u) = run(&drives, &a, true, false);
-        assert!(d.iter().all(|x| x.verdict == Verdict::Ours));
+        assert_eq!(d.len(), 43);
+        for (i, x) in d.iter().enumerate() {
+            assert_eq!(x.verdict, Verdict::Ours);
+            assert_eq!(assigned_hash(x), Some(h(100 + i as u32)));
+        }
         assert_eq!(u, vec![orphan]);
     }
 
@@ -585,6 +600,37 @@ mod tests {
         let got: Vec<_> = d.iter().map(|x| assigned_hash(x).unwrap()).collect();
         assert_eq!(got, vec![h(7), h(6), h(8), h(4)]);
         assert_eq!(u, vec![a[1], a[0]]);
+    }
+
+    #[test]
+    fn empty_fills_before_released_and_released_then_gets_assign() {
+        let a = [
+            pa(2, Some(DataLedger::Submit), Some(0)),
+            pa(1, Some(DataLedger::Publish), Some(0)),
+        ];
+        // Released listed first; Empty must still be filled first.
+        let drives = [
+            drive(0, rec(v2(60, Some(DataLedger::Submit), Some(9), 10))),
+            drive(1, DriveFile::Missing),
+        ];
+        let (d, u) = run(&drives, &a, true, true);
+        assert_eq!(d[1].verdict, Verdict::Empty);
+        assert_eq!(d[1].action, DriveAction::Assign(a[1]));
+        assert_eq!(d[0].verdict, Verdict::Released);
+        assert_eq!(d[0].action, DriveAction::Assign(a[0]));
+        assert!(u.is_empty());
+    }
+
+    #[test]
+    fn duplicate_with_ledger_exit_keeps_hash_held() {
+        let f = rec(v2(1, Some(DataLedger::Submit), Some(0), 10));
+        let a = [pa(1, Some(DataLedger::Publish), Some(0))];
+        let (d, u) = run(&[drive(0, f.clone()), drive(1, f)], &a, false, true);
+        for x in &d {
+            assert!(matches!(x.verdict, Verdict::Wait(_)));
+            assert_eq!(x.action, DriveAction::Idle);
+        }
+        assert!(u.is_empty());
     }
 
     #[test]
