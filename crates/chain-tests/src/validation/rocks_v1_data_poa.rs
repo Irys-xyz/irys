@@ -342,9 +342,8 @@ async fn heavy_test_rocks_v1_nonzero_slot_data_poa() -> eyre::Result<()> {
     // that becomes Publish slot 1.
     let (node, signer) = start_rocks_node(rocks_config(4, 2), 5).await?;
 
-    let _first =
-        post_ledger_tx(&node, &signer, DataLedger::Publish, aligned_bytes(4, 0x41)).await?;
-    let _second =
+    let first = post_ledger_tx(&node, &signer, DataLedger::Publish, aligned_bytes(4, 0x41)).await?;
+    let second =
         post_ledger_tx(&node, &signer, DataLedger::Publish, aligned_bytes(4, 0x42)).await?;
     let multi = node.mine_block().await?;
     assert!(
@@ -352,6 +351,11 @@ async fn heavy_test_rocks_v1_nonzero_slot_data_poa() -> eyre::Result<()> {
         "one block must carry both txs, got {}",
         ledger_tx_count(&multi, DataLedger::Submit)
     );
+    // Inclusion starts proof generation for each tx. A block mined before both
+    // proofs are stored promotes the txs in different blocks, and slot 1 then
+    // holds the first tx of its Publish block.
+    node.wait_for_ingress_proofs_no_mining(vec![first.header.id, second.header.id], 20)
+        .await?;
 
     let slot_one = wait_for_data_on_slot(&node, DataLedger::Publish, 1).await?;
     let block = mine_until(&node, "slot 1 data poa", |block| {
