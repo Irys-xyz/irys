@@ -558,6 +558,9 @@ enum SyncFailurePoint {
     /// Rollback has committed the `Uninitialized` interval image. The proof
     /// index clear has not started.
     AfterRollbackIntervalImage,
+    /// A keep-entropy reset has committed the `Uninitialized` interval image.
+    /// The index clear has not started and the assignment is not stored.
+    AfterKeepEntropyImage,
     /// Reset marker write has not started. Pending is still the caller's.
     ResetMarkerWrite,
     /// Reset marker is durable. The index clear has not run.
@@ -2162,6 +2165,10 @@ thread_local! {
     /// `crc_complete` is cleared. Production writes both, marker first.
     static FAIL_AFTER_OPEN_RESET_MARKER: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test open fails after a slot exit rewrote a submodule's interval file
+    /// and before its coverage drop and the packing params rebind.
+    static FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn note_submodule_open(step: &'static str) {
@@ -2317,12 +2324,13 @@ impl StorageModule {
         // submodule directory changes. Hash, ledger, and slot changes are
         // written only after `bind_packing_identity` accepts. The reset
         // marker is written after every later check that can refuse. A hash
-        // change sets it. A ledger or slot change sets it when the module
-        // already holds a ledger. Capacity gaining a ledger keeps the stored
-        // bytes.
+        // change sets it. The same hash leaving a ledger keeps its entropy
+        // and uninitializes the rest before the file names the new slot.
+        // Capacity gaining a ledger keeps the stored bytes.
         let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
             Vec::new();
         let mut reset_dbs: Vec<SubmoduleIndex> = Vec::new();
+        let mut keep_entropy_starts: Vec<PartitionChunkOffset> = Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
 
@@ -2415,18 +2423,22 @@ impl StorageModule {
                     };
 
                 // A different partition clears the old labels and index rows.
-                // A ledger or slot change does the same when the module already
-                // holds a ledger: the bytes belong to the previous assignment.
                 // The marker is written after packing validation, interval
                 // repair, and coverage. A refusal before that leaves the bytes
-                // alone. Capacity gaining a ledger keeps the bytes.
+                // alone. The same partition leaving a ledger keeps its
+                // entropy: entropy does not depend on the ledger or slot. Its
+                // data belongs to the previous slot and is uninitialized
+                // before the file names the new slot. Capacity gaining a
+                // ledger keeps the bytes.
                 let ledger_or_slot_changed =
                     params.ledger != want_ledger || params.slot != want_slot;
                 let leaving_a_ledger = params.ledger.is_some() && ledger_or_slot_changed;
-                let wipe = params.partition_hash != want_hash || leaving_a_ledger;
-                if wipe || ledger_or_slot_changed {
-                    if wipe {
+                let new_partition = params.partition_hash != want_hash;
+                if new_partition || ledger_or_slot_changed {
+                    if new_partition {
                         reset_dbs.push(submodule_db.clone());
+                    } else if leaving_a_ledger {
+                        keep_entropy_starts.push(submodule_interval.start());
                     }
                     rebind_after_bind.push((
                         params_path.clone(),
@@ -2537,6 +2549,13 @@ impl StorageModule {
         for (index, partition, packing) in pack_binds {
             index.bind_packing_identity(partition, &packing)?;
         }
+        // Before the file names the new slot. A crash before the rebind
+        // reopens with the old slot recorded and repeats this.
+        Self::uninitialize_old_slot_at_open(
+            &submodule_map,
+            &keep_entropy_starts,
+            config.consensus.chunk_size,
+        )?;
         // Bind accepted. The file may now name the new partition, ledger, and slot.
         for (path, hash, ledger, slot) in rebind_after_bind {
             let mut params = PackingParams::from_toml(&path)?;
@@ -3363,7 +3382,8 @@ impl StorageModule {
         *self.recorded_params.write().unwrap() = None;
     }
 
-    /// The next `reset` returns an error before it writes.
+    /// The next `reset` or keep-entropy slot exit returns an error before it
+    /// writes.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_next_reset_for_test(&self) {
         self.reset_fail_next.store(true, Ordering::SeqCst);
@@ -4227,13 +4247,16 @@ impl StorageModule {
     /// or the capacity assignment another writer already stored. A different
     /// hash stays too. `Ok(None)` means the module was not reset. A read
     /// error is `Err` and does not reset. The capacity assignment is stored
-    /// before the lock is released. `reset` returning `Ok` is not enough:
-    /// `Err` after that means the capacity assignment was not stored.
+    /// before the lock is released; `Err` means it was not stored.
+    ///
+    /// The reset keeps the partition's entropy, as
+    /// [`Self::reset_keep_entropy_with_assignment`] does. `Ok(Some(spans))`
+    /// lists the `Uninitialized` spans left to pack.
     pub fn reset_expired_to_capacity(
         &self,
         expired_hash: PartitionHash,
         notice_height: u64,
-    ) -> eyre::Result<Option<Interval<PartitionChunkOffset>>> {
+    ) -> eyre::Result<Option<Vec<Interval<PartitionChunkOffset>>>> {
         let mut assignment = self.partition_assignment.write().unwrap();
         let Some(current) = *assignment else {
             return Ok(None);
@@ -4260,10 +4283,203 @@ impl StorageModule {
             ledger_id: None,
             slot_index: None,
         };
-        let interval = self.wipe_for_reset(false)?;
-        self.store_assignment(&mut assignment, Some(capacity), notice_height)?;
-        self.drop_reset_marker()?;
-        Ok(Some(interval))
+        // The partition stays, so its entropy stays. Only the expired slot's
+        // data is uninitialized and repacked.
+        let spans = self.leave_slot_locked(&mut assignment, capacity, notice_height)?;
+        Ok(Some(spans))
+    }
+
+    /// Leave a ledger slot and keep the partition: ledger to capacity, or
+    /// ledger to another ledger or slot. Entropy depends on the packing
+    /// address, the partition hash and the chunk offset, not on the ledger or
+    /// slot, so `Entropy` spans keep their bytes and checksum-only rows. Every
+    /// other span becomes `Uninitialized` and loses the old slot's index rows.
+    /// Returns the module's `Uninitialized` spans: the only offsets to pack.
+    ///
+    /// Refuses, changing nothing, when `next` names another partition than
+    /// the one this module holds in memory or, when parked, records in its
+    /// file. A different partition takes [`Self::reset_with_assignment`].
+    ///
+    /// No reset marker. The new assignment is stored after the
+    /// `Uninitialized` image is durable and the old rows are gone, so the file
+    /// names the old slot until then. A crash before the store reopens with
+    /// the old slot recorded: open sees the same ledger exit and repeats this
+    /// reset, which is idempotent. A crash after the store reopens with the
+    /// old data already `Uninitialized`, and open drops any leftover rows.
+    ///
+    /// Lock order matches [`Self::reset_with_assignment`].
+    pub fn reset_keep_entropy_with_assignment(
+        &self,
+        next: PartitionAssignment,
+        update_height: u64,
+    ) -> eyre::Result<Vec<Interval<PartitionChunkOffset>>> {
+        let mut assignment = self.partition_assignment.write().unwrap();
+        let held = match *assignment {
+            Some(current) => Some(current.partition_hash),
+            None => self
+                .recorded_params
+                .read()
+                .unwrap()
+                .and_then(|params| params.partition_hash),
+        };
+        ensure!(
+            held == Some(next.partition_hash),
+            "keep-entropy reset refused: module {} holds partition {:?}, not {}",
+            self.id,
+            held,
+            next.partition_hash
+        );
+        self.leave_slot_locked(&mut assignment, next, update_height)
+    }
+
+    /// The caller holds the assignment write lock and has checked that `next`
+    /// keeps the partition.
+    ///
+    /// A full wipe that started and did not finish (`reset_incomplete`) is
+    /// finished instead: its marker may be durable and its index rows may be
+    /// gone, so the labels it left cannot be trusted.
+    ///
+    /// An error leaves the previous assignment. Every `Uninitialized` span is
+    /// then queued for another pack, so a span this call already relabelled
+    /// is not left unpacked if the old slot stays.
+    fn leave_slot_locked(
+        &self,
+        assignment: &mut Option<PartitionAssignment>,
+        next: PartitionAssignment,
+        update_height: u64,
+    ) -> eyre::Result<Vec<Interval<PartitionChunkOffset>>> {
+        if self.reset_incomplete() {
+            let interval = self.wipe_for_reset(false)?;
+            self.store_assignment(assignment, Some(next), update_height)?;
+            self.drop_reset_marker()?;
+            return Ok(vec![interval]);
+        }
+        let mut relabelled = Vec::new();
+        let result = self
+            .uninitialize_keeping_entropy(&mut relabelled)
+            .and_then(|spans| {
+                self.store_assignment(assignment, Some(next), update_height)?;
+                Ok(spans)
+            });
+        if result.is_err() {
+            // Spans already published `Uninitialized` must still be packed
+            // when the module keeps its old slot (the retry is dropped, or
+            // the old slot is confirmed again). The service drains this
+            // list on its tick; a successful retry clears it first.
+            let last = PartitionChunkOffset::from(self.partition_chunks() as u32 - 1);
+            for span in relabelled {
+                if span.start() <= last {
+                    self.requeue_packing_range(ii(span.start(), span.end().min(last)));
+                }
+            }
+        }
+        result
+    }
+
+    /// Mark every offset that is not durable `Entropy` `Uninitialized`, then
+    /// drop the old slot's rows. The caller holds the assignment write lock
+    /// and stores the new assignment after this returns `Ok`.
+    ///
+    /// Order:
+    /// 1. Under `sync_in_progress` the disk lane cannot pwrite or commit
+    ///    presence. Queued and parked bytes are dropped and the index
+    ///    generation bumps, so a packed write started earlier does not
+    ///    commit. Their offsets, and offsets with a suspect or a repair
+    ///    checksum, are uninitialized even under an `Entropy` label: their
+    ///    bytes may no longer be entropy.
+    /// 2. The `Uninitialized` image is published and durable before any row
+    ///    is cleared, as in [`Self::rollback_unassigned_range`]. A failed
+    ///    publish restores the map and clears nothing.
+    /// 3. Offset rows under the new `Uninitialized` spans are cleared. Under
+    ///    `Entropy`, proof rows go and checksum-only rows stay.
+    /// 4. Tx coverage, data-root placements and infos, and body jobs are
+    ///    dropped over the whole module, `Entropy` included: a row under
+    ///    `Entropy` names the old slot's tx, and a data write funded by it
+    ///    would pack old-slot bytes over the kept entropy.
+    /// 5. `pending` is cleared again. A data write that resolved its offsets
+    ///    from the old rows before step 4 cannot commit; one that starts
+    ///    after finds no row.
+    ///
+    /// `relabelled` receives the spans once their `Uninitialized` image is
+    /// published, so a caller that sees a later error can still pack them.
+    fn uninitialize_keeping_entropy(
+        &self,
+        relabelled: &mut Vec<Interval<PartitionChunkOffset>>,
+    ) -> eyre::Result<Vec<Interval<PartitionChunkOffset>>> {
+        #[cfg(test)]
+        self.note_sync_lock_probe();
+        let sync = self.lock_sync();
+        // Nothing is changed yet, so a failure here leaves no flag behind.
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.reset_fail_next.swap(false, Ordering::SeqCst) {
+            eyre::bail!("injected storage module reset failure");
+        }
+        // A registration computed for the old slot does not commit.
+        let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
+        let mut doubtful = self.snapshot_nondurable_offsets();
+        doubtful.extend(recover_mutex(&self.crc_suspects).iter().copied());
+        doubtful.extend(recover_mutex(&self.crc_repairs).iter().copied());
+        self.clear_pending_for_reset();
+        recover_mutex(&self.crc_suspects).clear();
+        recover_mutex(&self.crc_repairs).clear();
+        // A failed pack left its span `Uninitialized`. The caller packs every
+        // `Uninitialized` span, so the retry list is not needed.
+        recover_mutex(&self.packing_retries).clear();
+        self.fail_queued_sweeps();
+        // Uninitialized offsets lose their checksums. A later scan sets the
+        // flag again once the module is settled.
+        self.clear_chunk_crc_complete()?;
+
+        let spans = {
+            let intervals = self.intervals.read().unwrap();
+            let mut spans: Vec<Interval<PartitionChunkOffset>> = intervals
+                .iter()
+                .filter(|(_, kind)| {
+                    !matches!(**kind, ChunkType::Entropy | ChunkType::Uninitialized)
+                })
+                .map(|(interval, _)| *interval)
+                .collect();
+            for offset in &doubtful {
+                if Self::live_label(&intervals, *offset) == Some(ChunkType::Entropy) {
+                    spans.push(ii(*offset, *offset));
+                }
+            }
+            spans.sort_by_key(Interval::start);
+            spans
+        };
+        if !spans.is_empty() {
+            self.publish_uninitialized_spans(&sync, &spans)?;
+            relabelled.clone_from(&spans);
+        }
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AfterKeepEntropyImage)?;
+
+        for span in &spans {
+            self.clear_offset_index_in_range(span.start(), span.end())?;
+        }
+        let image = recover_read(&self.intervals).clone();
+        Self::reconcile_presence(&self.submodules, &image)?;
+        let chunk_size = self.config.consensus.chunk_size;
+        for (submodule_interval, submodule) in self.submodules.iter() {
+            submodule.db.drop_uninitialized_coverage(
+                &[(submodule_interval.start(), submodule_interval.end())],
+                chunk_size,
+            )?;
+        }
+
+        self.clear_pending_for_reset();
+        self.fail_queued_sweeps();
+        drop(sync);
+
+        // Before finality the physical suffix remains available for a reorg,
+        // but a new packing job must use the current logical partition size.
+        let last = PartitionChunkOffset::from(self.partition_chunks() as u32 - 1);
+        Ok(image
+            .iter()
+            .filter(|(_, kind)| **kind == ChunkType::Uninitialized)
+            .filter(|(interval, _)| interval.start() <= last)
+            .map(|(interval, _)| ii(interval.start(), interval.end().min(last)))
+            .collect())
     }
 
     /// Packing params for every submodule. The caller holds the assignment
@@ -6350,6 +6566,70 @@ impl StorageModule {
         Ok(())
     }
 
+    /// A submodule that keeps its partition and leaves a ledger slot, at open.
+    ///
+    /// Its interval file is rewritten with every label that is not `Entropy`
+    /// as `Uninitialized`. A span in the mid-write log is `Uninitialized` too:
+    /// its bytes may be a cut-off data write. The replace is atomic and
+    /// durable. Then its tx coverage, data-root placements and body jobs are
+    /// dropped over the whole submodule, `Entropy` included: those rows name
+    /// the old slot's txs. The later load, [`Self::reconcile_presence`] and
+    /// [`Self::reconcile_uninitialized_coverage`] drop the offset rows and
+    /// keep entropy checksums.
+    ///
+    /// Runs after [`Self::finish_pending_resets`] (a durable wipe marker wins
+    /// and leaves nothing to keep) and before the packing params name the new
+    /// slot. It is idempotent: a crash anywhere before that rebind reopens with
+    /// the old slot recorded and runs it again.
+    fn uninitialize_old_slot_at_open(
+        submodules: &SubmoduleMap,
+        starts: &[PartitionChunkOffset],
+        chunk_size: u64,
+    ) -> eyre::Result<()> {
+        if starts.is_empty() {
+            return Ok(());
+        }
+        let mid_writes = Self::load_mid_write_logs(submodules)?;
+        for (interval, submodule) in submodules.iter() {
+            if !starts.contains(&interval.start()) {
+                continue;
+            }
+            let path = recover_mutex(&submodule.intervals_file).clone();
+            let mut stored = read_intervals_file(&path)?;
+            for span in mid_writes.get(&interval.start()).into_iter().flatten() {
+                let _ = stored.cut(*span);
+                let _ =
+                    stored.insert_merge_touching_if_values_equal(*span, ChunkType::Uninitialized);
+            }
+            let mut kept = StorageIntervals::new();
+            for (span, kind) in stored.iter() {
+                let kind = match kind {
+                    ChunkType::Entropy => ChunkType::Entropy,
+                    ChunkType::Data | ChunkType::Interrupted | ChunkType::Uninitialized => {
+                        ChunkType::Uninitialized
+                    }
+                };
+                kept.insert_merge_touching_if_values_equal(*span, kind)
+                    .map_err(|err| eyre!("keep-entropy interval span: {err:?}"))?;
+            }
+            // Uninitialized offsets lose their checksums. A later scan sets
+            // the flag again once the module is settled.
+            submodule.db.set_chunk_crc_complete(false)?;
+            submodule.crc_complete.store(false, Ordering::SeqCst);
+            let mut file = get_atomic_file(&path)?;
+            file.write_all(serde_json::to_string(&kept)?.as_bytes())?;
+            file.commit()?;
+            #[cfg(test)]
+            if FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS.with(|flag| flag.replace(false)) {
+                eyre::bail!("injected failure after the open keep-entropy intervals");
+            }
+            submodule
+                .db
+                .drop_uninitialized_coverage(&[(interval.start(), interval.end())], chunk_size)?;
+        }
+        Ok(())
+    }
+
     /// Drop tx intervals, data-root placements, and pending jobs under
     /// `Uninitialized` spans. A tx path and its leaf binding are deleted when
     /// no interval in that submodule still names the hash.
@@ -8101,9 +8381,29 @@ impl StorageModule {
         let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
         #[cfg(test)]
         self.note_sync_lock_probe();
-        let _sync = self.lock_sync();
+        let sync = self.lock_sync();
         self.drop_pending_writes_in_range(start, end);
+        self.publish_uninitialized_spans(&sync, &[ii(start, end)])?;
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AfterRollbackIntervalImage)?;
+        self.clear_offset_index_in_range(start, end)?;
+        self.clear_data_root_infos_in_range(start, end, data_roots)?;
+        self.purge_pending_body_migrations_in_range(start, end)?;
+        Ok(())
+    }
 
+    /// Label `spans` `Uninitialized` in the live map and replace every
+    /// interval file with that map. `Ok` means the image is durable. An error
+    /// puts the previous map back, so the caller must not clear the index.
+    ///
+    /// The caller holds the assignment write lock and `sync_in_progress`
+    /// (`_sync` is that guard). This does not wait on the disk lane: the lane
+    /// takes `sync_in_progress` to flush.
+    fn publish_uninitialized_spans(
+        &self,
+        _sync: &std::sync::MutexGuard<'_, ()>,
+        spans: &[Interval<PartitionChunkOffset>],
+    ) -> eyre::Result<()> {
         let previous_generation = self.load_publish_generation();
         let previous_map = {
             let mut guard = self.intervals.write().unwrap();
@@ -8111,16 +8411,17 @@ impl StorageModule {
             // The bump and the flip share this lock. A reader clones either
             // the old map at the old generation or the new map at the new one.
             self.publish_generation.fetch_add(1, Ordering::SeqCst);
-            // One label covers the inclusive span. One cut splits the
+            // One label covers each inclusive span. One cut splits the
             // neighbors. The insert merges with touching `Uninitialized`.
-            let span = ii(start, end);
             let mut intervals = RollbackSpanEdits {
                 map: &mut guard,
                 #[cfg(test)]
                 edits: &self.rollback_interval_edits,
             };
-            intervals.cut(span);
-            intervals.insert_merge_touching_if_values_equal(span, ChunkType::Uninitialized);
+            for span in spans {
+                intervals.cut(*span);
+                intervals.insert_merge_touching_if_values_equal(*span, ChunkType::Uninitialized);
+            }
             previous
         };
 
@@ -8161,11 +8462,6 @@ impl StorageModule {
             snapshot_crc_epoch,
             snapshot_publish,
         );
-        #[cfg(test)]
-        self.inject_sync_failure(SyncFailurePoint::AfterRollbackIntervalImage)?;
-        self.clear_offset_index_in_range(start, end)?;
-        self.clear_data_root_infos_in_range(start, end, data_roots)?;
-        self.purge_pending_body_migrations_in_range(start, end)?;
         Ok(())
     }
 
@@ -14345,6 +14641,351 @@ mod tests {
         Ok(())
     }
 
+    fn offset_meta_at(storage: &StorageModule, offset: u32) -> eyre::Result<Option<OffsetMeta>> {
+        let offset = PartitionChunkOffset::from(offset);
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        submodule.db.view(|tx| tx.get_offset_meta(offset))
+    }
+
+    fn tx_rows_in(storage: &StorageModule, start: u32, end: u32) -> eyre::Result<usize> {
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(start))?;
+        Ok(submodule
+            .db
+            .view(|tx| {
+                tx.tx_intervals_in_range(
+                    PartitionChunkOffset::from(start),
+                    PartitionChunkOffset::from(end),
+                )
+            })?
+            .len())
+    }
+
+    /// The same partition on another ledger slot.
+    fn publish_slot_one(storage: &StorageModule) -> PartitionAssignment {
+        let held = storage.partition_assignment().expect("assigned");
+        PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(1),
+            ..held
+        }
+    }
+
+    /// Entropy at 1..=3 with its checksum rows, `Data` at 0 with its proof,
+    /// and tx coverage, a data-root placement and a body job over 0..=3.
+    /// Returns the entropy bytes and checksum rows, and the data root.
+    fn seed_slot_exit(
+        storage: &StorageModule,
+    ) -> eyre::Result<(Vec<Vec<u8>>, Vec<Option<OffsetMeta>>, H256)> {
+        let (_bytes, data_root) = settle_proved_prefix(storage)?;
+        let mut bytes = Vec::new();
+        let mut metas = Vec::new();
+        for raw in 1..=3_u32 {
+            assert_eq!(live_label(storage, raw), Some(ChunkType::Entropy));
+            bytes.push(storage.read_chunk_internal(PartitionChunkOffset::from(raw))?);
+            let meta = offset_meta_at(storage, raw)?;
+            assert!(
+                meta.as_ref().is_some_and(|meta| meta.crc.is_some()),
+                "entropy at {raw} has no checksum row"
+            );
+            metas.push(meta);
+        }
+        assert_eq!(tx_rows_in(storage, 1, 3)?, 1, "entropy has the old tx row");
+        Ok((bytes, metas, data_root))
+    }
+
+    /// Entropy at 1..=3 kept with its bytes and checksum rows; 0 and every
+    /// row of the old slot gone; `next` stored.
+    fn assert_slot_exited(
+        storage: &StorageModule,
+        entropy: &[Vec<u8>],
+        metas: &[Option<OffsetMeta>],
+        data_root: H256,
+        next: PartitionAssignment,
+    ) -> eyre::Result<()> {
+        assert_eq!(live_label(storage, 0), Some(ChunkType::Uninitialized));
+        assert_eq!(file_label(storage, 0)?, Some(ChunkType::Uninitialized));
+        for (index, raw) in (1..=3_u32).enumerate() {
+            let offset = PartitionChunkOffset::from(raw);
+            assert_eq!(live_label(storage, raw), Some(ChunkType::Entropy), "{raw}");
+            assert_eq!(file_label(storage, raw)?, Some(ChunkType::Entropy), "{raw}");
+            assert_eq!(
+                storage.read_chunk_internal(offset)?,
+                entropy[index],
+                "{raw}"
+            );
+            let meta = offset_meta_at(storage, raw)?;
+            assert_eq!(
+                meta.as_ref().and_then(|meta| meta.crc),
+                metas[index].as_ref().and_then(|meta| meta.crc),
+                "the entropy checksum at {raw} changed"
+            );
+            assert!(data_path_at(storage, raw)?.is_none(), "proof row at {raw}");
+        }
+        assert!(offset_meta_at(storage, 0)?.is_none(), "offset row at 0");
+        assert!(data_path_at(storage, 0)?.is_none(), "proof row at 0");
+        assert_eq!(tx_rows_in(storage, 0, 3)?, 0, "the old tx coverage stayed");
+        assert!(
+            storage.collect_data_root_infos(data_root)?.0.is_empty(),
+            "the old placement stayed"
+        );
+        assert!(
+            storage.pending_body_migrations()?.is_empty(),
+            "the old body job stayed"
+        );
+        assert!(
+            storage
+                .generate_full_chunk(PartitionChunkOffset::from(0))?
+                .is_none()
+        );
+        assert!(!storage.has_pending_writes());
+        assert!(!storage.reset_incomplete());
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(
+            !submodule.db.reset_in_progress()?,
+            "a slot exit writes no marker"
+        );
+        assert_eq!(storage.partition_assignment(), Some(next));
+        let stored = PackingParams::from_toml(
+            storage
+                .submodules
+                .iter()
+                .next()
+                .expect("submodule")
+                .1
+                .path
+                .join(PACKING_PARAMS_FILE_NAME),
+        )?;
+        assert_eq!(stored.partition_hash, Some(next.partition_hash));
+        assert_eq!(stored.ledger, next.ledger_id);
+        assert_eq!(stored.slot, next.slot_index);
+        Ok(())
+    }
+
+    /// Leaving a ledger slot with the same partition keeps the entropy, its
+    /// bytes and checksum rows. `Data`, and a write that is not durable under
+    /// an `Entropy` label, become `Uninitialized`, and every row of the old
+    /// slot goes. Only those spans are returned for packing. A second run
+    /// changes nothing.
+    #[test]
+    fn keep_entropy_slot_exit_uninitializes_only_the_old_data() -> eyre::Result<()> {
+        let (tmp, _config, storage) = open_assigned_module("keep_entropy_exit", 30)?;
+        let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
+        // Queued bytes are not durable: they may be over the entropy.
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(2),
+            vec![0x5D; 32],
+            ChunkType::Data
+        ));
+        assert!(storage.has_pending_writes());
+        let mut entropy = entropy;
+        let mut metas = metas;
+        let next = publish_slot_one(&storage);
+
+        let spans = storage.reset_keep_entropy_with_assignment(next, 7)?;
+        assert_eq!(
+            spans,
+            vec![
+                partition_chunk_offset_ii!(0, 0),
+                partition_chunk_offset_ii!(2, 2)
+            ]
+        );
+        assert_eq!(storage.get_intervals(ChunkType::Uninitialized), spans);
+        assert_eq!(live_label(&storage, 2), Some(ChunkType::Uninitialized));
+        assert_eq!(file_label(&storage, 2)?, Some(ChunkType::Uninitialized));
+        // Offset 2 is checked as uninitialized above; the rest as kept entropy.
+        let kept: Vec<u32> = vec![1, 3];
+        let check = |storage: &StorageModule,
+                     entropy: &[Vec<u8>],
+                     metas: &[Option<OffsetMeta>]|
+         -> eyre::Result<()> {
+            for (bytes, (meta, raw)) in entropy.iter().zip(metas.iter().zip(kept.iter())) {
+                let offset = PartitionChunkOffset::from(*raw);
+                assert_eq!(live_label(storage, *raw), Some(ChunkType::Entropy));
+                assert_eq!(file_label(storage, *raw)?, Some(ChunkType::Entropy));
+                assert_eq!(&storage.read_chunk_internal(offset)?, bytes);
+                assert_eq!(
+                    offset_meta_at(storage, *raw)?.and_then(|meta| meta.crc),
+                    meta.as_ref().and_then(|meta| meta.crc)
+                );
+            }
+            Ok(())
+        };
+        entropy.remove(1);
+        metas.remove(1);
+        check(&storage, &entropy, &metas)?;
+        assert!(offset_meta_at(&storage, 2)?.is_none(), "offset row at 2");
+        assert!(data_path_at(&storage, 0)?.is_none());
+        assert_eq!(tx_rows_in(&storage, 0, 3)?, 0);
+        assert!(storage.collect_data_root_infos(data_root)?.0.is_empty());
+        assert!(storage.pending_body_migrations()?.is_empty());
+        assert!(!storage.has_pending_writes());
+        assert!(!storage.reset_incomplete());
+        assert_eq!(storage.partition_assignment(), Some(next));
+        let params_path = tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
+        let stored = PackingParams::from_toml(&params_path)?;
+        assert_eq!(stored.ledger, Some(DataLedger::Publish.into()));
+        assert_eq!(stored.slot, Some(1));
+        assert_eq!(stored.last_updated_height, Some(7));
+
+        // Idempotent: nothing left to uninitialize, no image published.
+        let intervals_before = fs::read(tmp.path().join("hdd0").join("intervals.json"))?;
+        let params_before = fs::read(&params_path)?;
+        let publish_before = storage.publish_generation.load(Ordering::SeqCst);
+        let again = storage.reset_keep_entropy_with_assignment(next, 7)?;
+        assert_eq!(again, spans);
+        assert_eq!(
+            storage.publish_generation.load(Ordering::SeqCst),
+            publish_before,
+            "a repeat published another interval image"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("hdd0").join("intervals.json"))?,
+            intervals_before
+        );
+        assert_eq!(fs::read(&params_path)?, params_before);
+        check(&storage, &entropy, &metas)?;
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A keep-entropy reset for another partition is refused and changes
+    /// nothing: that takes the full wipe.
+    #[test]
+    fn keep_entropy_slot_exit_refuses_another_partition() -> eyre::Result<()> {
+        let (tmp, _config, storage) = open_assigned_module("keep_entropy_refuse", 30)?;
+        let (_entropy, _metas, data_root) = seed_slot_exit(&storage)?;
+        let held = storage.partition_assignment().expect("assigned");
+        let other = PartitionAssignment {
+            partition_hash: H256::repeat_byte(0x99),
+            ..publish_slot_one(&storage)
+        };
+        let publish_before = storage.publish_generation.load(Ordering::SeqCst);
+        let params_path = tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
+        let params_before = fs::read(&params_path)?;
+        let err = storage
+            .reset_keep_entropy_with_assignment(other, 7)
+            .expect_err("another partition is refused");
+        assert!(
+            err.to_string().contains("keep-entropy reset refused"),
+            "{err}"
+        );
+        assert_eq!(storage.partition_assignment(), Some(held));
+        assert_eq!(fs::read(&params_path)?, params_before);
+        assert_eq!(
+            storage.publish_generation.load(Ordering::SeqCst),
+            publish_before
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Data));
+        assert!(data_path_at(&storage, 0)?.is_some());
+        assert_eq!(tx_rows_in(&storage, 0, 3)?, 1);
+        assert!(!storage.collect_data_root_infos(data_root)?.0.is_empty());
+        assert!(!storage.pending_body_migrations()?.is_empty());
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A crash after the `Uninitialized` image and before the row clear and
+    /// the assignment store leaves the file naming the old slot. The reopen
+    /// that requests the new slot repeats the slot exit: entropy kept, the
+    /// data span `Uninitialized`, no row of the old slot.
+    #[test]
+    fn keep_entropy_crash_before_the_store_repeats_on_reopen() -> eyre::Result<()> {
+        let (tmp, config, storage) = open_assigned_module("keep_entropy_crash", 30)?;
+        let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
+        let next = publish_slot_one(&storage);
+        storage.fail_next_sync_at(SyncFailurePoint::AfterKeepEntropyImage);
+        let err = storage
+            .reset_keep_entropy_with_assignment(next, 7)
+            .expect_err("the injected crash point");
+        assert!(
+            format!("{err:#}").contains("AfterKeepEntropyImage"),
+            "{err:#}"
+        );
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Uninitialized));
+        assert!(
+            data_path_at(&storage, 0)?.is_some(),
+            "the row clear ran early"
+        );
+        let params_path = tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
+        let recorded = PackingParams::from_toml(&params_path)?;
+        assert_eq!(recorded.ledger, Some(DataLedger::Submit.into()));
+        assert_eq!(recorded.slot, Some(0), "the file named the new slot early");
+
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+        let mut info = crc_hold_info(tmp.path());
+        info.partition_assignment = Some(next);
+        let storage = StorageModule::new(&info, &config)?;
+        assert_slot_exited(&storage, &entropy, &metas, data_root, next)?;
+        assert_eq!(
+            storage.get_intervals(ChunkType::Uninitialized),
+            vec![partition_chunk_offset_ii!(0, 0)]
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Open with the same partition leaving a ledger slot keeps the entropy
+    /// (it used to wipe the whole partition) and drops the old slot's data
+    /// and rows. A file that records no partition gaining one still wipes.
+    #[test]
+    fn open_slot_exit_keeps_entropy_and_a_new_partition_still_wipes() -> eyre::Result<()> {
+        let (tmp, config, storage) = open_assigned_module("keep_entropy_open", 30)?;
+        let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
+        let next = publish_slot_one(&storage);
+        drop(storage);
+        let mut info = crc_hold_info(tmp.path());
+        info.partition_assignment = Some(next);
+        let storage = StorageModule::new(&info, &config)?;
+        assert_slot_exited(&storage, &entropy, &metas, data_root, next)?;
+        drop(storage);
+
+        let (tmp, config, storage) = open_assigned_module("keep_entropy_open_new", 30)?;
+        let _ = seed_slot_exit(&storage)?;
+        drop(storage);
+        forget_recorded_partition(&tmp.path().join("hdd0"))?;
+        let mut info = crc_hold_info(tmp.path());
+        info.partition_assignment = Some(next);
+        let storage = StorageModule::new(&info, &config)?;
+        for raw in 0..=3_u32 {
+            assert_eq!(
+                live_label(&storage, raw),
+                Some(ChunkType::Uninitialized),
+                "{raw}"
+            );
+        }
+        assert_eq!(tx_rows_in(&storage, 0, 3)?, 0);
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Expiry to capacity keeps the partition's entropy and uninitializes
+    /// only the expired slot's data.
+    #[test]
+    fn expired_to_capacity_keeps_entropy() -> eyre::Result<()> {
+        let (tmp, _config, storage) = open_assigned_module("keep_entropy_expiry", 30)?;
+        let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
+        let held = storage.partition_assignment().expect("assigned");
+        let spans = storage
+            .reset_expired_to_capacity(held.partition_hash, 100)?
+            .expect("the slot expired");
+        assert_eq!(spans, vec![partition_chunk_offset_ii!(0, 0)]);
+        let capacity = PartitionAssignment {
+            ledger_id: None,
+            slot_index: None,
+            ..held
+        };
+        assert_slot_exited(&storage, &entropy, &metas, data_root, capacity)?;
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
     /// A completion that copied the map before rollback must not write that
     /// `Data` image back over the `Uninitialized` file.
     #[test]
@@ -19628,10 +20269,12 @@ mod tests {
         Ok(())
     }
 
-    /// Expiry reads the file, wipes, then stores capacity. A store error
-    /// after that wipe keeps the marker. The retry still moves to capacity.
+    /// Expiry reads the file, uninitializes the expired slot's data, then
+    /// stores capacity. A store error after that writes no marker and leaves
+    /// the file naming the old slot, so a reopen repeats the slot exit. The
+    /// retry still moves to capacity.
     #[test]
-    fn failed_expiry_store_keeps_the_reset_marker() -> eyre::Result<()> {
+    fn failed_expiry_store_keeps_the_old_slot_recorded() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new()
             .prefix("expiry_store_fail")
             .with_tracing()
@@ -19643,7 +20286,7 @@ mod tests {
         current.miner_address = config.node_config.miner_address();
         current.ledger_id = Some(DataLedger::Publish.into());
         let sub = tmp.path().join("chunks");
-        let storage = StorageModule::new(&one_span(3, sub, Some(current)), &config)?;
+        let storage = StorageModule::new(&one_span(3, sub.clone(), Some(current)), &config)?;
         let offset = PartitionChunkOffset::from(0);
         assert!(storage.write_chunk(offset, vec![0x22; 32], ChunkType::Data));
         storage.force_sync_pending_chunks()?;
@@ -19653,12 +20296,20 @@ mod tests {
             .reset_expired_to_capacity(hash, 9)
             .expect_err("the capacity store is the injected failure");
         assert!(err.to_string().contains("AssignmentStore"), "{err}");
-        assert!(storage.reset_incomplete());
+        assert!(!storage.reset_incomplete(), "a slot exit sets no wipe flag");
         let (_, submodule) = storage.get_submodule_for_offset(offset)?;
-        assert!(submodule.db.reset_in_progress()?);
+        assert!(
+            !submodule.db.reset_in_progress()?,
+            "a slot exit writes no marker"
+        );
         let assignment = storage.partition_assignment().unwrap();
         assert_eq!(assignment.partition_hash, hash);
         assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(
+            PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?.ledger,
+            Some(DataLedger::Publish.into()),
+            "the file names the old slot until the store"
+        );
         assert_eq!(
             storage.get_chunk_type(&offset),
             Some(ChunkType::Uninitialized)
@@ -19667,7 +20318,7 @@ mod tests {
         let finished = storage
             .reset_expired_to_capacity(hash, 9)?
             .expect("the same expiry still resets once the store can finish");
-        assert_eq!(finished, partition_chunk_offset_ii!(0, 3));
+        assert_eq!(finished, vec![partition_chunk_offset_ii!(0, 3)]);
         assert!(!storage.reset_incomplete());
         let (_, submodule) = storage.get_submodule_for_offset(offset)?;
         assert!(!submodule.db.reset_in_progress()?);
@@ -21302,9 +21953,10 @@ mod tests {
         Ok(rows.len())
     }
 
-    /// A packing refusal on the ledger-exit arm must not store the reset marker.
-    /// The next open that still assigns the old hash keeps the entropy. A
-    /// later ledger exit whose packing matches still wipes.
+    /// A packing refusal on the ledger-exit arm must not store the reset marker
+    /// or touch the labels. The next open that still assigns the old hash
+    /// keeps the entropy. A later ledger exit whose packing matches keeps the
+    /// entropy too and drops the old slot's tx row.
     #[test]
     fn refused_ledger_exit_open_does_not_leave_a_reset_marker() -> eyre::Result<()> {
         {
@@ -21392,8 +22044,8 @@ mod tests {
             )?;
             assert_eq!(
                 exited.get_chunk_type(&PartitionChunkOffset::from(0)),
-                Some(ChunkType::Uninitialized),
-                "{engine:?}: a matching ledger exit must still wipe"
+                Some(ChunkType::Entropy),
+                "{engine:?}: a matching ledger exit keeps the partition's entropy"
             );
             assert!(
                 !exited
@@ -21406,14 +22058,15 @@ mod tests {
             assert_eq!(
                 live_tx_rows(&exited)?,
                 0,
-                "{engine:?}: a finished ledger exit kept the tx row"
+                "{engine:?}: a finished ledger exit kept the old slot's tx row"
             );
         }
         Ok(())
     }
 
     /// The file has no chain id. A Rocks ledger exit must compare the stored
-    /// packing record before it wipes. The same chain id still wipes on a ledger exit.
+    /// packing record before it changes anything. The same chain id still
+    /// exits the ledger: the entropy stays and the old tx row goes.
     #[test]
     fn rocks_ledger_exit_with_a_different_chain_id_does_not_wipe() -> eyre::Result<()> {
         let hash = H256::repeat_byte(0x62);
@@ -21470,8 +22123,13 @@ mod tests {
         )?;
         assert_eq!(
             exited.get_chunk_type(&PartitionChunkOffset::from(0)),
-            Some(ChunkType::Uninitialized),
-            "the same chain id still wipes on a ledger exit"
+            Some(ChunkType::Entropy),
+            "the same chain id exits the ledger and keeps the entropy"
+        );
+        assert_eq!(
+            live_tx_rows(&exited)?,
+            0,
+            "the same chain id exits the ledger and drops the old tx row"
         );
         Ok(())
     }
@@ -21492,13 +22150,26 @@ mod tests {
         }
     }
 
-    /// A crash after the ledger-exit marker, and before `crc_complete` is
-    /// cleared, must leave the flag set. The next open finishes the wipe.
-    /// A ledger exit that is not interrupted still wipes and clears the flag.
+    /// The file records no partition, as after a release. An open that
+    /// assigns one is a new partition: it wipes behind the reset marker.
+    fn forget_recorded_partition(sub: &Path) -> eyre::Result<()> {
+        let path = sub.join(PACKING_PARAMS_FILE_NAME);
+        let mut params = PackingParams::from_toml(&path)?;
+        params.partition_hash = None;
+        params.ledger = None;
+        params.slot = None;
+        params.write_to_disk(&path)
+    }
+
+    /// A crash after the open wipe marker (a file that records no partition
+    /// gaining one), and before `crc_complete` is cleared, must leave the flag
+    /// set. The next open finishes the wipe. A same-hash ledger exit writes
+    /// no marker: it keeps the entropy and still clears the flag.
     #[test]
     fn crash_after_open_reset_marker_keeps_crc_complete() -> eyre::Result<()> {
         let hash = H256::repeat_byte(0x63);
         let (_tmp, config, sub) = seed_assigned_entropy("open_marker_crc", hash)?;
+        forget_recorded_partition(&sub)?;
         {
             let _fail = OpenResetMarkerFail::arm();
             let err = StorageModule::new(
@@ -21514,8 +22185,8 @@ mod tests {
         }
         assert_eq!(
             PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
-            Some(hash),
-            "the interrupted ledger exit published the packing file"
+            None,
+            "the interrupted wipe published the packing file"
         );
         assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Entropy));
         {
@@ -21532,10 +22203,7 @@ mod tests {
                     PartitionChunkOffset::from(0),
                 )
             })?;
-            assert!(
-                !rows.is_empty(),
-                "the interrupted ledger exit cleared the index"
-            );
+            assert!(!rows.is_empty(), "the interrupted wipe cleared the index");
         }
 
         let recovered = StorageModule::new(
@@ -21560,9 +22228,10 @@ mod tests {
         )?;
         assert_eq!(
             exited.get_chunk_type(&PartitionChunkOffset::from(0)),
-            Some(ChunkType::Uninitialized),
-            "an uninterrupted ledger exit must still wipe"
+            Some(ChunkType::Entropy),
+            "a same-hash ledger exit keeps the entropy"
         );
+        assert_eq!(live_tx_rows(&exited)?, 0, "the old slot's tx row stayed");
         let (_, submodule) = exited.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         assert!(!submodule.db.reset_in_progress()?);
         assert!(
@@ -21825,8 +22494,9 @@ mod tests {
     }
 
     /// Same hash, same ledger, and same slot keeps the bytes. Gaining a ledger
-    /// from capacity keeps them too. Leaving a ledger wipes: another ledger,
-    /// another slot, or capacity. A wiped expiry still accepts a repack.
+    /// from capacity keeps them too. Leaving a ledger (another ledger, another
+    /// slot, or capacity) uninitializes the old slot's data and drops its
+    /// rows. A slot-exited expiry still accepts a repack.
     #[test]
     fn same_hash_ledger_drift_wipes_only_when_leaving_a_ledger() -> eyre::Result<()> {
         {
@@ -21908,75 +22578,98 @@ mod tests {
         Ok(())
     }
 
-    /// A crash after the slot-change marker, and before the wipe finishes,
-    /// leaves the old file and the old label. The next open finishes the wipe.
-    #[test]
-    fn crash_during_slot_change_wipe_finishes_on_the_next_open() -> eyre::Result<()> {
-        {
-            let engine = "RocksDB";
-            let tmp = TempDirBuilder::new()
-                .prefix(&format!("slot_marker_{engine:?}"))
-                .build();
-            let config = testing_config(tmp.path(), 32, 4);
-            let hash = H256::repeat_byte(0x72);
-            let sub = tmp.path().join("sub");
-            let submit = Some(u32::from(DataLedger::Submit));
-            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-            {
-                let index = open_submodule_index(&sub, &config.node_config.database)?;
-                if index.stores_offset_crc() {
-                    index.set_chunk_crc_complete(true)?;
-                }
-            }
-            {
-                let _fail = OpenResetMarkerFail::arm();
-                let err = StorageModule::new(
-                    &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                    &config,
-                )
-                .expect_err("the open stops after the marker");
-                assert!(
-                    err.to_string()
-                        .contains("injected failure after the open reset marker"),
-                    "{engine:?}: {err}"
-                );
-            }
-            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
-            assert_eq!(loaded.slot, Some(0), "{engine:?}: the file was published");
-            assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Data));
-            {
-                let index = open_submodule_index(&sub, &config.node_config.database)?;
-                assert!(index.reset_in_progress()?, "{engine:?}: marker missing");
-                if index.stores_offset_crc() {
-                    assert!(
-                        index.chunk_crc_complete()?,
-                        "{engine:?}: crc_complete was cleared before the wipe"
-                    );
-                }
-                let rows = index.view(|tx| {
-                    tx.tx_intervals_in_range(
-                        PartitionChunkOffset::from(0),
-                        PartitionChunkOffset::from(0),
-                    )
-                })?;
-                assert!(
-                    !rows.is_empty(),
-                    "{engine:?}: the interrupted wipe cleared the row"
-                );
-            }
+    /// Arms a failure after the open keep-entropy interval rewrite and clears
+    /// it on drop.
+    struct OpenKeepEntropyFail;
 
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+    impl OpenKeepEntropyFail {
+        fn arm() -> Self {
+            FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for OpenKeepEntropyFail {
+        fn drop(&mut self) {
+            FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS.with(|flag| flag.set(false));
+        }
+    }
+
+    /// A crash during a same-hash slot change at open, after the interval file
+    /// is rewritten and before the old tx rows go and the file names the new
+    /// slot, leaves the old slot recorded and no marker. The next open repeats
+    /// the slot exit: the entropy stays, the old data is uninitialized and no
+    /// row of the old slot is left.
+    #[test]
+    fn crash_during_slot_change_open_repeats_on_the_next_open() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("slot_keep_crash").build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x72);
+        let sub = tmp.path().join("sub");
+        let submit = Some(u32::from(DataLedger::Submit));
+        seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+        {
+            let storage = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
                 &config,
             )?;
-            assert_wiped(&opened, &sub, "the next open finishes the slot wipe")?;
-            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
-            assert_eq!(loaded.slot, Some(1));
-            let (_, submodule) = opened.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-            if submodule.db.stores_offset_crc() {
-                assert!(!submodule.db.chunk_crc_complete()?);
+            for raw in 1..=2_u32 {
+                assert!(storage.write_chunk(
+                    PartitionChunkOffset::from(raw),
+                    vec![0xE2_u8; 32],
+                    ChunkType::Entropy
+                ));
             }
+            storage.force_sync_pending_chunks()?;
+            let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            submodule.db.set_chunk_crc_complete(true)?;
         }
+        {
+            let _fail = OpenKeepEntropyFail::arm();
+            let err = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )
+            .expect_err("the open stops after the interval rewrite");
+            assert!(
+                err.to_string()
+                    .contains("injected failure after the open keep-entropy intervals"),
+                "{err}"
+            );
+        }
+        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+        assert_eq!(
+            loaded.slot,
+            Some(0),
+            "the file named the new slot too early"
+        );
+        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Uninitialized));
+        assert_eq!(interval_label(&sub, 1)?, Some(ChunkType::Entropy));
+        {
+            let index = open_submodule_index(&sub, &config.node_config.database)?;
+            assert!(!index.reset_in_progress()?, "a slot exit writes no marker");
+            assert!(!index.chunk_crc_complete()?, "crc_complete was kept");
+            let rows = index.view(|tx| {
+                tx.tx_intervals_in_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(0),
+                )
+            })?;
+            assert!(!rows.is_empty(), "the crash came before the row drop");
+        }
+
+        let opened = StorageModule::new(
+            &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+            &config,
+        )?;
+        assert_wiped(&opened, &sub, "the next open repeats the slot exit")?;
+        for raw in 1..=2_u32 {
+            let offset = PartitionChunkOffset::from(raw);
+            assert_eq!(opened.get_chunk_type(&offset), Some(ChunkType::Entropy));
+            assert_eq!(opened.read_chunk_internal(offset)?, vec![0xE2_u8; 32]);
+        }
+        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+        assert_eq!(loaded.slot, Some(1));
         Ok(())
     }
 
@@ -22140,11 +22833,11 @@ mod tests {
         Ok(())
     }
 
-    /// A crash after the slot-change marker leaves the old bytes. A later
+    /// A crash after the open wipe marker leaves the old bytes. A later
     /// open that packing refuses does not finish that wipe. The next
     /// accepted open does.
     #[test]
-    fn refused_open_does_not_finish_a_slot_change_marker() -> eyre::Result<()> {
+    fn refused_open_does_not_finish_a_wipe_marker() -> eyre::Result<()> {
         {
             let engine = "RocksDB";
             let tmp = TempDirBuilder::new()
@@ -22156,6 +22849,9 @@ mod tests {
             let sub = tmp.path().join("sub");
             seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
             let bytes_before = chunk_file_prefix(&sub, 32)?;
+            // A slot change keeps the entropy and writes no marker. A file
+            // that records no partition gaining one wipes behind it.
+            forget_recorded_partition(&sub)?;
             {
                 let _fail = OpenResetMarkerFail::arm();
                 let err = StorageModule::new(
@@ -22198,7 +22894,7 @@ mod tests {
                     "{engine:?}: the refused open cleared the crash marker"
                 );
                 let loaded = PackingParams::from_toml(&params_path)?;
-                assert_eq!(loaded.slot, Some(0));
+                assert_eq!(loaded.partition_hash, None);
             }
             params.entropy_packing_iterations = Some(recorded);
             params.write_to_disk(&params_path)?;

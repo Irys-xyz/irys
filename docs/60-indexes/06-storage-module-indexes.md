@@ -107,10 +107,20 @@ When the partition hash in `packing_params.toml` matches the assignment
 and the ledger or the slot does not, open keeps or clears the stored
 bytes by the ledger the file already names. The same hash, ledger, and
 slot keeps the bytes. Capacity that gains a ledger keeps the bytes.
-Leaving a ledger (another ledger, another slot, or capacity) clears
-the index and rewrites the intervals to `Uninitialized`. The
-`chunks.dat` bytes stay until a later pack overwrites them. A refused
-open before that clear leaves the previous file in place.
+Leaving a ledger (another ledger, another slot, or capacity) keeps the
+partition's entropy: entropy depends on the packing address, the
+partition hash and the chunk offset, not on the ledger or the slot.
+`Entropy` spans keep their bytes and checksum-only rows. Every other
+span is rewritten to `Uninitialized`, and the old slot's tx coverage,
+data-root placements and body jobs are dropped over the whole
+submodule, before the file names the new slot. No reset marker is
+written: a crash before that rebind reopens with the old slot recorded
+and repeats the exit. Only the `Uninitialized` spans are packed. The
+runtime exit (storage module service, and term-slot expiry) does the
+same. A different partition hash still clears the whole index and
+rewrites every interval to `Uninitialized`. The `chunks.dat` bytes stay
+until a later pack overwrites them. A refused open before that clear
+leaves the previous file in place.
 
 Mining recall reads
 `chunks.dat` with `O_DIRECT` (`storage.recall_direct_io`, default true).

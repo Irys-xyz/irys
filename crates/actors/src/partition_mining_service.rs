@@ -392,14 +392,14 @@ impl PartitionMiningServiceInner {
         error_message: &'static str,
     ) {
         match self.expire_to_capacity() {
-            Ok(Some(interval)) => {
+            Ok(Some(spans)) => {
                 self.expiry_reset_pending = false;
                 debug!(
                     storage_module.partition_hash = ?partition_hash,
-                    storage_module.packing_interval = ?interval,
+                    storage_module.packing_spans = ?spans,
                     "{done_message}"
                 );
-                self.enqueue_expiry_packing(PartitionChunkRange(interval));
+                self.enqueue_expiry_packing(spans.into_iter().map(PartitionChunkRange));
             }
             Ok(None) => {
                 self.expiry_reset_pending = false;
@@ -440,8 +440,9 @@ impl PartitionMiningServiceInner {
     /// Reset to capacity under the assignment write lock when the hash this
     /// notice named is still stored from before the notice. `Ok(None)` when
     /// that hash was replaced or the slot was stored at or after the notice.
-    /// A failed reset leaves the previous assignment in place.
-    fn expire_to_capacity(&self) -> eyre::Result<Option<Interval<PartitionChunkOffset>>> {
+    /// A failed reset leaves the previous assignment in place. The reset
+    /// keeps the partition's entropy; `Some` lists the spans to pack.
+    fn expire_to_capacity(&self) -> eyre::Result<Option<Vec<Interval<PartitionChunkOffset>>>> {
         let Some(expired_hash) = self.expiry_partition_hash else {
             eyre::bail!("expiry reset has no partition hash");
         };
@@ -449,11 +450,13 @@ impl PartitionMiningServiceInner {
             .reset_expired_to_capacity(expired_hash, self.expiry_update_height)
     }
 
-    /// Pack `range`. A full or closed channel keeps the span. A new expiry
-    /// replaces spans the channel has not accepted: the reset cleared them.
-    fn enqueue_expiry_packing(&mut self, range: PartitionChunkRange) {
+    /// Pack `ranges`. A full or closed channel keeps each span. A new expiry
+    /// replaces spans the channel has not accepted: the reset relabelled them.
+    fn enqueue_expiry_packing(&mut self, ranges: impl IntoIterator<Item = PartitionChunkRange>) {
         self.deferred_expiry_packs.clear();
-        self.send_or_defer_expiry_pack(range);
+        for range in ranges {
+            self.send_or_defer_expiry_pack(range);
+        }
     }
 
     fn send_or_defer_expiry_pack(&mut self, range: PartitionChunkRange) {
@@ -1391,7 +1394,8 @@ mod tests {
         storage_module.fail_next_reset_for_test();
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 11);
         assert!(inner.expiry_reset_pending);
-        assert!(storage_module.reset_incomplete());
+        // The slot exit keeps the entropy and writes no wipe flag.
+        assert!(!storage_module.reset_incomplete());
         assert!(receivers.packing.try_recv().is_err());
 
         inner.finish_expiry_reset();
@@ -1445,7 +1449,8 @@ mod tests {
     }
 
     /// A ledger slot stored before the notice is the slot that expired. The
-    /// notice resets it to capacity and queues packing.
+    /// notice moves it to capacity, keeps the partition's entropy, and packs
+    /// only the expired slot's data span.
     #[test]
     fn expiry_notice_resets_a_ledger_stored_before_it() {
         let (_tmp, config, storage_module, partition_hash) =
@@ -1454,6 +1459,14 @@ mod tests {
         storage_module
             .assign_partition(submit, 10)
             .expect("store the slot before the notice");
+        for offset in 2..10_u32 {
+            assert!(storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0xE7_u8; 32],
+                ChunkType::Entropy,
+            ));
+        }
+        write_synced_data(&storage_module, 0x11);
         let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
@@ -1463,7 +1476,21 @@ mod tests {
         assert_eq!(assignment.ledger_id, None);
         assert_eq!(assignment.slot_index, None);
         assert!(!inner.expiry_reset_pending);
-        assert!(receivers.packing.try_recv().is_ok());
+        assert_eq!(
+            storage_module.get_intervals(ChunkType::Entropy),
+            vec![irys_types::partition_chunk_offset_ii!(2, 9)],
+            "the partition's entropy is kept"
+        );
+        let request = receivers
+            .packing
+            .try_recv()
+            .expect("the data span is packed");
+        assert_eq!(*request.chunk_range().0.start(), 0);
+        assert_eq!(*request.chunk_range().0.end(), 1);
+        assert!(
+            receivers.packing.try_recv().is_err(),
+            "the entropy is not packed again"
+        );
     }
 
     fn fill_expiry_packing_channel(inner: &PartitionMiningServiceInner) {
@@ -1809,7 +1836,8 @@ mod tests {
         storage_module.fail_next_reset_for_test();
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 40);
         assert!(inner.expiry_reset_pending);
-        assert!(storage_module.reset_incomplete());
+        // The slot exit keeps the entropy and writes no wipe flag.
+        assert!(!storage_module.reset_incomplete());
         assert!(receivers.packing.try_recv().is_err());
 
         inner.handle_partitions_expiration(&H256List(vec![H256::repeat_byte(0x7d)]), 50);
@@ -2011,7 +2039,8 @@ mod tests {
         storage_module.fail_next_reset_for_test();
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
         assert!(inner.expiry_reset_pending);
-        assert!(storage_module.reset_incomplete());
+        // The slot exit keeps the entropy and writes no wipe flag.
+        assert!(!storage_module.reset_incomplete());
         assert!(receivers.packing.try_recv().is_err());
 
         storage_module

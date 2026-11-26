@@ -750,8 +750,9 @@ impl StorageModuleServiceInner {
     }
 
     /// Hold `next`. Keeps the bytes when the module already holds that
-    /// partition on the same slot, or as capacity gaining a ledger; otherwise
-    /// (a new partition, or leaving a ledger) resets, installs and packs.
+    /// partition on the same slot, or as capacity gaining a ledger. Leaving a
+    /// ledger keeps the entropy and repacks only the old slot's data. A new
+    /// partition resets, installs and packs the whole span.
     fn assign_module(
         &mut self,
         module: &Arc<StorageModule>,
@@ -795,8 +796,9 @@ impl StorageModuleServiceInner {
                             self.enqueue_uninitialized(module);
                             Ok(())
                         } else {
-                            // Leaving a ledger: the bytes belong to the old slot.
-                            self.install_new(module, next, epoch_height)
+                            // Leaving a ledger: the data belongs to the old
+                            // slot. The entropy belongs to the partition.
+                            self.leave_slot(module, next, epoch_height)
                         }
                     }
                     _ => self.install_new(module, next, epoch_height),
@@ -815,6 +817,42 @@ impl StorageModuleServiceInner {
     ) -> eyre::Result<()> {
         let range = self.reset_and_install(module, Some(next), epoch_height)?;
         self.enqueue_packing(module, range);
+        Ok(())
+    }
+
+    /// Leave a ledger slot and keep the partition. Entropy does not depend on
+    /// the ledger or slot, so only the old slot's data becomes
+    /// `Uninitialized` and only `Uninitialized` spans are packed, not the
+    /// whole partition. A failed reset leaves the previous assignment, so
+    /// the retry takes this path again.
+    fn leave_slot(
+        &mut self,
+        module: &Arc<StorageModule>,
+        next: PartitionAssignment,
+        epoch_height: u64,
+    ) -> eyre::Result<()> {
+        let spans = match module.reset_keep_entropy_with_assignment(next, epoch_height) {
+            Ok(spans) => spans,
+            Err(err) => {
+                warn!(
+                    storage_module.id = module.id,
+                    "storage module slot exit failed: {err:#}"
+                );
+                return Err(ResetNotFinished.into());
+            }
+        };
+        info!(
+            storage_module.id = module.id,
+            partition.hash = %next.partition_hash,
+            partition.ledger_id = ?next.ledger_id,
+            partition.slot_index = ?next.slot_index,
+            packing.spans = spans.len(),
+            "storage module left its ledger slot; entropy kept, old slot data uninitialized"
+        );
+        // Spans the channel did not accept belong to the old slot. The reset
+        // turned what still needs packing into `Uninitialized`.
+        self.pending_ranges.remove(&module.id);
+        self.enqueue_uninitialized(module);
         Ok(())
     }
 
@@ -883,10 +921,11 @@ impl StorageModuleServiceInner {
         }
         if current.ledger_id.is_some() {
             // Leaving a ledger slot (ledger→capacity, or ledger→ledger). Clear
-            // the old index and store the new assignment under one write
-            // lock. A failed reset leaves the previous assignment, so the
-            // retry still sees the change.
-            return self.install_new(module, next, epoch_height);
+            // the old slot's data and index and store the new assignment
+            // under one write lock; the partition's entropy stays. A failed
+            // reset leaves the previous assignment, so the retry still sees
+            // the change.
+            return self.leave_slot(module, next, epoch_height);
         }
         // Capacity→ledger does not reset. Entropy and Data stay unless a
         // durable marker says the wipe already started. Clear an in-memory
@@ -1683,7 +1722,8 @@ mod assignment_reset_tests {
             harness.module.partition_assignment().unwrap().ledger_id,
             Some(DataLedger::Publish.into())
         );
-        assert!(harness.module.reset_incomplete());
+        // A failed slot exit changed nothing and sets no wipe flag.
+        assert!(!harness.module.reset_incomplete());
         assert!(harness.receivers.packing.try_recv().is_err());
 
         harness
@@ -1740,7 +1780,8 @@ mod assignment_reset_tests {
             Some(DataLedger::Publish.into()),
             "the module whose reset failed keeps its assignment"
         );
-        assert!(first.reset_incomplete());
+        // A failed slot exit changed nothing and sets no wipe flag.
+        assert!(!first.reset_incomplete());
         assert_eq!(
             second.partition_assignment().unwrap().ledger_id,
             None,
@@ -1864,9 +1905,9 @@ mod assignment_reset_tests {
         module.get_chunk_type(&PartitionChunkOffset::from(0))
     }
 
-    /// A failed reset set the in-memory flag and wrote no marker. A later
-    /// update that names the same ledger and slot must not wipe: open keeps
-    /// those bytes. The stored capacity retry is dropped. A second apply, an
+    /// A failed release wipe set the in-memory flag and wrote no marker. A
+    /// later update that names the same ledger and slot must not wipe: open
+    /// keeps those bytes. The stored unassign retry is dropped. A second apply, an
     /// idle tick, and a reopen all keep the bytes.
     #[tokio::test]
     async fn matching_assignment_without_a_marker_keeps_the_bytes() {
@@ -1877,7 +1918,7 @@ mod assignment_reset_tests {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
 
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         assert!(harness.inner.pending_assignment.is_some());
         assert!(harness.module.reset_incomplete());
         assert!(!reset_marker(&harness.module));
@@ -1891,7 +1932,7 @@ mod assignment_reset_tests {
         apply_update(&mut harness, Arc::clone(&publish), 5).await;
         assert!(
             harness.inner.pending_assignment.is_none(),
-            "the capacity retry must not stay pending once the ledger is confirmed"
+            "the unassign retry must not stay pending once the ledger is confirmed"
         );
         let assignment = harness.module.partition_assignment().unwrap();
         assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
@@ -1929,7 +1970,7 @@ mod assignment_reset_tests {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
 
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         set_reset_marker(&harness.module);
         assert!(harness.module.reset_incomplete());
         assert!(reset_marker(&harness.module));
@@ -2023,8 +2064,10 @@ mod assignment_reset_tests {
             .expect("restore packing params");
     }
 
-    /// Ledger to capacity. The wipe commits and the assignment file does not.
+    /// A release wipes. The wipe commits and the assignment file does not.
     /// A later message that names the old ledger packs that wiped span once.
+    /// (A slot exit keeps the entropy and sets no marker, so the full-wipe
+    /// retry tests drive the wipe with a release.)
     #[tokio::test]
     async fn old_ledger_after_failed_assignment_store_packs_the_wipe() {
         use irys_domain::storage_module::ChunkType;
@@ -2035,7 +2078,7 @@ mod assignment_reset_tests {
         let path = harness.path.clone();
         let saved = corrupt_packing_params(&path);
 
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         assert!(harness.inner.pending_assignment.is_some());
         assert!(
             harness.module.reset_incomplete(),
@@ -2087,8 +2130,10 @@ mod assignment_reset_tests {
         );
     }
 
-    /// The same capacity message, retried after the file is readable, still
-    /// installs capacity and packs the wipe once.
+    /// Ledger to capacity keeps the entropy. The old slot's data is
+    /// uninitialized and the assignment file does not store. No wipe flag or
+    /// marker: the file still names the old slot. The same capacity message,
+    /// retried after the file is readable, installs capacity and packs once.
     #[tokio::test]
     async fn retried_assignment_after_failed_store_packs_once() {
         use irys_domain::storage_module::ChunkType;
@@ -2100,7 +2145,13 @@ mod assignment_reset_tests {
         let saved = corrupt_packing_params(&path);
         let update = capacity_update(hash, miner);
         apply_update(&mut harness, Arc::clone(&update), 4).await;
-        assert!(harness.module.reset_incomplete());
+        assert!(harness.inner.pending_assignment.is_some());
+        assert!(!harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
         assert!(harness.receivers.packing.try_recv().is_err());
 
@@ -2118,12 +2169,57 @@ mod assignment_reset_tests {
             .receivers
             .packing
             .try_recv()
-            .expect("the retried capacity assignment packs the wipe");
+            .expect("the retried capacity assignment packs the uninitialized span");
         assert_full_partition_span(&request);
+        drop(request);
         assert!(harness.receivers.packing.try_recv().is_err());
+        harness.inner.tick().await;
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "the successful retry cleared the failed exit's repack list"
+        );
     }
 
-    /// The capacity retry was dropped. The tick finishes the marker and packs
+    /// A slot exit whose assignment store fails has already uninitialized
+    /// the old slot's data. When the old slot is then confirmed again, the
+    /// tick packs that span, and only that span: the entropy stays.
+    #[tokio::test]
+    async fn failed_slot_exit_store_packs_the_relabelled_span_on_tick() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_span(&harness.module, 1, 9, ChunkType::Entropy);
+        write_synced_data(&harness.module, 0x57);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let saved = corrupt_packing_params(&path);
+        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        assert!(harness.inner.pending_assignment.is_some());
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert_eq!(
+            harness.module.get_intervals(ChunkType::Entropy),
+            vec![irys_types::partition_chunk_offset_ii!(1, 9)]
+        );
+
+        restore_packing_params(&path, &saved);
+        apply_update(&mut harness, publish_update(hash, miner), 5).await;
+        assert!(harness.inner.pending_assignment.is_none());
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert!(harness.receivers.packing.try_recv().is_err());
+        harness.inner.tick().await;
+        let spans: Vec<_> = drain_packing(&mut harness)
+            .iter()
+            .map(|request| request.chunk_range().0)
+            .collect();
+        assert_eq!(spans, vec![irys_types::partition_chunk_offset_ii!(0, 0)]);
+        harness.inner.tick().await;
+        assert!(harness.receivers.packing.try_recv().is_err(), "packed once");
+    }
+
+    /// The unassign retry was dropped. The tick finishes the marker and packs
     /// one span. It does not pack while that retry is still stored.
     #[tokio::test]
     async fn dropped_retry_after_failed_store_packs_on_tick() {
@@ -2131,10 +2227,9 @@ mod assignment_reset_tests {
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
         write_synced_data(&harness.module, 0x53);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
         let path = harness.path.clone();
         let _saved = corrupt_packing_params(&path);
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         assert!(harness.inner.pending_assignment.is_some());
         harness.inner.tick().await;
         assert!(harness.receivers.packing.try_recv().is_err());
@@ -2170,7 +2265,7 @@ mod assignment_reset_tests {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         let path = harness.path.clone();
         let saved = corrupt_packing_params(&path);
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         assert!(reset_marker(&harness.module));
         restore_packing_params(&path, &saved);
         fill_packing_channel(&harness);
@@ -2198,7 +2293,7 @@ mod assignment_reset_tests {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
 
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         set_reset_marker(&harness.module);
         harness.module.fail_next_reset_for_test();
         let publish = publish_update(hash, miner);
@@ -2245,15 +2340,14 @@ mod assignment_reset_tests {
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
         write_synced_data(&harness.module, 0x33);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
 
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         assert!(harness.inner.pending_assignment.is_some());
         harness.inner.tick().await;
         assert!(
             harness.module.reset_incomplete(),
-            "a stored capacity retry must finish on apply, not on an idle tick"
+            "a stored unassign retry must finish on apply, not on an idle tick"
         );
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert!(!reset_marker(&harness.module));
@@ -2297,15 +2391,14 @@ mod assignment_reset_tests {
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
         write_synced_data(&harness.module, 0x34);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
 
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         set_reset_marker(&harness.module);
         harness.inner.tick().await;
         assert!(
             harness.module.reset_incomplete(),
-            "a stored capacity retry must finish on apply, not on an idle tick"
+            "a stored unassign retry must finish on apply, not on an idle tick"
         );
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert!(reset_marker(&harness.module));
@@ -2534,7 +2627,8 @@ mod assignment_reset_tests {
             .await
             .expect("reset failure is retried");
         assert!(harness.inner.pending_assignment.is_some());
-        assert!(harness.module.reset_incomplete());
+        // A failed slot exit changed nothing and sets no wipe flag.
+        assert!(!harness.module.reset_incomplete());
         assert_eq!(
             harness.module.partition_assignment().unwrap().slot_index,
             Some(0)
@@ -2570,6 +2664,7 @@ mod assignment_reset_tests {
             .expect("assigned")
             .miner_address;
         let offset = PartitionChunkOffset::from(0);
+        write_span(&harness.module, 5, 9, ChunkType::Entropy);
         assert!(
             harness
                 .module
@@ -2605,7 +2700,25 @@ mod assignment_reset_tests {
             Some(ChunkType::Uninitialized),
             "the previous slot's bytes are not the new slot's index"
         );
-        assert!(harness.receivers.packing.try_recv().is_ok());
+        assert_eq!(
+            harness.module.get_intervals(ChunkType::Entropy),
+            vec![irys_types::partition_chunk_offset_ii!(5, 9)],
+            "the partition's entropy is kept across the slot change"
+        );
+        let stored =
+            PackingParams::from_toml(harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME))
+                .expect("params");
+        assert_eq!(stored.ledger, Some(DataLedger::Publish.into()));
+        assert_eq!(stored.slot, Some(1));
+        let spans: Vec<_> = drain_packing(&mut harness)
+            .iter()
+            .map(|r| r.chunk_range().0)
+            .collect();
+        assert_eq!(
+            spans,
+            vec![irys_types::partition_chunk_offset_ii!(0, 4)],
+            "only the old data span and the unpacked gap are packed"
+        );
     }
 
     #[tokio::test]
@@ -2720,7 +2833,7 @@ mod assignment_reset_tests {
         let (mut harness, hash, miner) = store_slot_one_with_data(50, 0xAB).await;
         let path = harness.path.clone();
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 60).await;
+        apply_update(&mut harness, explicit_unassign(), 60).await;
         assert!(harness.module.reset_incomplete());
         assert!(!reset_marker(&harness.module));
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
@@ -2776,7 +2889,7 @@ mod assignment_reset_tests {
         let (mut harness, hash, miner) = store_slot_one_with_data(50, 0xCD).await;
         let path = harness.path.clone();
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 60).await;
+        apply_update(&mut harness, explicit_unassign(), 60).await;
         set_reset_marker(&harness.module);
         assert!(harness.module.reset_incomplete());
         assert!(reset_marker(&harness.module));
@@ -2823,9 +2936,9 @@ mod assignment_reset_tests {
     async fn stale_unassign_retries_a_durable_reset_until_it_finishes() {
         use irys_domain::storage_module::ChunkType;
 
-        let (mut harness, hash, miner) = store_slot_one_with_data(50, 0xEF).await;
+        let (mut harness, hash, _miner) = store_slot_one_with_data(50, 0xEF).await;
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 60).await;
+        apply_update(&mut harness, explicit_unassign(), 60).await;
         set_reset_marker(&harness.module);
         harness.module.fail_next_reset_for_test();
 
@@ -4405,7 +4518,7 @@ mod assignment_reset_tests {
         write_synced_data(&harness.module, 0x41);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         set_reset_marker(&harness.module);
         fill_packing_channel(&harness);
         apply_update(&mut harness, publish_update(hash, miner), 5).await;
@@ -4521,13 +4634,15 @@ mod assignment_reset_tests {
         );
     }
 
-    /// A ledger exit at the canonical epoch applies at once: reset, capacity
-    /// installed, full span packed.
+    /// A ledger exit at the canonical epoch applies at once: capacity
+    /// installed, the partition's entropy kept, and only the old slot's data
+    /// span uninitialized and packed.
     #[tokio::test]
     async fn ledger_exit_wipes_and_installs_capacity() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_span(&harness.module, 4, 9, ChunkType::Entropy);
         write_synced_data(&harness.module, 0x62);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
 
@@ -4536,16 +4651,22 @@ mod assignment_reset_tests {
         assert_eq!(assignment.partition_hash, hash);
         assert_eq!(assignment.ledger_id, None);
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert_eq!(
+            harness.module.get_intervals(ChunkType::Entropy),
+            vec![irys_types::partition_chunk_offset_ii!(4, 9)],
+            "the partition's entropy is kept"
+        );
         assert!(!reset_marker(&harness.module));
         let recorded = harness.module.recorded_params().expect("recorded");
         assert_eq!(recorded.ledger, None);
         assert_eq!(recorded.trusted_assigned_height(), Some(5));
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("the exit packs the wiped span");
-        assert_full_partition_span(&request);
+        let requests = drain_packing(&mut harness);
+        let spans: Vec<_> = requests.iter().map(|r| r.chunk_range().0).collect();
+        assert_eq!(
+            spans,
+            vec![irys_types::partition_chunk_offset_ii!(0, 3)],
+            "only the uninitialized span is packed, not the whole partition"
+        );
     }
 
     /// A drive whose partition the chain released (v2 file, same chain) is
@@ -4720,7 +4841,7 @@ mod assignment_reset_tests {
 
         let (mut harness, hash, miner) = store_slot_one_with_data(50, 0x42).await;
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 60).await;
+        apply_update(&mut harness, explicit_unassign(), 60).await;
         set_reset_marker(&harness.module);
         fill_packing_channel(&harness);
         apply_update(&mut harness, explicit_unassign(), 10).await;
@@ -4745,9 +4866,8 @@ mod assignment_reset_tests {
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
         write_synced_data(&harness.module, 0x43);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
         harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
+        apply_update(&mut harness, explicit_unassign(), 4).await;
         set_reset_marker(&harness.module);
         harness.inner.pending_assignment = None;
         fill_packing_channel(&harness);
