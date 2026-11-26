@@ -2174,6 +2174,9 @@ thread_local! {
     /// `crc_complete` is cleared. Production writes both, marker first.
     static FAIL_AFTER_OPEN_RESET_MARKER: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test open fails to read the packing params back after writing them.
+    static FAIL_OPEN_PARAMS_READBACK: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
     /// Test open fails after a slot exit rewrote a submodule's interval file
     /// and before its coverage drop and the packing params rebind.
     static FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS: std::cell::Cell<bool> =
@@ -2641,25 +2644,38 @@ impl StorageModule {
             params.assigned_height = None;
             params.write_to_disk(&path)?;
         }
-        // The service judges this drive from this in-memory copy. A read
-        // error leaves none: the drive is then left untouched at every epoch,
-        // which the operator must see.
-        let initial_recorded = storage_module_info.submodules.first().and_then(|(_, dir)| {
-            let path = config
-                .node_config
-                .base_directory
-                .join(dir)
-                .join(PACKING_PARAMS_FILE_NAME);
-            PackingParams::from_toml(&path)
-                .inspect_err(|err| {
-                    error!(
-                        storage_module.id = storage_module_info.id,
-                        storage_module.path = %path.display(),
-                        "packing params could not be read back at open; the drive is left untouched until restart: {err:#}"
-                    );
-                })
-                .ok()
-        });
+        // The service judges this drive from this in-memory copy. Open read
+        // and wrote this file moments ago, so a read error here is an I/O
+        // fault on the drive. That needs the operator: the open fails, and a
+        // failed storage module open stops node startup. Opening the module
+        // without its record would leave it mining its open-time slot while
+        // ignoring every later slot change or release.
+        let initial_recorded = match storage_module_info.submodules.first() {
+            Some((_, dir)) => {
+                let path = config
+                    .node_config
+                    .base_directory
+                    .join(dir)
+                    .join(PACKING_PARAMS_FILE_NAME);
+                let read = PackingParams::from_toml(&path);
+                #[cfg(test)]
+                let read = if FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.replace(false)) {
+                    Err(eyre!("injected packing params read-back failure"))
+                } else {
+                    read
+                };
+                let params = read.wrap_err_with(|| {
+                    format!(
+                        "storage module {}: packing params at {} could not be read back at open; \
+                         check the drive before restarting",
+                        storage_module_info.id,
+                        path.display()
+                    )
+                })?;
+                Some(params)
+            }
+            None => None,
+        };
 
         let recorded_uniform = initial_recorded.is_some_and(|first| {
             storage_module_info.submodules.iter().all(|(_, dir)| {
@@ -23154,6 +23170,35 @@ mod tests {
         fn drop(&mut self) {
             FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.set(false));
         }
+    }
+
+    /// A packing params file that cannot be read back right after open
+    /// wrote it is an I/O fault: the open fails, naming the module and the
+    /// file, so node startup stops for the operator. No module is returned to
+    /// mine its open-time slot without a record.
+    #[test]
+    fn open_fails_when_the_packing_params_cannot_be_read_back() -> eyre::Result<()> {
+        let hash = H256::repeat_byte(0x64);
+        let (_tmp, config, sub) = seed_assigned_entropy("open_readback_fails", hash)?;
+        FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.set(true));
+        let result = StorageModule::new(
+            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &config,
+        );
+        FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.set(false));
+        let err = result.expect_err("a read-back failure fails the open");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("could not be read back at open")
+                && text.contains("injected packing params read-back failure"),
+            "{text}"
+        );
+        // A later open with a readable file works.
+        StorageModule::new(
+            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &config,
+        )?;
+        Ok(())
     }
 
     /// The file records no partition, as after a release. An open that

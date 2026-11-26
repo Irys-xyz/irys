@@ -1328,11 +1328,7 @@ impl BlockTreeServiceInner {
             };
 
             // Was there a new epoch block found in the reorg
-            let new_epoch_block = event
-                .new_fork
-                .iter()
-                .find(|sb| self.is_epoch_block(sb.header()))
-                .map(|sb| Arc::clone(sb.header()));
+            let new_epoch_block = self.epoch_block_in_tip_move(&event.new_fork);
             // A new fork epoch block sends its own events. Without one, an
             // orphaned epoch block's assignments must be replaced.
             let orphaned_epoch_height = if new_epoch_block.is_none() {
@@ -1367,10 +1363,7 @@ impl BlockTreeServiceInner {
             // tip, oldest first. Confirm each one and detect an epoch block among
             // them, as on a reorg.
             let blocks_to_confirm: Vec<Arc<SealedBlock>> = split.new_divergent;
-            let new_epoch_block = blocks_to_confirm
-                .iter()
-                .find(|sb| self.is_epoch_block(sb.header()))
-                .map(|sb| Arc::clone(sb.header()));
+            let new_epoch_block = self.epoch_block_in_tip_move(&blocks_to_confirm);
 
             (new_epoch_block, None, None, blocks_to_confirm)
         };
@@ -1876,6 +1869,37 @@ impl BlockTreeServiceInner {
         block_header
             .height()
             .is_multiple_of(self.config.consensus.epoch.num_blocks_in_epoch)
+    }
+
+    /// The epoch block among the blocks a tip move adds, oldest first.
+    ///
+    /// A tip move holds at most one epoch block. It adds at most
+    /// `block_tree_depth` blocks: the tree holds no more, and a reorg whose
+    /// fork point would be pruned is refused (`validate_reorg_within_cache_window`).
+    /// `Config::validate` requires `num_blocks_in_epoch > block_tree_depth`
+    /// on real networks, so those blocks span at most one epoch boundary.
+    ///
+    /// Test run modes skip that check and may use shorter epochs. There a
+    /// move can cross two boundaries. Only the first epoch block's events are
+    /// sent, so services keep its assignments until the next epoch update.
+    /// That is logged, not corrected: on a real network it cannot happen.
+    fn epoch_block_in_tip_move(&self, added: &[Arc<SealedBlock>]) -> Option<Arc<IrysBlockHeader>> {
+        let mut epoch_blocks = added
+            .iter()
+            .map(|sb| sb.header())
+            .filter(|header| self.is_epoch_block(header));
+        let first = epoch_blocks.next().map(Arc::clone);
+        let skipped: Vec<u64> = epoch_blocks.map(|header| header.height).collect();
+        if let (Some(first), false) = (&first, skipped.is_empty()) {
+            warn!(
+                epoch.height = first.height,
+                epoch.skipped_heights = ?skipped,
+                consensus.num_blocks_in_epoch = self.config.consensus.epoch.num_blocks_in_epoch,
+                consensus.block_tree_depth = self.config.consensus.block_tree_depth,
+                "tip move crosses more than one epoch boundary; only the first epoch block's events are sent"
+            );
+        }
+        first
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %epoch_block.block_hash(), block.height = epoch_block.height()))]
