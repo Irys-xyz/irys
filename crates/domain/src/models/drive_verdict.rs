@@ -47,7 +47,7 @@ pub struct VerdictInputs<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
+pub enum DriveVerdict {
     Foreign(String),
     Ours,
     Empty,
@@ -101,13 +101,13 @@ pub enum DriveAction {
 pub struct DriveDecision {
     pub id: usize,
     pub path: PathBuf,
-    pub verdict: Verdict,
+    pub verdict: DriveVerdict,
     pub action: DriveAction,
     /// Rewrite the drive's file as v2 at this epoch (ours, in sync).
     pub stamp_v2: bool,
 }
 
-impl Verdict {
+impl DriveVerdict {
     /// Lower-case name for logs.
     pub fn name(&self) -> &'static str {
         match self {
@@ -229,10 +229,10 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
         .map(|(id, (path, file))| {
             let c = match file {
                 DriveFile::Unreadable(e) => Classified::new(
-                    Verdict::Foreign(format!("unreadable: {e}")),
+                    DriveVerdict::Foreign(format!("unreadable: {e}")),
                     DriveAction::Skip,
                 ),
-                DriveFile::Missing => Classified::new(Verdict::Empty, DriveAction::Idle),
+                DriveFile::Missing => Classified::new(DriveVerdict::Empty, DriveAction::Idle),
                 DriveFile::Recorded(p) => classify(inputs, id, p, &holders, &by_hash),
             };
             DriveDecision {
@@ -247,7 +247,7 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
 
     if !any_unreadable(inputs) {
         let mut queue = unheld(inputs).into_iter();
-        for want in [Verdict::Empty, Verdict::Released] {
+        for want in [DriveVerdict::Empty, DriveVerdict::Released] {
             for d in out.iter_mut().filter(|d| d.verdict == want) {
                 if let Some(a) = queue.next() {
                     d.action = DriveAction::Assign(a);
@@ -260,13 +260,13 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
 
 /// One drive's verdict, action and stamp flags.
 struct Classified {
-    verdict: Verdict,
+    verdict: DriveVerdict,
     action: DriveAction,
     stamp_v2: bool,
 }
 
 impl Classified {
-    fn new(verdict: Verdict, action: DriveAction) -> Self {
+    fn new(verdict: DriveVerdict, action: DriveAction) -> Self {
         Self {
             verdict,
             action,
@@ -275,7 +275,7 @@ impl Classified {
     }
 
     fn wait(reason: WaitReason) -> Self {
-        Self::new(Verdict::Wait(reason), DriveAction::Idle)
+        Self::new(DriveVerdict::Wait(reason), DriveAction::Idle)
     }
 }
 
@@ -288,10 +288,10 @@ fn classify(
 ) -> Classified {
     let ident = inputs.identity;
     if let Some(why) = is_foreign(p, ident) {
-        return Classified::new(Verdict::Foreign(why), DriveAction::Skip);
+        return Classified::new(DriveVerdict::Foreign(why), DriveAction::Skip);
     }
     let Some(hash) = p.partition_hash else {
-        return Classified::new(Verdict::Empty, DriveAction::Idle);
+        return Classified::new(DriveVerdict::Empty, DriveAction::Idle);
     };
     // The file records an assignment installed after the epoch judged here.
     let recorded_newer = p
@@ -312,7 +312,7 @@ fn classify(
             || p.genesis_hash != Some(ident.genesis_hash)
             || p.trusted_assigned_height().is_none();
         return Classified {
-            verdict: Verdict::Ours,
+            verdict: DriveVerdict::Ours,
             action: DriveAction::Assign(new),
             stamp_v2: inputs.in_sync && needs_stamp,
         };
@@ -330,7 +330,7 @@ fn classify(
     if recorded_newer {
         return Classified::wait(WaitReason::RecordedNewerThanEpoch);
     }
-    Classified::new(Verdict::Released, DriveAction::Clear)
+    Classified::new(DriveVerdict::Released, DriveAction::Clear)
 }
 
 /// Assignments that no drive holds or receives, in placement order.
@@ -497,20 +497,20 @@ pub fn log_decisions(
             "drive verdict"
         );
         match &decision.verdict {
-            Verdict::Foreign(why) => error!(
+            DriveVerdict::Foreign(why) => error!(
                 storage_module.id = decision.id,
                 storage_module.path = %decision.path.display(),
                 drive.reason = %why,
                 "drive is not opened and is left untouched"
             ),
-            Verdict::Wait(why) => warn!(
+            DriveVerdict::Wait(why) => warn!(
                 storage_module.id = decision.id,
                 storage_module.path = %decision.path.display(),
                 partition.recorded = ?recorded,
                 drive.reason = %why,
                 "drive is opened idle and left untouched"
             ),
-            Verdict::Ours | Verdict::Empty | Verdict::Released => {}
+            DriveVerdict::Ours | DriveVerdict::Empty | DriveVerdict::Released => {}
         }
     }
     for assignment in unplaced(inputs, decisions) {
@@ -615,7 +615,7 @@ mod tests {
             &[pa(1, Some(DataLedger::Publish), Some(0))],
             true,
         );
-        assert!(matches!(d[0].verdict, Verdict::Foreign(_)));
+        assert!(matches!(d[0].verdict, DriveVerdict::Foreign(_)));
         assert_eq!(d[0].action, DriveAction::Skip);
     }
 
@@ -628,7 +628,7 @@ mod tests {
             &[pa(1, Some(DataLedger::Publish), Some(0))],
             true,
         );
-        assert!(matches!(d[0].verdict, Verdict::Foreign(_)));
+        assert!(matches!(d[0].verdict, DriveVerdict::Foreign(_)));
         assert_eq!(d[0].action, DriveAction::Skip);
     }
 
@@ -641,7 +641,7 @@ mod tests {
             &[pa(1, Some(DataLedger::Publish), Some(0))],
             true,
         );
-        assert!(matches!(d[0].verdict, Verdict::Foreign(_)));
+        assert!(matches!(d[0].verdict, DriveVerdict::Foreign(_)));
         assert_eq!(d[0].action, DriveAction::Skip);
     }
 
@@ -655,9 +655,9 @@ mod tests {
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, u) = run(&drives, &a, true);
         assert_eq!(d[0].action, DriveAction::Skip);
-        assert_eq!(d[1].verdict, Verdict::Empty);
+        assert_eq!(d[1].verdict, DriveVerdict::Empty);
         assert_eq!(d[1].action, DriveAction::Idle);
-        assert_eq!(d[2].verdict, Verdict::Released);
+        assert_eq!(d[2].verdict, DriveVerdict::Released);
         assert_eq!(d[2].action, DriveAction::Clear);
         assert_eq!(u, a.to_vec());
     }
@@ -689,7 +689,7 @@ mod tests {
             // legitimately depends on order.
             let mut m: Vec<_> = d
                 .into_iter()
-                .filter(|x| x.verdict == Verdict::Ours)
+                .filter(|x| x.verdict == DriveVerdict::Ours)
                 .map(|x| (x.path, x.verdict, x.action, x.stamp_v2))
                 .collect();
             m.sort_by(|a, b| a.0.cmp(&b.0));
@@ -728,7 +728,7 @@ mod tests {
         let (d, u) = run(&drives, &a, false);
         assert_eq!(d.len(), 43);
         for (i, x) in d.iter().enumerate() {
-            assert_eq!(x.verdict, Verdict::Ours);
+            assert_eq!(x.verdict, DriveVerdict::Ours);
             assert_eq!(assigned_hash(x), Some(h(100 + i as u32)));
             assert!(!x.stamp_v2, "not in sync, never stamp");
         }
@@ -742,7 +742,7 @@ mod tests {
         let (d, u) = run(&drives, &a, false);
         assert_eq!(d.len(), 43);
         for (i, x) in d.iter().enumerate() {
-            assert_eq!(x.verdict, Verdict::Ours);
+            assert_eq!(x.verdict, DriveVerdict::Ours);
             assert_eq!(assigned_hash(x), Some(h(100 + i as u32)));
         }
         assert_eq!(u, vec![orphan]);
@@ -758,7 +758,7 @@ mod tests {
         for (i, x) in d.iter().take(43).enumerate() {
             assert_eq!(assigned_hash(x), Some(h(100 + i as u32)));
         }
-        assert_eq!(d[43].verdict, Verdict::Empty);
+        assert_eq!(d[43].verdict, DriveVerdict::Empty);
         assert_eq!(d[43].action, DriveAction::Assign(orphan));
         assert!(u.is_empty());
     }
@@ -769,7 +769,7 @@ mod tests {
         p.genesis_hash = Some(H256::from([0x11; 32]));
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, _) = run(&[drive(0, rec(p))], &a, true);
-        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
         assert_eq!(d[0].action, DriveAction::Assign(a[0]));
         assert!(d[0].stamp_v2);
     }
@@ -779,7 +779,7 @@ mod tests {
         let mut p = v2(1, Some(DataLedger::Publish), Some(0), 10);
         p.genesis_hash = Some(H256::from([0x11; 32]));
         let (d, _) = run(&[drive(0, rec(p))], &[], true);
-        assert!(matches!(d[0].verdict, Verdict::Wait(_)));
+        assert!(matches!(d[0].verdict, DriveVerdict::Wait(_)));
         assert_eq!(d[0].action, DriveAction::Idle);
     }
 
@@ -790,7 +790,7 @@ mod tests {
             &[],
             true,
         );
-        assert!(matches!(d[0].verdict, Verdict::Wait(_)));
+        assert!(matches!(d[0].verdict, DriveVerdict::Wait(_)));
         assert_eq!(d[0].action, DriveAction::Idle);
     }
 
@@ -817,11 +817,11 @@ mod tests {
             for x in &d {
                 let (verdict, action) = match x.path.to_str().unwrap() {
                     "/d0" | "/d1" | "/d2" => (
-                        Verdict::Wait(WaitReason::NotProvablyReleased),
+                        DriveVerdict::Wait(WaitReason::NotProvablyReleased),
                         DriveAction::Idle,
                     ),
-                    "/d3" => (Verdict::Ours, DriveAction::Assign(a[1])),
-                    "/d4" => (Verdict::Empty, DriveAction::Assign(a[0])),
+                    "/d3" => (DriveVerdict::Ours, DriveAction::Assign(a[1])),
+                    "/d4" => (DriveVerdict::Empty, DriveAction::Assign(a[0])),
                     other => panic!("unexpected drive {other}"),
                 };
                 assert_eq!((&x.verdict, &x.action), (&verdict, &action), "{order:?}");
@@ -834,7 +834,7 @@ mod tests {
     fn released_is_cleared() {
         let f = rec(v2(1, Some(DataLedger::Publish), Some(0), 10));
         let (d, _) = run(&[drive(0, f)], &[], true);
-        assert_eq!(d[0].verdict, Verdict::Released);
+        assert_eq!(d[0].verdict, DriveVerdict::Released);
         assert_eq!(d[0].action, DriveAction::Clear);
     }
 
@@ -843,7 +843,7 @@ mod tests {
         let f = rec(v2(1, Some(DataLedger::Submit), Some(0), 10));
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, _) = run(&[drive(0, f)], &a, true);
-        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
         assert_eq!(d[0].action, DriveAction::Assign(a[0]));
     }
 
@@ -852,7 +852,7 @@ mod tests {
         let f = rec(v2(1, None, None, 10));
         let a = [pa(1, Some(DataLedger::Publish), Some(3))];
         let (d, _) = run(&[drive(0, f)], &a, true);
-        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
         assert_eq!(d[0].action, DriveAction::Assign(a[0]));
     }
 
@@ -861,8 +861,8 @@ mod tests {
         let f = rec(v2(1, Some(DataLedger::Publish), Some(0), 10));
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, u) = run(&[drive(0, f.clone()), drive(1, f)], &a, true);
-        assert_eq!(d[0].verdict, Verdict::Ours);
-        assert!(matches!(d[1].verdict, Verdict::Wait(_)));
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
+        assert!(matches!(d[1].verdict, DriveVerdict::Wait(_)));
         assert_eq!(d[1].action, DriveAction::Idle);
         assert!(u.is_empty());
     }
@@ -896,9 +896,9 @@ mod tests {
             drive(1, DriveFile::Missing),
         ];
         let (d, u) = run(&drives, &a, true);
-        assert_eq!(d[1].verdict, Verdict::Empty);
+        assert_eq!(d[1].verdict, DriveVerdict::Empty);
         assert_eq!(d[1].action, DriveAction::Assign(a[1]));
-        assert_eq!(d[0].verdict, Verdict::Released);
+        assert_eq!(d[0].verdict, DriveVerdict::Released);
         assert_eq!(d[0].action, DriveAction::Assign(a[0]));
         assert!(u.is_empty());
     }
@@ -908,11 +908,11 @@ mod tests {
         let f = rec(v2(1, Some(DataLedger::Submit), Some(0), 10));
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, u) = run(&[drive(0, f.clone()), drive(1, f)], &a, true);
-        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
         assert_eq!(d[0].action, DriveAction::Assign(a[0]));
         assert_eq!(
             d[1].verdict,
-            Verdict::Wait(WaitReason::DuplicateHolder(h(1)))
+            DriveVerdict::Wait(WaitReason::DuplicateHolder(h(1)))
         );
         assert_eq!(d[1].action, DriveAction::Idle);
         assert!(u.is_empty());
@@ -942,7 +942,7 @@ mod tests {
         let (d, _) = run(&[drive(0, newer.clone())], &a, true);
         assert_eq!(
             d[0].verdict,
-            Verdict::Wait(WaitReason::RecordedNewerThanEpoch)
+            DriveVerdict::Wait(WaitReason::RecordedNewerThanEpoch)
         );
         assert_eq!(
             d[0].verdict.reason(),
@@ -952,7 +952,7 @@ mod tests {
         assert!(!d[0].stamp_v2);
         let keep = [pa(1, Some(DataLedger::Publish), Some(1))];
         let (d, _) = run(&[drive(0, newer)], &keep, true);
-        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
         assert_eq!(d[0].action, DriveAction::Assign(keep[0]));
     }
 
@@ -965,11 +965,14 @@ mod tests {
         p.assigned_height = None;
         let a = [pa(1, Some(DataLedger::Publish), Some(0))];
         let (d, _) = run(&[drive(0, rec(p))], &a, true);
-        assert_eq!(d[0].verdict, Verdict::Ours);
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
         assert!(d[0].stamp_v2, "a missing trusted height is stamped");
 
         let (d, _) = run(&[drive(0, rec(p))], &[], true);
-        assert_eq!(d[0].verdict, Verdict::Wait(WaitReason::NoTrustedHeight));
+        assert_eq!(
+            d[0].verdict,
+            DriveVerdict::Wait(WaitReason::NoTrustedHeight)
+        );
         assert_eq!(d[0].verdict.reason(), "no trusted assigned height");
         assert_eq!(d[0].action, DriveAction::Idle);
     }
@@ -982,7 +985,7 @@ mod tests {
         let (d, _) = run(&[drive(0, f)], &[], true);
         assert_eq!(
             d[0].verdict,
-            Verdict::Wait(WaitReason::RecordedNewerThanEpoch)
+            DriveVerdict::Wait(WaitReason::RecordedNewerThanEpoch)
         );
         assert_eq!(
             d[0].verdict.reason(),
@@ -1058,7 +1061,7 @@ mod tests {
             pa(3, None, None),
         ];
         let (d, _) = run(&drives, &assignments, false);
-        assert_eq!(d[3].verdict, Verdict::Released);
+        assert_eq!(d[3].verdict, DriveVerdict::Released);
         assert_eq!(assigned_hash(&d[3]), Some(h(3)));
         assert_eq!(d[4].action, DriveAction::Clear);
 

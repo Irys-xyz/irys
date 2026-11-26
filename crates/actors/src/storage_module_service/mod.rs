@@ -20,7 +20,7 @@ use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, StorageModule,
     drive_verdict::{
-        self, ChainIdentity, DriveAction, DriveDecision, DriveFile, Verdict, VerdictInputs,
+        self, ChainIdentity, DriveAction, DriveDecision, DriveFile, DriveVerdict, VerdictInputs,
     },
 };
 use irys_types::{
@@ -98,7 +98,7 @@ pub struct StorageModuleServiceInner {
     unreadable_at_startup: Vec<usize>,
     /// Verdict and action last logged per module id. INFO is logged only for
     /// a change.
-    last_decisions: HashMap<usize, (Verdict, DriveAction)>,
+    last_decisions: HashMap<usize, (DriveVerdict, DriveAction)>,
     /// Assignments no drive held or received at the last update.
     last_unplaced: Vec<H256>,
     /// Spans the packing channel did not accept. `tick` sends them until the
@@ -669,7 +669,7 @@ impl StorageModuleServiceInner {
             // A drive the service will not touch (no recorded packing params
             // in memory, or a foreign or unreadable file) is an operator
             // problem: an ERROR once, when the service first sees it.
-            if let Verdict::Foreign(why) = &decision.verdict {
+            if let DriveVerdict::Foreign(why) = &decision.verdict {
                 error!(
                     storage_module.id = id,
                     storage_module.path = %decision.path.display(),
@@ -4740,7 +4740,7 @@ mod assignment_reset_tests {
         assert!(harness.receivers.packing.try_recv().is_err());
         assert_eq!(
             harness.inner.last_decisions.get(&0).map(|(v, _)| v.clone()),
-            Some(Verdict::Ours)
+            Some(DriveVerdict::Ours)
         );
         assert!(logs_contain(
             "packing params could not be rewritten as v2; the drive keeps its verdict from memory"
