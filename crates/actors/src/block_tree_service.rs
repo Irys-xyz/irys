@@ -1879,10 +1879,11 @@ impl BlockTreeServiceInner {
     /// `Config::validate` requires `num_blocks_in_epoch > block_tree_depth`
     /// on real networks, so those blocks span at most one epoch boundary.
     ///
-    /// Test run modes skip that check and may use shorter epochs. There a
-    /// move can cross two boundaries. Only the first epoch block's events are
-    /// sent, so services keep its assignments until the next epoch update.
-    /// That is logged, not corrected: on a real network it cannot happen.
+    /// Test run modes skip that check and may use shorter epochs. A move that
+    /// crossed two boundaries would send only the first epoch block's events,
+    /// and services would keep stale assignments until the next epoch update.
+    /// That is never handled: it panics, so a config or test that reaches it
+    /// fails loudly instead.
     fn epoch_block_in_tip_move(&self, added: &[Arc<SealedBlock>]) -> Option<Arc<IrysBlockHeader>> {
         let mut epoch_blocks = added
             .iter()
@@ -1890,15 +1891,14 @@ impl BlockTreeServiceInner {
             .filter(|header| self.is_epoch_block(header));
         let first = epoch_blocks.next().map(Arc::clone);
         let skipped: Vec<u64> = epoch_blocks.map(|header| header.height).collect();
-        if let (Some(first), false) = (&first, skipped.is_empty()) {
-            warn!(
-                epoch.height = first.height,
-                epoch.skipped_heights = ?skipped,
-                consensus.num_blocks_in_epoch = self.config.consensus.epoch.num_blocks_in_epoch,
-                consensus.block_tree_depth = self.config.consensus.block_tree_depth,
-                "tip move crosses more than one epoch boundary; only the first epoch block's events are sent"
-            );
-        }
+        assert!(
+            skipped.is_empty(),
+            "tip move crosses more than one epoch boundary: first epoch block at {:?}, also {skipped:?} \
+             (num_blocks_in_epoch {} must be > block_tree_depth {})",
+            first.as_ref().map(|header| header.height),
+            self.config.consensus.epoch.num_blocks_in_epoch,
+            self.config.consensus.block_tree_depth,
+        );
         first
     }
 
