@@ -50,10 +50,6 @@ pub enum StorageModuleServiceMessage {
         /// The snapshot's epoch height. Verdicts are judged on it, never on
         /// `update_height`.
         epoch_height: u64,
-        /// Hash of the snapshot's epoch block. The epoch is final only when
-        /// the block index holds this block at `epoch_height`: an update from
-        /// a branch that was reorged out has the same height but another hash.
-        epoch_block_hash: H256,
         /// Informational, for logs only: the height of the event that sent
         /// this update. This is the epoch block height, except after a reorg
         /// that orphans the only epoch block: then it is the orphaned epoch
@@ -61,8 +57,8 @@ pub enum StorageModuleServiceMessage {
         /// snapshot. Nothing is decided or written from it.
         update_height: u64,
         /// The node was in sync with the network head when the epoch was
-        /// processed. Only then, and once the epoch is final, is the packing
-        /// file of a drive that is ours stamped as v2 (a v1 file, another
+        /// processed. Only then is the packing file of a drive that is ours
+        /// stamped as v2 (a v1 file, another
         /// genesis, or no trusted assigned height).
         in_sync: bool,
     },
@@ -96,10 +92,6 @@ pub struct StorageModuleServiceInner {
     index_heal_needs_retry: bool,
     /// Assignment update whose reset did not finish. The next tick retries it.
     pending_assignment: Option<StorageModuleServiceMessage>,
-    /// Last assignment update while a drive waits for its epoch to become
-    /// final (a ledger exit, a release, or a v2 stamp). `tick` applies it
-    /// again once the epoch is at or below the finalized height.
-    awaiting_finality: Option<StorageModuleServiceMessage>,
     /// Configured drives that startup could not read, so did not open. They
     /// stay out of every runtime verdict but still block new placements:
     /// such a drive may hold a partition that looks unheld.
@@ -154,18 +146,6 @@ impl HealScheduleProbe {
         self.ticks_since_pass
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-}
-
-/// Finality of an update's epoch block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EpochFinality {
-    /// The height is not final yet.
-    Pending,
-    /// The height is final and the block index holds this epoch block there.
-    Final,
-    /// The height is final but holds another block: the update is from a
-    /// branch that was reorged out.
-    Stale,
 }
 
 /// Reset did not finish. The assignment is unchanged. The service stays up
@@ -280,7 +260,6 @@ impl StorageModuleServiceInner {
             resize_done: None,
             index_heal_needs_retry: true, // force heal until first pass reports clean
             pending_assignment: None,
-            awaiting_finality: None,
             unreadable_at_startup,
             last_decisions: HashMap::new(),
             last_unplaced: Vec::new(),
@@ -323,14 +302,12 @@ impl StorageModuleServiceInner {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments,
                 epoch_height,
-                epoch_block_hash,
                 update_height,
                 in_sync,
             } => {
                 self.handle_partition_assignments_update(
                     assignments,
                     epoch_height,
-                    epoch_block_hash,
                     update_height,
                     in_sync,
                 )
@@ -495,36 +472,6 @@ impl StorageModuleServiceInner {
         if let Err(e) = self.start_partition_resize() {
             error!("finalized partition resize failed; will retry: {e:?}");
         }
-        // A drive waits for its epoch to become final (ledger exit, release
-        // or v2 stamp). Once it is, the same update is applied again; a stored
-        // retry already does that from the run loop.
-        // An update whose height became final on another branch is stale:
-        // it is dropped, never applied.
-        if self.pending_assignment.is_none()
-            && let Some(update) = self.awaiting_finality.clone()
-            && let StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                epoch_height,
-                epoch_block_hash,
-                ..
-            } = &update
-        {
-            match self.epoch_finality(*epoch_height, *epoch_block_hash) {
-                EpochFinality::Pending => {}
-                EpochFinality::Stale => {
-                    warn!(
-                        epoch.height = *epoch_height,
-                        epoch.block_hash = %epoch_block_hash,
-                        "assignment update waiting for finality is from a branch that was reorged out; dropped"
-                    );
-                    self.awaiting_finality = None;
-                }
-                EpochFinality::Final => {
-                    if let Err(err) = self.apply_assignment(update).await {
-                        error!("assignment update after finality failed: {err:?}");
-                    }
-                }
-            }
-        }
         // A stored retry is applied by the run loop before this tick. This
         // covers the case where that retry was dropped and no message remains.
         if self.pending_assignment.is_none() {
@@ -573,27 +520,6 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Whether the update's epoch block is final: its height is at or below
-    /// the finalized height of the block-index tip (it has left the block
-    /// tree) AND the block index holds that same block at that height. A
-    /// final height holding another block means the update came from a
-    /// branch that was reorged out.
-    fn epoch_finality(&self, epoch_height: u64, epoch_block_hash: H256) -> EpochFinality {
-        let index = self.block_index.read();
-        let finalized = irys_domain::forkchoice_markers::finalized_height(
-            index.latest_height(),
-            self.config.consensus.block_tree_depth,
-            u64::from(self.config.consensus.block_migration_depth),
-        );
-        if epoch_height > finalized {
-            return EpochFinality::Pending;
-        }
-        match index.get_item(epoch_height) {
-            Some(item) if item.block_hash == epoch_block_hash => EpochFinality::Final,
-            _ => EpochFinality::Stale,
-        }
-    }
-
     /// One verdict input per open module, in id order, from the module's
     /// in-memory record of its packing file. Files are never read here: a
     /// file that became unreadable while running changes nothing. A drive
@@ -637,16 +563,12 @@ impl StorageModuleServiceInner {
     }
 
     /// Runs the drive verdict over the open modules and applies it. Only what
-    /// differs from a module's in-memory state is changed. A wipe (release,
-    /// ledger exit, new partition on a released drive) happens only when the
-    /// epoch is final; until then the drive is idle and `tick` re-runs this
-    /// update once the epoch is final.
+    /// differs from a module's in-memory state is changed.
     #[tracing::instrument(level = "trace", skip_all, err, fields(epoch.height = epoch_height, update.height = update_height))]
     async fn handle_partition_assignments_update(
         &mut self,
         assignments: Arc<Vec<PartitionAssignment>>,
         epoch_height: u64,
-        epoch_block_hash: H256,
         update_height: u64,
         in_sync: bool,
     ) -> eyre::Result<()> {
@@ -666,40 +588,17 @@ impl StorageModuleServiceInner {
             genesis_hash: genesis.block_hash,
             miner: self.config.node_config.miner_address(),
         };
-        let finality = self.epoch_finality(epoch_height, epoch_block_hash);
-        let stale = finality == EpochFinality::Stale;
-        if stale {
-            warn!(
-                epoch.height = epoch_height,
-                epoch.block_hash = %epoch_block_hash,
-                "assignment update is from a branch that was reorged out: drives are only parked"
-            );
-        }
-        let epoch_is_final = finality == EpochFinality::Final;
         let (drives, ids) = self.runtime_drives(&modules);
         let inputs = VerdictInputs {
             drives: &drives,
             assignments: &assignments,
             epoch_height,
-            epoch_is_final,
             in_sync,
             identity: &identity,
         };
         let decisions = drive_verdict::decide(&inputs);
         let unplaced = drive_verdict::unplaced(&inputs, &decisions);
         self.log_changed_decisions(&ids, &decisions, &unplaced, &inputs, update_height);
-
-        self.awaiting_finality = (finality == EpochFinality::Pending
-            && decisions.iter().any(DriveDecision::waits_for_finality))
-        .then(
-            || StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                assignments: Arc::clone(&assignments),
-                epoch_height,
-                epoch_block_hash,
-                update_height,
-                in_sync,
-            },
-        );
 
         // One module's reset error must not decide the others. Remember the
         // failure and keep going; the same update is retried. A module
@@ -710,11 +609,6 @@ impl StorageModuleServiceInner {
             let Some(module) = modules.get(&ids[decision.id]) else {
                 continue;
             };
-            // A stale update is judged as not final and only parks: it
-            // places, moves, stamps and clears nothing.
-            if stale && decision.action != DriveAction::Idle {
-                continue;
-            }
             if let Err(err) = self.apply_decision(module, decision, epoch_height) {
                 reset_not_finished.get_or_insert(err);
             }
@@ -769,7 +663,6 @@ impl StorageModuleServiceInner {
                 partition.ledger_id = ?target.and_then(|pa| pa.ledger_id),
                 partition.slot_index = ?target.and_then(|pa| pa.slot_index),
                 epoch.height = inputs.epoch_height,
-                epoch.is_final = inputs.epoch_is_final,
                 update.height = update_height,
                 "drive verdict changed"
             );
@@ -839,7 +732,7 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
-    /// Released, final: wipe and record no partition. The drive is Empty.
+    /// Released: wipe and record no partition. The drive is Empty.
     fn clear_released(
         &mut self,
         module: &Arc<StorageModule>,
@@ -859,7 +752,6 @@ impl StorageModuleServiceInner {
     /// Hold `next`. Keeps the bytes when the module already holds that
     /// partition on the same slot, or as capacity gaining a ledger; otherwise
     /// (a new partition, or leaving a ledger) resets, installs and packs.
-    /// `decide` gives a wipe-causing `Assign` only on a final epoch.
     fn assign_module(
         &mut self,
         module: &Arc<StorageModule>,
@@ -1557,15 +1449,9 @@ mod assignment_reset_tests {
         }
     }
 
-    /// Lowest block-index tip at which `epoch_height` is final.
-    fn final_tip_for(config: &Config, epoch_height: u64) -> u64 {
-        epoch_height + config.consensus.block_tree_depth
-            - u64::from(config.consensus.block_migration_depth)
-    }
-
     /// Modules opened as startup opens them: chain identity set, and each
     /// file rewritten as v2 with assigned height 0, so an unassign is a
-    /// final release.
+    /// release.
     fn open_modules(
         module_count: usize,
         ledger_id: Option<u32>,
@@ -2730,7 +2616,7 @@ mod assignment_reset_tests {
         harness.module.fail_next_reset_for_test();
         let err = harness
             .inner
-            .handle_partition_assignments_update(Arc::clone(&update), 4, epoch_hash(4), 4, false)
+            .handle_partition_assignments_update(Arc::clone(&update), 4, 4, false)
             .await
             .expect_err("reset failure");
         assert!(super::is_reset_not_finished(&err));
@@ -2739,7 +2625,7 @@ mod assignment_reset_tests {
 
         harness
             .inner
-            .handle_partition_assignments_update(update, 4, epoch_hash(4), 4, false)
+            .handle_partition_assignments_update(update, 4, 4, false)
             .await
             .expect("retry clears the assignment");
         assert!(harness.module.partition_assignment().is_none());
@@ -3574,7 +3460,6 @@ mod assignment_reset_tests {
         StorageModuleServiceMessage::PartitionAssignmentsUpdated {
             assignments,
             epoch_height: height,
-            epoch_block_hash: epoch_hash(height),
             update_height: height,
             in_sync: false,
         }
@@ -4539,7 +4424,7 @@ mod assignment_reset_tests {
     /// `update_height` the orphaned one. The drive was assigned at the
     /// orphaned epoch, so the snapshot cannot prove a release: judged on
     /// `epoch_height` it is parked and keeps its bytes. Judged on
-    /// `update_height` it would have been wiped. A later final epoch that
+    /// `update_height` it would have been wiped. A later epoch that
     /// still does not assign it releases it.
     #[tokio::test]
     async fn orphaned_epoch_resend_uses_snapshot_height() {
@@ -4554,7 +4439,6 @@ mod assignment_reset_tests {
             .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: explicit_unassign(),
                 epoch_height: CANONICAL_EPOCH_HEIGHT,
-                epoch_block_hash: epoch_hash(CANONICAL_EPOCH_HEIGHT),
                 update_height: ORPHANED_EPOCH_HEIGHT,
                 in_sync: true,
             })
@@ -4574,7 +4458,7 @@ mod assignment_reset_tests {
                 .expect("recorded")
                 .partition_hash,
             None,
-            "a final release is cleared"
+            "a release is cleared"
         );
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
     }
@@ -4602,7 +4486,6 @@ mod assignment_reset_tests {
             .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: Arc::new(vec![held_first, held_second]),
                 epoch_height: 5,
-                epoch_block_hash: epoch_hash(5),
                 update_height: 5,
                 in_sync: true,
             })
@@ -4638,38 +4521,17 @@ mod assignment_reset_tests {
         );
     }
 
-    /// A ledger exit seen at an epoch that is not final parks the drive and
-    /// keeps its bytes. Once the block index makes that epoch final, `tick`
-    /// applies the same update: reset, capacity installed, full span packed.
+    /// A ledger exit at the canonical epoch applies at once: reset, capacity
+    /// installed, full span packed.
     #[tokio::test]
-    async fn ledger_exit_waits_until_final_then_wipes() {
+    async fn ledger_exit_wipes_and_installs_capacity() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
         write_synced_data(&harness.module, 0x62);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let config = harness.inner.config.clone();
-        set_index_tip(&harness.inner.block_index, 5);
 
         apply_update(&mut harness, capacity_update(hash, miner), 5).await;
-        assert!(harness.module.partition_assignment().is_none(), "idle");
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.recorded_params().expect("recorded").ledger,
-            Some(DataLedger::Publish.into()),
-            "the file is untouched"
-        );
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert!(harness.inner.awaiting_finality.is_some());
-
-        harness.inner.tick().await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        set_index_tip(&harness.inner.block_index, final_tip_for(&config, 5));
-        harness.inner.tick().await;
         let assignment = harness.module.partition_assignment().expect("capacity");
         assert_eq!(assignment.partition_hash, hash);
         assert_eq!(assignment.ledger_id, None);
@@ -4682,54 +4544,13 @@ mod assignment_reset_tests {
             .receivers
             .packing
             .try_recv()
-            .expect("the final exit packs the wiped span");
+            .expect("the exit packs the wiped span");
         assert_full_partition_span(&request);
-        assert!(harness.inner.awaiting_finality.is_none());
     }
 
-    /// A ledger exit before finality, then a reorg whose epoch block restores
-    /// the old ledger and slot: the drive takes its slot back in memory. No
-    /// byte, marker or file changes, and finality later changes nothing.
-    #[tokio::test]
-    async fn shallow_reorg_undoing_a_ledger_exit_wipes_nothing() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x63);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let config = harness.inner.config.clone();
-        let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
-        let file_before = std::fs::read(&params_path).expect("file");
-        set_index_tip(&harness.inner.block_index, 5);
-
-        apply_update(&mut harness, capacity_update(hash, miner), 5).await;
-        assert!(harness.module.partition_assignment().is_none());
-
-        apply_update(&mut harness, publish_update(hash, miner), 5).await;
-        let assignment = harness.module.partition_assignment().expect("restored");
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(0));
-        assert!(harness.inner.awaiting_finality.is_none());
-
-        set_index_tip(&harness.inner.block_index, final_tip_for(&config, 5));
-        harness.inner.tick().await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        for request in drain_packing(&mut harness) {
-            assert!(
-                *request.chunk_range().0.start() > 0,
-                "only offsets that were never packed are sent, got {:?}",
-                request.chunk_range()
-            );
-        }
-        assert_eq!(std::fs::read(&params_path).expect("file"), file_before);
-    }
-
-    /// A drive whose partition the chain released (v2 file, same chain, the
-    /// release at a final epoch) is wiped and records no partition, so it is
-    /// Empty and receives the next unheld assignment. Before finality it is
-    /// only parked.
+    /// A drive whose partition the chain released (v2 file, same chain) is
+    /// wiped and records no partition, so it is Empty and receives the next
+    /// unheld assignment.
     #[tokio::test]
     async fn released_is_cleared_and_becomes_empty() {
         use irys_domain::storage_module::ChunkType;
@@ -4737,16 +4558,8 @@ mod assignment_reset_tests {
         let mut harness = harness(Some(DataLedger::Publish.into()));
         write_synced_data(&harness.module, 0x64);
         let (_hash, miner) = assigned_hash_and_miner(&harness.module);
-        let config = harness.inner.config.clone();
-        set_index_tip(&harness.inner.block_index, 5);
 
         apply_update(&mut harness, explicit_unassign(), 5).await;
-        assert!(harness.module.partition_assignment().is_none());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(harness.inner.awaiting_finality.is_some());
-
-        set_index_tip(&harness.inner.block_index, final_tip_for(&config, 5));
-        harness.inner.tick().await;
         assert!(harness.module.partition_assignment().is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
         assert!(!reset_marker(&harness.module));
@@ -4758,7 +4571,6 @@ mod assignment_reset_tests {
         assert!(harness.receivers.packing.try_recv().is_err());
 
         let other = H256::repeat_byte(0x7D);
-        set_index_tip(&harness.inner.block_index, FINAL_TIP);
         apply_update(&mut harness, capacity_update(other, miner), 6).await;
         assert_eq!(harness.module.partition_hash(), Some(other));
         let request = harness
@@ -4767,130 +4579,6 @@ mod assignment_reset_tests {
             .try_recv()
             .expect("the empty drive packs its new partition");
         assert_full_partition_span(&request);
-    }
-
-    /// The epoch block of a branch that was reorged out, at a height that is
-    /// final on the canonical branch.
-    fn orphaned_epoch_hash() -> H256 {
-        H256::repeat_byte(0xAB)
-    }
-
-    /// An update whose epoch height is final but whose epoch block is not the
-    /// block the index holds at that height comes from a reorged-out branch
-    /// (a backlogged message). It is judged as not final and only parks: no
-    /// release is cleared and no ledger exit is applied. The canonical update
-    /// that follows takes both drives back with their bytes.
-    #[tokio::test]
-    async fn final_height_with_other_hash_is_stale_no_clear_no_exit() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
-        let released = Arc::clone(&harness.modules[0]);
-        let exiting = Arc::clone(&harness.modules[1]);
-        write_synced_data(&released, 0x71);
-        write_synced_data(&exiting, 0x72);
-        let held_released = released.partition_assignment().expect("assigned");
-        let held_exiting = exiting.partition_assignment().expect("assigned");
-        let files: Vec<Vec<u8>> = harness
-            .paths
-            .iter()
-            .map(|path| {
-                std::fs::read(path.join(irys_domain::PACKING_PARAMS_FILE_NAME)).expect("file")
-            })
-            .collect();
-
-        // Branch A: the first partition is released, the second leaves its ledger.
-        harness
-            .inner
-            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                assignments: capacity_update(
-                    held_exiting.partition_hash,
-                    held_exiting.miner_address,
-                ),
-                epoch_height: 5,
-                epoch_block_hash: orphaned_epoch_hash(),
-                update_height: 5,
-                in_sync: true,
-            })
-            .await
-            .expect("a stale update is not an error");
-        for module in [&released, &exiting] {
-            assert_eq!(
-                chunk_type(module),
-                Some(ChunkType::Data),
-                "nothing is wiped"
-            );
-            assert!(!module.reset_incomplete());
-            assert!(!reset_marker(module));
-        }
-        for (path, before) in harness.paths.iter().zip(&files) {
-            assert_eq!(
-                &std::fs::read(path.join(irys_domain::PACKING_PARAMS_FILE_NAME)).expect("file"),
-                before,
-                "no file is cleared, moved or stamped"
-            );
-        }
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert!(
-            harness.inner.awaiting_finality.is_none(),
-            "a stale update is not kept"
-        );
-        assert!(harness.inner.pending_assignment.is_none());
-
-        // The canonical branch at the same height assigns both as before.
-        apply_update(&mut harness, Arc::new(vec![held_released, held_exiting]), 5).await;
-        assert_eq!(released.partition_assignment(), Some(held_released));
-        assert_eq!(exiting.partition_assignment(), Some(held_exiting));
-        assert_eq!(chunk_type(&released), Some(ChunkType::Data));
-        assert_eq!(chunk_type(&exiting), Some(ChunkType::Data));
-    }
-
-    /// An update waiting for finality whose height becomes final holding
-    /// another epoch block (its branch was reorged out) is dropped on tick,
-    /// not applied: the ledger exit it asked for never happens.
-    #[tokio::test]
-    async fn awaiting_update_from_orphaned_branch_is_dropped_on_tick() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x73);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let config = harness.inner.config.clone();
-        let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
-        let file_before = std::fs::read(&params_path).expect("file");
-        set_index_tip(&harness.inner.block_index, 5);
-
-        harness
-            .inner
-            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                assignments: capacity_update(hash, miner),
-                epoch_height: 5,
-                epoch_block_hash: orphaned_epoch_hash(),
-                update_height: 5,
-                in_sync: false,
-            })
-            .await
-            .expect("exit pending finality");
-        assert!(harness.module.partition_assignment().is_none());
-        assert!(
-            harness.inner.awaiting_finality.is_some(),
-            "before finality the branch cannot be told apart"
-        );
-
-        set_index_tip(&harness.inner.block_index, final_tip_for(&config, 5));
-        harness.inner.tick().await;
-        assert!(
-            harness.inner.awaiting_finality.is_none(),
-            "the orphaned update is dropped"
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert_eq!(std::fs::read(&params_path).expect("file"), file_before);
-        harness.inner.tick().await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(harness.receivers.packing.try_recv().is_err());
     }
 
     /// A v1 drive that is ours is rewritten as v2 only at an epoch processed
@@ -4916,7 +4604,6 @@ mod assignment_reset_tests {
             .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: publish_update(hash, miner),
                 epoch_height: 7,
-                epoch_block_hash: epoch_hash(7),
                 update_height: 7,
                 in_sync: true,
             })
@@ -4937,12 +4624,11 @@ mod assignment_reset_tests {
     }
 
     /// The orphaned-epoch resend shape for a ledger exit: the drive recorded
-    /// slot 1 of Publish at epoch 50, and a final snapshot at epoch 40 says
+    /// slot 1 of Publish at epoch 50, and the snapshot at epoch 40 says
     /// capacity. The drive's own state is newer than that epoch, so it is
-    /// parked with its bytes, labels and file intact, and the update does
-    /// not wait for finality (finality cannot make it apply).
+    /// parked with its bytes, labels and file intact.
     #[tokio::test]
-    async fn ledger_exit_against_an_older_final_epoch_parks_the_drive() {
+    async fn ledger_exit_against_an_older_epoch_parks_the_drive() {
         use irys_domain::storage_module::ChunkType;
         const CANONICAL_EPOCH_HEIGHT: u64 = 40;
         const ORPHANED_EPOCH_HEIGHT: u64 = 50;
@@ -4956,7 +4642,6 @@ mod assignment_reset_tests {
             .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: capacity_update(hash, miner),
                 epoch_height: CANONICAL_EPOCH_HEIGHT,
-                epoch_block_hash: epoch_hash(CANONICAL_EPOCH_HEIGHT),
                 update_height: ORPHANED_EPOCH_HEIGHT,
                 in_sync: true,
             })
@@ -4968,7 +4653,6 @@ mod assignment_reset_tests {
         assert!(!reset_marker(&harness.module));
         assert!(harness.receivers.packing.try_recv().is_err());
         assert_eq!(std::fs::read(&params_path).expect("file"), file_before);
-        assert!(harness.inner.awaiting_finality.is_none());
         assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(
             harness
@@ -4978,55 +4662,6 @@ mod assignment_reset_tests {
                 .map(|(v, _)| v.reason()),
             Some("recorded state is newer than the epoch".to_owned())
         );
-    }
-
-    /// An in-sync epoch that is not final yet does not stamp a v1 drive that
-    /// is ours: the update waits for finality, and `tick` stamps the drive
-    /// once the epoch is final, with `assigned_height` = that epoch. Bytes stay.
-    #[tokio::test]
-    async fn in_sync_stamp_waits_until_the_epoch_is_final() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
-        write_synced_data(&harness.module, 0x66);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let config = harness.inner.config.clone();
-        let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
-        set_index_tip(&harness.inner.block_index, 7);
-
-        harness
-            .inner
-            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                assignments: publish_update(hash, miner),
-                epoch_height: 7,
-                epoch_block_hash: epoch_hash(7),
-                update_height: 7,
-                in_sync: true,
-            })
-            .await
-            .expect("in-sync epoch, not final");
-        assert!(
-            !PackingParams::from_toml(&params_path).expect("v1").is_v2(),
-            "an epoch that is not final does not stamp"
-        );
-        assert_eq!(
-            harness
-                .module
-                .partition_assignment()
-                .map(|a| a.partition_hash),
-            Some(hash),
-            "the drive stays ours"
-        );
-        assert!(harness.inner.awaiting_finality.is_some());
-
-        set_index_tip(&harness.inner.block_index, final_tip_for(&config, 7));
-        harness.inner.tick().await;
-        let params = PackingParams::from_toml(&params_path).expect("v2");
-        assert!(params.is_v2());
-        assert_eq!(params.assigned_height, Some(7));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert!(harness.inner.awaiting_finality.is_none());
     }
 
     /// An open module with no in-memory packing params (open could not read

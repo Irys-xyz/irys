@@ -678,11 +678,8 @@ async fn partition_expiration_and_repacking_test() {
         commitments,
         &config,
     );
-    let storage_module_infos = irys_domain::drive_verdict::startup_storage_module_infos(
-        &epoch_snapshot,
-        H256::zero(),
-        true,
-    );
+    let storage_module_infos =
+        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_snapshot, H256::zero());
     let mut storage_modules: StorageModuleVec = Vec::new();
     // Create a list of storage modules wrapping the storage files
     for info in storage_module_infos {
@@ -1034,11 +1031,8 @@ async fn epoch_blocks_reinitialization_test() {
     );
 
     // Get the genesis storage modules and their assigned partitions
-    let storage_module_infos = irys_domain::drive_verdict::startup_storage_module_infos(
-        &epoch_snapshot,
-        H256::zero(),
-        true,
-    );
+    let storage_module_infos =
+        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_snapshot, H256::zero());
     debug!("{:#?}", storage_module_infos);
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
@@ -1154,22 +1148,16 @@ async fn epoch_blocks_reinitialization_test() {
         commitments,
         &config,
     );
-    let storage_module_infos = irys_domain::drive_verdict::startup_storage_module_infos(
-        &epoch_service,
-        H256::zero(),
-        true,
-    );
+    let storage_module_infos =
+        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_service, H256::zero());
     epoch_service
         .replay_epoch_data(epoch_block_data)
         .expect("to replay the epoch data");
 
     debug!("{:#?}", storage_module_infos);
 
-    let new_sm_infos = irys_domain::drive_verdict::startup_storage_module_infos(
-        &epoch_service,
-        H256::zero(),
-        true,
-    );
+    let new_sm_infos =
+        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_service, H256::zero());
 
     debug!("{:#?}", new_sm_infos);
 

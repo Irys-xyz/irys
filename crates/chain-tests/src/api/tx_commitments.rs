@@ -257,7 +257,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
                 .read()
                 .canonical_epoch_snapshot(),
             H256::zero(),
-            true,
         );
 
         node.wait_until_height_confirmed(6, 10).await?;
@@ -338,7 +337,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .read()
             .canonical_epoch_snapshot(),
         H256::zero(),
-        true,
     );
 
     assert_eq!(sm_infos_before, sm_infos_after);

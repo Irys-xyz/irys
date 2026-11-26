@@ -2399,8 +2399,8 @@ impl IrysNode {
         );
         // Apply the startup verdict's destructive half now, not at the next
         // epoch block: clear released drives, place partitions on empty or
-        // released drives, and exit ledgers whose epoch is final (or once it
-        // becomes final). Startup is never in sync, so no file is stamped v2.
+        // released drives, and exit ledgers. Startup is never in sync, so no
+        // file is stamped v2.
         {
             let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
             let assignments =
@@ -2409,7 +2409,6 @@ impl IrysNode {
                 StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                     assignments: Arc::new(assignments),
                     epoch_height: epoch_snapshot.epoch_height,
-                    epoch_block_hash: epoch_snapshot.epoch_block.block_hash(),
                     update_height: epoch_snapshot.epoch_height,
                     in_sync: false,
                 },
@@ -2894,8 +2893,7 @@ impl IrysNode {
     /// drive is not opened), the genesis hash later writes stamp, and the ids
     /// of the drives whose file could not be read (they keep blocking new
     /// placements at runtime). Nothing is written here. Startup is never in
-    /// sync, and the epoch is final only when it is at or below the finalized
-    /// height of the block-index tip.
+    /// sync.
     fn drive_verdicts_at_startup(
         config: &Config,
         paths: &[std::path::PathBuf],
@@ -2904,33 +2902,11 @@ impl IrysNode {
     ) -> eyre::Result<(Vec<StorageModuleInfo>, H256, Vec<usize>)> {
         use irys_domain::drive_verdict;
 
-        let (genesis_hash, index_tip) = {
-            let index = block_index_guard.read();
-            let genesis = index
-                .get_item(0)
-                .ok_or_eyre("block index has no genesis item")?
-                .block_hash;
-            (genesis, index.latest_height())
-        };
-        let finalized = irys_domain::forkchoice_markers::finalized_height(
-            index_tip,
-            config.consensus.block_tree_depth,
-            u64::from(config.consensus.block_migration_depth),
-        );
-        let epoch_is_final = epoch_snapshot.epoch_height <= finalized;
-        // A release, ledger exit or v2 stamp waits until its epoch is final.
-        // With an epoch no longer than the block tree, the next epoch can
-        // arrive first and replace the waiting update, so it never applies.
-        let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
-        let block_tree_depth = config.consensus.block_tree_depth;
-        if num_blocks_in_epoch <= block_tree_depth {
-            warn!(
-                consensus.num_blocks_in_epoch = num_blocks_in_epoch,
-                consensus.block_tree_depth = block_tree_depth,
-                "num_blocks_in_epoch <= block_tree_depth: drive releases, ledger exits and v2 stamps wait for their epoch to be final and may stay parked indefinitely"
-            );
-        }
-
+        let genesis_hash = block_index_guard
+            .read()
+            .get_item(0)
+            .ok_or_eyre("block index has no genesis item")?
+            .block_hash;
         let miner = config.node_config.miner_address();
         let assignments = epoch_snapshot.get_partition_assignments(miner);
         let identity = drive_verdict::ChainIdentity {
@@ -2943,7 +2919,6 @@ impl IrysNode {
             drives: &drives,
             assignments: &assignments,
             epoch_height: epoch_snapshot.epoch_height,
-            epoch_is_final,
             in_sync: false,
             identity: &identity,
         };
