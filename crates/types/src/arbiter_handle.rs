@@ -143,7 +143,13 @@ impl Future for ServiceSet {
             ServiceSetState::ShuttingDown(shutdown_future) => {
                 // Poll the shutdown future
                 match shutdown_future.poll_unpin(cx) {
-                    std::task::Poll::Ready(()) => std::task::Poll::Ready(()),
+                    std::task::Poll::Ready(()) => {
+                        // A completed future must not be polled again. An empty
+                        // set completes at once, so a later poll or
+                        // `graceful_shutdown` returns at once.
+                        this.state = ServiceSetState::Polling(Vec::new());
+                        std::task::Poll::Ready(())
+                    }
                     std::task::Poll::Pending => std::task::Poll::Pending,
                 }
             }
@@ -430,6 +436,27 @@ mod tests {
             vec!["service_0", "service_1", "service_2"],
             "Services should shutdown in order"
         );
+    }
+
+    /// The node lifecycle waits on the set until a service exits, then calls
+    /// `graceful_shutdown` on the same set. That second wait must return.
+    #[tokio::test]
+    async fn test_graceful_shutdown_after_completion_returns() {
+        let (service, exit_trigger) = create_controllable_service("early_exit".to_string(), || {});
+        let other = create_long_running_service("other".to_string(), || {});
+        let mut service_set = ServiceSet::new(vec![service, other]);
+
+        exit_trigger.send(()).expect("Failed to trigger exit");
+        tokio::time::timeout(Duration::from_secs(5), service_set.wait())
+            .await
+            .expect("ServiceSet should complete after a service exits");
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            service_set.graceful_shutdown().wait(),
+        )
+        .await
+        .expect("graceful_shutdown after completion should return");
     }
 
     #[tokio::test]
