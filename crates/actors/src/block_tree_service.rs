@@ -4070,25 +4070,34 @@ mod tests {
         h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
     }
 
-    /// Partition assignment updates the storage modules received, by update height.
-    fn drain_assignment_update_heights(h: &mut DiscardHarness) -> Vec<u64> {
+    /// Partition assignment updates the storage modules received, as
+    /// (snapshot epoch height, update height).
+    fn drain_assignment_update_heights(h: &mut DiscardHarness) -> Vec<(u64, u64)> {
         let mut heights = vec![];
         while let Ok(message) = h.storage_modules_rx.try_recv() {
             let (
-                StorageModuleServiceMessage::PartitionAssignmentsUpdated { update_height, .. },
+                StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                    epoch_height,
+                    update_height,
+                    ..
+                },
                 _span,
             ) = message.into_parts()
             else {
                 panic!("block tree sends only partition assignment updates");
             };
-            heights.push(update_height);
+            heights.push((epoch_height, update_height));
         }
         heights
     }
 
     /// Give a cached block an epoch snapshot that can map storage modules: the
     /// mapping needs a storage submodule config.
-    fn set_mappable_epoch_snapshot(h: &mut DiscardHarness, block_hash: BlockHash) {
+    fn set_mappable_epoch_snapshot(
+        h: &mut DiscardHarness,
+        block_hash: BlockHash,
+        epoch_height: u64,
+    ) {
         h.inner
             .cache
             .write()
@@ -4097,6 +4106,7 @@ mod tests {
             .get_mut(&block_hash)
             .expect("block in cache")
             .epoch_snapshot = Arc::new(irys_domain::EpochSnapshot {
+            epoch_height,
             storage_submodules_config: Some(irys_config::StorageSubmodulesConfig {
                 is_using_hardcoded_paths: false,
                 submodule_paths: vec![],
@@ -4123,7 +4133,7 @@ mod tests {
         //         -> new_tip (height 1, heavier than old_epoch_block)
         let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
         let old_epoch_block = h.add_child_block(&old_tip, 5_200, true);
-        set_mappable_epoch_snapshot(&mut h, old_epoch_block.block_hash);
+        set_mappable_epoch_snapshot(&mut h, old_epoch_block.block_hash, old_epoch_block.height);
         h.inner
             .on_block_validation_finished(old_epoch_block.block_hash, ValidationResult::Valid)
             .await
@@ -4131,12 +4141,13 @@ mod tests {
         assert_eq!(h.tip(), old_epoch_block.block_hash);
         assert_eq!(
             drain_assignment_update_heights(&mut h),
-            vec![old_epoch_block.height],
+            vec![(old_epoch_block.height, old_epoch_block.height)],
             "the storage modules apply the old fork's epoch block"
         );
 
         let new_tip = h.add_child_block(&genesis, 5_300, true);
-        set_mappable_epoch_snapshot(&mut h, new_tip.block_hash);
+        // The new fork has no epoch block: its tip's snapshot is genesis's.
+        set_mappable_epoch_snapshot(&mut h, new_tip.block_hash, 0);
         h.inner
             .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
             .await
@@ -4157,9 +4168,9 @@ mod tests {
 
         assert_eq!(
             drain_assignment_update_heights(&mut h),
-            vec![old_epoch_block.height],
+            vec![(0, old_epoch_block.height)],
             "a reorg that orphans the only epoch block must send the new tip's \
-             assignments once, at the orphaned epoch height"
+             snapshot (its epoch height) once, at the orphaned update height"
         );
     }
 

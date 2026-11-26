@@ -770,13 +770,32 @@ impl StorageModuleServiceInner {
                 let recorded = module
                     .recorded_params()
                     .filter(|params| params.partition_hash == Some(next.partition_hash));
+                // A parked module can carry a flag from a failed release wipe.
+                // Settle it as open would: no marker keeps the bytes and the
+                // recorded slot can be taken back; a durable marker finishes
+                // the wipe, and the adoption below packs every `Uninitialized`
+                // span. Without this, the flag sent a matching slot to a full
+                // wipe.
+                if recorded.is_some() && module.reset_incomplete() {
+                    self.settle_incomplete_reset(module)?;
+                }
                 match recorded {
                     Some(params) if !module.reset_incomplete() => {
                         if params.ledger == next.ledger_id && params.slot == next.slot_index {
                             // An idle module takes back the partition its file
                             // records, without a reset or a file write. Only its
-                            // Uninitialized spans are packed.
-                            if !module.adopt_recorded(next) {
+                            // Uninitialized spans are packed. A submodule whose
+                            // file records no partition yet (added while the
+                            // module was parked; its spans are Uninitialized)
+                            // is bound by storing the assignment instead, so a
+                            // restart does not reset what packing writes there.
+                            if !module.adopt_recorded(next)
+                                && let Err(err) = module.assign_partition(next, epoch_height)
+                            {
+                                warn!(
+                                    storage_module.id = module.id,
+                                    "held partition was not stored on every submodule; the update will be retried: {err:#}"
+                                );
                                 return Err(ResetNotFinished.into());
                             }
                             self.enqueue_uninitialized(module);
@@ -914,7 +933,10 @@ impl StorageModuleServiceInner {
                 {
                     self.enqueue_packing(module, range);
                 }
-            } else if stamp_v2 {
+            }
+            // Settling (no marker, or a finished wipe) keeps this
+            // assignment, so the stamp this in-sync update asks for applies.
+            if stamp_v2 && module.partition_assignment().is_some() {
                 self.stamp_v2(module, next, epoch_height);
             }
             return Ok(());
@@ -1676,6 +1698,75 @@ mod assignment_reset_tests {
             );
         }
         assert_reopen_chunk(harness, ChunkType::Entropy);
+    }
+
+    /// A release wipe that failed before its marker left the in-memory flag on
+    /// a parked module. A later epoch that restores the recorded slot settles
+    /// the flag as open would (no marker: the bytes stay) and takes the slot
+    /// back, instead of wiping the whole partition.
+    #[tokio::test]
+    async fn parked_module_with_a_markerless_flag_takes_back_its_slot() {
+        use irys_domain::storage_module::ChunkType;
+
+        let (mut harness, hash, miner) = parked_harness();
+        harness.module.fail_next_reset_for_test();
+        harness
+            .inner
+            .apply_assignment(update_msg(explicit_unassign(), 4))
+            .await
+            .expect("a failed release is retried, not fatal");
+        assert!(harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert!(harness.module.partition_assignment().is_none());
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+
+        apply_update(&mut harness, capacity_update(hash, miner), 5).await;
+        assert_eq!(harness.module.partition_hash(), Some(hash));
+        assert!(!harness.module.reset_incomplete());
+        assert_eq!(
+            chunk_type(&harness.module),
+            Some(ChunkType::Entropy),
+            "a markerless flag must not wipe the recorded slot"
+        );
+        while let Ok(request) = harness.receivers.packing.try_recv() {
+            assert!(
+                request.chunk_range().0.start() > PartitionChunkOffset::from(0),
+                "only Uninitialized offsets are packed, got {:?}",
+                request.chunk_range()
+            );
+        }
+    }
+
+    /// An in-sync matching update that clears a markerless flag still stamps
+    /// the v1 file it asks to stamp.
+    #[tokio::test]
+    async fn matching_update_stamps_after_settling_a_markerless_flag() {
+        let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
+        assert!(!PackingParams::from_toml(&params_path).expect("v1").is_v2());
+        harness.module.fail_next_reset_for_test();
+        assert!(harness.module.reset().is_err());
+        assert!(harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                assignments: publish_update(hash, miner),
+                epoch_height: 7,
+                update_height: 7,
+                in_sync: true,
+            })
+            .await
+            .expect("matching update");
+        assert!(!harness.module.reset_incomplete());
+        assert!(
+            PackingParams::from_toml(&params_path)
+                .expect("params")
+                .is_v2(),
+            "the in-sync stamp was skipped after the flag was settled"
+        );
     }
 
     /// A parked module assigned a different partition is reset and packed.

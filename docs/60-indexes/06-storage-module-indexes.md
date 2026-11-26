@@ -114,8 +114,13 @@ partition hash and the chunk offset, not on the ledger or the slot.
 span is rewritten to `Uninitialized`, and the old slot's tx coverage,
 data-root placements and body jobs are dropped over the whole
 submodule, before the file names the new slot. No reset marker is
-written: a crash before that rebind reopens with the old slot recorded
-and repeats the exit. Only the `Uninitialized` spans are packed. The
+written: a crash before that rebind reopens with the old slot recorded.
+That open repeats the exit when the epoch it is given still asks for
+another slot. When it asks for the recorded slot again, the module
+opens on that slot without an exit, and what the interrupted exit
+already did stays done: the spans it rewrote stay `Uninitialized` and
+the rows it dropped are not restored (the data is packed and synced
+again). Only the `Uninitialized` spans are packed. The
 runtime exit (storage module service, and term-slot expiry) does the
 same. A different partition hash still clears the whole index and
 rewrites every interval to `Uninitialized`. The `chunks.dat` bytes stay
