@@ -3020,6 +3020,41 @@ mod assignment_reset_tests {
         assert_eq!(*request.chunk_range().0.end(), 9);
     }
 
+    /// A parked drive (no assignment in memory) whose file records a ledger
+    /// slot, given the same partition on another slot, leaves that slot from
+    /// its recorded file: the entropy stays and only the old data is packed.
+    #[tokio::test]
+    async fn parked_drive_leaving_its_recorded_slot_keeps_entropy() {
+        use irys_domain::storage_module::ChunkType;
+
+        let (mut harness, hash, miner) = store_slot_one_with_data(50, 0x24).await;
+        write_span(&harness.module, 5, 9, ChunkType::Entropy);
+        apply_update(&mut harness, explicit_unassign(), 10).await;
+        assert_parked_on_slot_one(&harness, hash);
+
+        apply_update(&mut harness, publish_slot_update(hash, miner, 2), 60).await;
+        let assignment = harness.module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.slot_index, Some(2));
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert_eq!(
+            harness.module.get_intervals(ChunkType::Entropy),
+            vec![irys_types::partition_chunk_offset_ii!(5, 9)]
+        );
+        assert!(!reset_marker(&harness.module));
+        assert_eq!(
+            harness
+                .module
+                .recorded_params()
+                .and_then(|params| params.slot),
+            Some(2)
+        );
+        let spans: Vec<_> = drain_packing(&mut harness)
+            .iter()
+            .map(|request| request.chunk_range().0)
+            .collect();
+        assert_eq!(spans, vec![irys_types::partition_chunk_offset_ii!(0, 4)]);
+    }
+
     /// A lower unassign with no incomplete reset parks the drive. Bytes stay.
     #[tokio::test]
     async fn stale_unassign_without_an_incomplete_reset_keeps_its_bytes() {
@@ -4638,7 +4673,7 @@ mod assignment_reset_tests {
     /// installed, the partition's entropy kept, and only the old slot's data
     /// span uninitialized and packed.
     #[tokio::test]
-    async fn ledger_exit_wipes_and_installs_capacity() {
+    async fn ledger_exit_keeps_entropy_and_installs_capacity() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(Some(DataLedger::Publish.into()));

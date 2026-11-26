@@ -512,8 +512,11 @@ pub trait SubmoduleStore: Send + Sync {
     ///
     /// A data-root info is removed only when no remaining interval for that
     /// data root still overlaps the info extent. A split keeps the info and
-    /// its `data_size`. Callers pass `Uninitialized` spans only. An `Entropy`
-    /// span keeps its tx index: those rows name bytes that are not stored yet.
+    /// its `data_size`. Offset rows (presence, checksums) are not touched.
+    /// Open's reconcile passes `Uninitialized` spans only: an `Entropy` span
+    /// keeps its tx index there, because those rows name bytes that are not
+    /// stored yet. A slot exit that keeps the partition passes whole
+    /// submodules, `Entropy` included: every row then names the old slot.
     /// An empty list, or spans with no such rows, does not commit. A tx-path
     /// blob and its leaf binding stay while any interval in this submodule
     /// names that hash. The last such interval deletes both rows. A tx

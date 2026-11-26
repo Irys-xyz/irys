@@ -571,6 +571,8 @@ enum SyncFailurePoint {
     AfterResetIntervals,
     /// `store_assignment` has not written. The reset, if it ran, is done.
     AssignmentStore,
+    /// One submodule's `packing_params.toml` write inside `store_assignment`.
+    AssignmentFileWrite,
 }
 
 /// Test barrier. `AfterPresenceCopy` runs inside a durable point that holds
@@ -2169,6 +2171,9 @@ thread_local! {
     /// and before its coverage drop and the packing params rebind.
     static FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Every packing params restore after a failed assignment store fails.
+    static FAIL_PACKING_PARAMS_RESTORE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn note_submodule_open(step: &'static str) {
@@ -2334,6 +2339,39 @@ impl StorageModule {
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
 
+        // A store that failed between two submodule files and could not be
+        // put back leaves files of one module that disagree. A submodule whose
+        // file already names the wanted slot may then still hold labels and
+        // rows written for another slot, so every submodule takes the slot
+        // exit to the wanted slot. A parked open follows the first file, as
+        // `adopt_recorded` and the recorded params do. Read only: a file that
+        // does not parse is refused by the loop below.
+        let recorded_slots: Vec<(Option<H256>, Option<u32>, Option<usize>)> = storage_module_info
+            .submodules
+            .iter()
+            .filter_map(|(_, dir)| {
+                let path = config
+                    .node_config
+                    .base_directory
+                    .join(dir)
+                    .join(PACKING_PARAMS_FILE_NAME);
+                path.exists()
+                    .then(|| PackingParams::from_toml(&path).ok())
+                    .flatten()
+                    .map(|params| (params.partition_hash, params.ledger, params.slot))
+            })
+            .collect();
+        let mixed_files = recorded_slots
+            .iter()
+            .any(|recorded| Some(recorded) != recorded_slots.first());
+        if mixed_files {
+            warn!(
+                storage_module.id = storage_module_info.id,
+                files = ?recorded_slots,
+                "the submodule packing params files of this module disagree; every submodule leaves its recorded slot for the wanted one"
+            );
+        }
+
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
             let sub_base_path = config.node_config.base_directory.join(dir.clone());
@@ -2419,6 +2457,7 @@ impl StorageModule {
                 let (want_hash, want_ledger, want_slot) =
                     match storage_module_info.partition_assignment {
                         Some(pa) => (Some(pa.partition_hash), pa.ledger_id, pa.slot_index),
+                        None if mixed_files => recorded_slots[0],
                         None => (params.partition_hash, params.ledger, params.slot),
                     };
 
@@ -2434,12 +2473,12 @@ impl StorageModule {
                     params.ledger != want_ledger || params.slot != want_slot;
                 let leaving_a_ledger = params.ledger.is_some() && ledger_or_slot_changed;
                 let new_partition = params.partition_hash != want_hash;
+                if new_partition {
+                    reset_dbs.push(submodule_db.clone());
+                } else if leaving_a_ledger || mixed_files {
+                    keep_entropy_starts.push(submodule_interval.start());
+                }
                 if new_partition || ledger_or_slot_changed {
-                    if new_partition {
-                        reset_dbs.push(submodule_db.clone());
-                    } else if leaving_a_ledger {
-                        keep_entropy_starts.push(submodule_interval.start());
-                    }
                     rebind_after_bind.push((
                         params_path.clone(),
                         want_hash,
@@ -2987,6 +3026,15 @@ impl StorageModule {
     /// Store `next` and write each submodule's `packing_params.toml`.
     /// The caller holds the assignment write lock. A parse or write error
     /// leaves the in-memory assignment unchanged.
+    ///
+    /// The files are written one by one. When a later write fails, the files
+    /// already written are put back to their previous bytes, so every file
+    /// still names the previous assignment, as memory does. When that restore
+    /// fails too, the files disagree and memory cannot match them all: the
+    /// module is parked (no assignment, so no write, registration or mining
+    /// lands on it) and its recorded params are forgotten, so the service
+    /// leaves it alone until a restart. Open then brings every submodule to
+    /// one slot (see `uninitialize_old_slot_at_open`).
     fn store_assignment(
         &self,
         assignment: &mut Option<PartitionAssignment>,
@@ -2999,8 +3047,16 @@ impl StorageModule {
         let new_hash = next.map(|current| current.partition_hash);
         let genesis_hash = *self.genesis_hash.read().unwrap();
         let mut updated = Vec::new();
+        let mut previous: Vec<Option<Vec<u8>>> = Vec::new();
         for (_, submodule) in self.submodules.iter() {
             let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
+            previous.push(if params_path.exists() {
+                Some(fs::read(&params_path).wrap_err_with(|| {
+                    format!("read packing params at {}", params_path.display())
+                })?)
+            } else {
+                None
+            });
             let mut params = if params_path.exists() {
                 PackingParams::from_toml(&params_path)?
             } else {
@@ -3030,8 +3086,11 @@ impl StorageModule {
             params.backfill_recorded_packing(&self.config.consensus);
             updated.push((params_path, params));
         }
-        for (path, params) in &updated {
-            params.write_to_disk(path)?;
+        for (index, (path, params)) in updated.iter().enumerate() {
+            if let Err(err) = self.write_params_file(path, params) {
+                self.restore_or_park(assignment, &updated[..index], &previous[..index]);
+                return Err(err);
+            }
         }
         if let Some((_, params)) = updated.first() {
             *self.recorded_params.write().unwrap() = Some(*params);
@@ -3041,6 +3100,57 @@ impl StorageModule {
             self.entropy_cache.lock().unwrap().clear();
         }
         Ok(())
+    }
+
+    fn write_params_file(&self, path: &Path, params: &PackingParams) -> eyre::Result<()> {
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AssignmentFileWrite)?;
+        params.write_to_disk(path)
+    }
+
+    /// Previous bytes back, durably; `None` removes a file the store created.
+    fn restore_params_file(path: &Path, bytes: Option<&[u8]>) -> eyre::Result<()> {
+        #[cfg(test)]
+        if FAIL_PACKING_PARAMS_RESTORE.with(std::cell::Cell::get) {
+            eyre::bail!("injected packing params restore failure");
+        }
+        match bytes {
+            Some(bytes) => {
+                let mut file = get_atomic_file(path)?;
+                file.write_all(bytes)?;
+                file.commit()?;
+            }
+            None => fs::remove_file(path)?,
+        }
+        Ok(())
+    }
+
+    /// Put the packing params files a failed store already wrote back to
+    /// their previous bytes (`None`: the file did not exist). A failed
+    /// restore parks the module and forgets its recorded params; see
+    /// [`Self::store_assignment`].
+    fn restore_or_park(
+        &self,
+        assignment: &mut Option<PartitionAssignment>,
+        written: &[(PathBuf, PackingParams)],
+        previous: &[Option<Vec<u8>>],
+    ) {
+        let mut failed = None;
+        for ((path, _), bytes) in written.iter().zip(previous) {
+            if let Err(err) = Self::restore_params_file(path, bytes.as_deref()) {
+                failed = Some((path.clone(), err));
+            }
+        }
+        if let Some((path, err)) = failed {
+            let held = assignment.take();
+            *self.recorded_params.write().unwrap() = None;
+            error!(
+                storage_module.id = self.id,
+                storage_module.path = %path.display(),
+                partition.assignment = ?held,
+                "packing params could not be restored after a failed assignment store; the submodule files disagree, so the module is parked and left untouched until restart: {err:#}"
+            );
+        }
     }
 
     /// Returns the StorageModules partition_hash if assigned
@@ -4339,9 +4449,12 @@ impl StorageModule {
     /// finished instead: its marker may be durable and its index rows may be
     /// gone, so the labels it left cannot be trusted.
     ///
-    /// An error leaves the previous assignment. Every `Uninitialized` span is
-    /// then queued for another pack, so a span this call already relabelled
-    /// is not left unpacked if the old slot stays.
+    /// An error leaves the previous assignment. The spans this call already
+    /// relabelled `Uninitialized` are then added to the packing retry list,
+    /// next to the retries and checksum repairs that were already queued
+    /// (those are kept), so nothing is left unpacked if the old slot stays.
+    /// On success the caller packs every `Uninitialized` span, which covers
+    /// those lists, so they are cleared.
     fn leave_slot_locked(
         &self,
         assignment: &mut Option<PartitionAssignment>,
@@ -4361,7 +4474,15 @@ impl StorageModule {
                 self.store_assignment(assignment, Some(next), update_height)?;
                 Ok(spans)
             });
-        if result.is_err() {
+        if result.is_ok() {
+            // Every queued retry or repair offset is now `Uninitialized`: a
+            // repair under `Entropy` was relabelled, and the old slot's
+            // `Data` is gone. The caller packs all of them.
+            let _sync = self.lock_sync();
+            recover_mutex(&self.crc_suspects).clear();
+            recover_mutex(&self.crc_repairs).clear();
+            recover_mutex(&self.packing_retries).clear();
+        } else {
             // Spans already published `Uninitialized` must still be packed
             // when the module keeps its old slot (the retry is dropped, or
             // the old slot is confirmed again). The service drains this
@@ -4390,8 +4511,13 @@ impl StorageModule {
     /// 2. The `Uninitialized` image is published and durable before any row
     ///    is cleared, as in [`Self::rollback_unassigned_range`]. A failed
     ///    publish restores the map and clears nothing.
-    /// 3. Offset rows under the new `Uninitialized` spans are cleared. Under
-    ///    `Entropy`, proof rows go and checksum-only rows stay.
+    /// 3. Offset rows under the new `Uninitialized` spans are cleared.
+    ///    `Entropy` offset rows are not touched: under `sync_in_progress` an
+    ///    `Entropy` label holds only checksum-only rows, because a durable
+    ///    point writes a proof row and flips the label to `Data` under that
+    ///    same lock. Open's `reconcile_presence` still checks this on every
+    ///    load; it is not repeated here, where it would scan every entropy
+    ///    row while the assignment and sync locks block mining and the lane.
     /// 4. Tx coverage, data-root placements and infos, and body jobs are
     ///    dropped over the whole module, `Entropy` included: a row under
     ///    `Entropy` names the old slot's tx, and a data write funded by it
@@ -4420,11 +4546,9 @@ impl StorageModule {
         doubtful.extend(recover_mutex(&self.crc_suspects).iter().copied());
         doubtful.extend(recover_mutex(&self.crc_repairs).iter().copied());
         self.clear_pending_for_reset();
-        recover_mutex(&self.crc_suspects).clear();
-        recover_mutex(&self.crc_repairs).clear();
-        // A failed pack left its span `Uninitialized`. The caller packs every
-        // `Uninitialized` span, so the retry list is not needed.
-        recover_mutex(&self.packing_retries).clear();
+        // Checksum suspects, repairs and packing retries stay queued until
+        // the caller has stored the new assignment: a failed exit must not
+        // lose them.
         self.fail_queued_sweeps();
         // Uninitialized offsets lose their checksums. A later scan sets the
         // flag again once the module is settled.
@@ -4458,9 +4582,13 @@ impl StorageModule {
             self.clear_offset_index_in_range(span.start(), span.end())?;
         }
         let image = recover_read(&self.intervals).clone();
-        Self::reconcile_presence(&self.submodules, &image)?;
         let chunk_size = self.config.consensus.chunk_size;
         for (submodule_interval, submodule) in self.submodules.iter() {
+            // The whole submodule, `Entropy` spans included. Until the new
+            // assignment is stored every coverage row here names the old
+            // slot. A row kept under `Entropy` would fund a data write of the
+            // old slot's bytes over the kept entropy. The method is
+            // span-generic; it does not touch offset (checksum) rows.
             submodule.db.drop_uninitialized_coverage(
                 &[(submodule_interval.start(), submodule_interval.end())],
                 chunk_size,
@@ -6623,6 +6751,8 @@ impl StorageModule {
             if FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS.with(|flag| flag.replace(false)) {
                 eyre::bail!("injected failure after the open keep-entropy intervals");
             }
+            // The whole submodule, `Entropy` included: every coverage row names
+            // the old slot. Offset (checksum) rows are not touched.
             submodule
                 .db
                 .drop_uninitialized_coverage(&[(interval.start(), interval.end())], chunk_size)?;
@@ -14986,6 +15116,313 @@ mod tests {
         Ok(())
     }
 
+    /// A live `Interrupted` label (a data write over entropy between its
+    /// pre-pwrite cut and its durable point) becomes `Uninitialized` on a
+    /// slot exit, like `Data`.
+    #[test]
+    fn keep_entropy_slot_exit_relabels_an_interrupted_label() -> eyre::Result<()> {
+        let (tmp, _config, storage) = open_assigned_module("keep_entropy_interrupted", 30)?;
+        let _ = seed_slot_exit(&storage)?;
+        mark_interrupted(&storage, 3);
+        assert_eq!(live_label(&storage, 3), Some(ChunkType::Interrupted));
+        let next = publish_slot_one(&storage);
+        let spans = storage.reset_keep_entropy_with_assignment(next, 7)?;
+        assert_eq!(
+            spans,
+            vec![
+                partition_chunk_offset_ii!(0, 0),
+                partition_chunk_offset_ii!(3, 3)
+            ]
+        );
+        assert_eq!(live_label(&storage, 3), Some(ChunkType::Uninitialized));
+        assert_eq!(file_label(&storage, 3)?, Some(ChunkType::Uninitialized));
+        assert_eq!(live_label(&storage, 1), Some(ChunkType::Entropy));
+        assert_eq!(live_label(&storage, 2), Some(ChunkType::Entropy));
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Set the live label at `offset` to `Interrupted`, as a write's
+    /// pre-pwrite cut does.
+    fn mark_interrupted(storage: &StorageModule, offset: u32) {
+        let mut intervals = storage.intervals.write().unwrap();
+        StorageModule::cut_then_insert_interval_if_touching(
+            &mut intervals,
+            PartitionChunkOffset::from(offset),
+            ChunkType::Interrupted,
+        );
+    }
+
+    /// A parked module (no assignment in memory) leaves its slot for the
+    /// partition its file records. Another partition is refused.
+    #[test]
+    fn parked_module_slot_exit_uses_the_recorded_partition() -> eyre::Result<()> {
+        let (tmp, _config, storage) = open_assigned_module("keep_entropy_parked", 30)?;
+        let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
+        let next = publish_slot_one(&storage);
+        assert!(storage.park_assignment().is_some());
+        let other = PartitionAssignment {
+            partition_hash: H256::repeat_byte(0x98),
+            ..next
+        };
+        let err = storage
+            .reset_keep_entropy_with_assignment(other, 7)
+            .expect_err("another partition is refused");
+        assert!(
+            err.to_string().contains("keep-entropy reset refused"),
+            "{err}"
+        );
+        assert_eq!(storage.partition_assignment(), None);
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
+
+        let spans = storage.reset_keep_entropy_with_assignment(next, 7)?;
+        assert_eq!(spans, vec![partition_chunk_offset_ii!(0, 0)]);
+        assert_slot_exited(&storage, &entropy, &metas, data_root, next)?;
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Two submodules, `hdd0` over 0..=1 and `hdd1` over 2..=3.
+    fn two_submodules(
+        tmp: &Path,
+        config: &Config,
+        assignment: Option<PartitionAssignment>,
+    ) -> eyre::Result<StorageModule> {
+        StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: assignment,
+                submodules: vec![
+                    (partition_chunk_offset_ii!(0, 1), tmp.join("hdd0")),
+                    (partition_chunk_offset_ii!(2, 3), tmp.join("hdd1")),
+                ],
+            },
+            config,
+        )
+    }
+
+    fn recorded_slot(tmp: &Path, dir: &str) -> eyre::Result<Option<usize>> {
+        Ok(PackingParams::from_toml(tmp.join(dir).join(PACKING_PARAMS_FILE_NAME))?.slot)
+    }
+
+    /// Data at 0 and 2, entropy at 1 and 3, and a root indexed over the whole
+    /// slot 0 (coverage, data-root infos and body jobs in both submodules).
+    fn seed_two_submodules(storage: &StorageModule, root: H256) -> eyre::Result<()> {
+        for (raw, kind) in [
+            (0_u32, ChunkType::Data),
+            (1, ChunkType::Entropy),
+            (2, ChunkType::Data),
+            (3, ChunkType::Entropy),
+        ] {
+            assert!(storage.write_chunk(PartitionChunkOffset::from(raw), vec![0xC3; 32], kind));
+        }
+        storage.force_sync_pending_chunks()?;
+        index_root_on_slot(storage, root, 0)?;
+        assert_eq!(tx_rows_in(storage, 0, 1)?, 1);
+        assert_eq!(tx_rows_in(storage, 2, 3)?, 1);
+        assert!(!storage.collect_data_root_infos(root)?.0.is_empty());
+        Ok(())
+    }
+
+    /// Arms a failure of every packing params restore; clears it on drop.
+    struct RestoreFail;
+
+    impl RestoreFail {
+        fn arm() -> Self {
+            FAIL_PACKING_PARAMS_RESTORE.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for RestoreFail {
+        fn drop(&mut self) {
+            FAIL_PACKING_PARAMS_RESTORE.with(|flag| flag.set(false));
+        }
+    }
+
+    /// The second submodule's file write fails. The first file is put back,
+    /// so both files and memory name the old slot. The relabelled spans are
+    /// queued for packing next to a retry that was already queued. The
+    /// retry then stores the new slot in both files.
+    #[test]
+    fn slot_exit_store_failure_restores_every_file() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("keep_entropy_two_restore")
+            .build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x5A);
+        let old = submit_slot(&config, hash, 0);
+        let next = submit_slot(&config, hash, 1);
+        let storage = two_submodules(tmp.path(), &config, Some(old))?;
+        seed_two_submodules(&storage, H256::repeat_byte(0x45))?;
+        let earlier = partition_chunk_offset_ii!(3, 3);
+        storage.requeue_packing_range(earlier);
+        recover_mutex(&storage.crc_repairs).insert(PartitionChunkOffset::from(1));
+
+        storage.fail_sync_after(SyncFailurePoint::AssignmentFileWrite, 1);
+        let err = storage
+            .reset_keep_entropy_with_assignment(next, 7)
+            .expect_err("the second file write fails");
+        assert!(
+            format!("{err:#}").contains("AssignmentFileWrite"),
+            "{err:#}"
+        );
+        assert_eq!(
+            recorded_slot(tmp.path(), "hdd0")?,
+            Some(0),
+            "hdd0 was not restored"
+        );
+        assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(0));
+        assert_eq!(storage.partition_assignment(), Some(old));
+        assert_eq!(
+            storage.recorded_params().and_then(|params| params.slot),
+            Some(0)
+        );
+        for raw in [0_u32, 2] {
+            assert_eq!(live_label(&storage, raw), Some(ChunkType::Uninitialized));
+        }
+        assert_eq!(tx_rows_in(&storage, 0, 1)?, 0);
+        assert_eq!(tx_rows_in(&storage, 2, 3)?, 0);
+        // Merged, not replaced: the earlier retry and the repair stay.
+        let queued = storage.take_packing_ranges();
+        assert!(queued.contains(&earlier), "{queued:?}");
+        assert!(
+            queued.contains(&partition_chunk_offset_ii!(0, 0)),
+            "{queued:?}"
+        );
+        assert!(
+            queued.contains(&partition_chunk_offset_ii!(2, 2)),
+            "{queued:?}"
+        );
+        assert_eq!(storage.crc_repair_len(), 1, "the checksum repair was lost");
+
+        storage.reset_keep_entropy_with_assignment(next, 8)?;
+        assert_eq!(recorded_slot(tmp.path(), "hdd0")?, Some(1));
+        assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(1));
+        assert_eq!(storage.partition_assignment(), Some(next));
+        assert_eq!(
+            storage.crc_repair_len(),
+            0,
+            "a finished exit packs every repair span"
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// The second file write fails and the first file cannot be restored:
+    /// `hdd0` names slot 1, `hdd1` slot 0. The module is parked with no
+    /// recorded params. Rows written for the old slot afterwards under `hdd0`
+    /// (the state the review describes) must not survive an open, whichever
+    /// slot the open asks for: every submodule leaves its recorded slot.
+    #[test]
+    fn slot_exit_with_disagreeing_files_settles_one_slot_on_open() -> eyre::Result<()> {
+        for (case, wanted) in [("new", 1_usize), ("old", 0_usize)] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("keep_entropy_two_park_{case}"))
+                .build();
+            let config = testing_config(tmp.path(), 32, 4);
+            let hash = H256::repeat_byte(0x5B);
+            let root = H256::repeat_byte(0x46);
+            let storage = two_submodules(tmp.path(), &config, Some(submit_slot(&config, hash, 0)))?;
+            seed_two_submodules(&storage, root)?;
+            {
+                let _restore = RestoreFail::arm();
+                storage.fail_sync_after(SyncFailurePoint::AssignmentFileWrite, 1);
+                let err = storage
+                    .reset_keep_entropy_with_assignment(submit_slot(&config, hash, 1), 7)
+                    .expect_err("the second file write fails");
+                assert!(
+                    format!("{err:#}").contains("AssignmentFileWrite"),
+                    "{err:#}"
+                );
+            }
+            assert_eq!(storage.partition_assignment(), None, "{case}: not parked");
+            assert!(storage.recorded_params().is_none(), "{case}: recorded kept");
+            assert_eq!(recorded_slot(tmp.path(), "hdd0")?, Some(1));
+            assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(0));
+            assert!(
+                storage
+                    .index_transaction_data(
+                        &DataTransactionHeader::default(),
+                        &vec![0_u8; 64],
+                        LedgerChunkRange(ledger_chunk_offset_ii!(0, 3)),
+                        1,
+                    )
+                    .is_err(),
+                "{case}: a parked module took a registration"
+            );
+            // Old-slot rows under `hdd0`, whose file names slot 1.
+            let offset = PartitionChunkOffset::from(0);
+            assert!(storage.write_chunk(offset, vec![0xD1; 32], ChunkType::Data));
+            storage.force_sync_pending_chunks()?;
+            let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+            submodule.db.update(|tx| {
+                tx.add_tx_leaf_binding(
+                    root,
+                    &TxLeafBinding {
+                        data_root: root,
+                        prefix_hash: H256::zero(),
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))
+            })?;
+            assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
+            assert_eq!(tx_rows_in(&storage, 0, 1)?, 1);
+            drop(storage);
+
+            let want = submit_slot(&config, hash, wanted);
+            let opened = two_submodules(tmp.path(), &config, Some(want))?;
+            for raw in [0_u32, 2] {
+                assert_eq!(
+                    live_label(&opened, raw),
+                    Some(ChunkType::Uninitialized),
+                    "{case} {raw}"
+                );
+                let nth = usize::from(raw >= 2);
+                let file = read_intervals_file(&submodule_interval_path(&opened, nth))?;
+                assert_eq!(
+                    file.get_at_point(PartitionChunkOffset::from(raw)).copied(),
+                    Some(ChunkType::Uninitialized),
+                    "{case} {raw}"
+                );
+                assert!(
+                    offset_meta_at(&opened, raw)?.is_none(),
+                    "{case}: offset row at {raw}"
+                );
+                assert!(
+                    data_path_at(&opened, raw)?.is_none(),
+                    "{case}: proof row at {raw}"
+                );
+            }
+            for raw in [1_u32, 3] {
+                assert_eq!(
+                    live_label(&opened, raw),
+                    Some(ChunkType::Entropy),
+                    "{case} {raw}"
+                );
+            }
+            assert_eq!(tx_rows_in(&opened, 0, 1)?, 0, "{case}: coverage in hdd0");
+            assert_eq!(tx_rows_in(&opened, 2, 3)?, 0, "{case}: coverage in hdd1");
+            assert!(
+                opened.collect_data_root_infos(root)?.0.is_empty(),
+                "{case}: infos"
+            );
+            assert!(
+                opened.pending_body_migrations()?.is_empty(),
+                "{case}: body jobs"
+            );
+            assert_eq!(recorded_slot(tmp.path(), "hdd0")?, Some(wanted), "{case}");
+            assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(wanted), "{case}");
+            assert_eq!(opened.partition_assignment(), Some(want));
+            drop(opened);
+            drop(tmp);
+        }
+        Ok(())
+    }
+
     /// A completion that copied the map before rollback must not write that
     /// `Data` image back over the `Uninitialized` file.
     #[test]
@@ -22498,7 +22935,7 @@ mod tests {
     /// slot, or capacity) uninitializes the old slot's data and drops its
     /// rows. A slot-exited expiry still accepts a repack.
     #[test]
-    fn same_hash_ledger_drift_wipes_only_when_leaving_a_ledger() -> eyre::Result<()> {
+    fn same_hash_ledger_drift_uninitializes_only_when_leaving_a_ledger() -> eyre::Result<()> {
         {
             let engine = "RocksDB";
             let tmp = TempDirBuilder::new()
