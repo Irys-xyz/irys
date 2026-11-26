@@ -1,11 +1,65 @@
 use crate::utils::IrysNodeTest;
-use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_actors::mempool_service::{MempoolServiceMessage, MempoolTxs};
+use irys_actors::tx_selector::TxSelectorError;
+use irys_chain::IrysNodeCtx;
 use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::CachedDataRoots;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{DataLedger, NodeConfig, SendTraced as _, UnixTimestamp};
 use tracing::info;
+
+/// Runs `select_best_txs` on the canonical tip in a separate task, so a
+/// panic returns as a `JoinError`.
+async fn select_best_txs_in_task(
+    genesis_node: &IrysNodeTest<IrysNodeCtx>,
+) -> eyre::Result<Result<Result<MempoolTxs, TxSelectorError>, tokio::task::JoinError>> {
+    let parent = genesis_node
+        .get_block_by_height(genesis_node.get_canonical_chain_height().await)
+        .await?;
+
+    // Spawn in a separate task so the panic is caught as a JoinError.
+    // We clone all Arc-wrapped values; references to them are valid within the async move block.
+    let db = genesis_node.node_ctx.db.clone();
+    let block_tree = genesis_node.node_ctx.block_tree_guard.clone();
+    let reth_adapter = genesis_node.node_ctx.reth_node_adapter.clone();
+    let config = genesis_node.node_ctx.config.clone();
+    let mempool_guard = genesis_node.node_ctx.mempool_guard.clone();
+    let chunk_ingress_state = genesis_node.node_ctx.chunk_ingress_state.clone();
+    let block_index = genesis_node
+        .node_ctx
+        .block_producer_inner
+        .block_index
+        .clone();
+    let parent_hash = parent.block_hash;
+    let parent_timestamp = {
+        let tree = block_tree.read();
+        tree.get_block(&parent_hash)
+            .expect("parent block should exist")
+            .timestamp_secs()
+    };
+
+    let result = tokio::task::spawn(async move {
+        let ctx = irys_actors::tx_selector::TxSelectionContext {
+            block_tree: &block_tree,
+            db: &db,
+            reth_adapter: &reth_adapter,
+            config: &config,
+            mempool_state: mempool_guard.atomic_state(),
+            chunk_ingress_state: &chunk_ingress_state,
+            block_index: &block_index,
+            mempool_guard: &mempool_guard,
+        };
+        irys_actors::tx_selector::select_best_txs(
+            parent_hash,
+            irys_types::UnixTimestamp::from_secs(parent_timestamp.as_secs() + 1),
+            &ctx,
+        )
+        .await
+    })
+    .await;
+    Ok(result)
+}
 
 /// Regression test for: stale txid in CachedDataRoot.txid_set blocks block production.
 ///
@@ -124,52 +178,7 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
     // Now trigger the bug: call select_best_txs via get_best_mempool_tx.
     // In debug builds, the debug_assert! in get_data_tx_in_parallel_inner will panic.
     // In release builds, it would log a warning and skip the stale txid.
-    let parent = genesis_node
-        .get_block_by_height(genesis_node.get_canonical_chain_height().await)
-        .await?;
-
-    // Spawn in a separate task so the panic is caught as a JoinError.
-    // We clone all Arc-wrapped values; references to them are valid within the async move block.
-    let db = genesis_node.node_ctx.db.clone();
-    let block_tree = genesis_node.node_ctx.block_tree_guard.clone();
-    let reth_adapter = genesis_node.node_ctx.reth_node_adapter.clone();
-    let config = genesis_node.node_ctx.config.clone();
-    let mempool_guard = genesis_node.node_ctx.mempool_guard.clone();
-    let chunk_ingress_state = genesis_node.node_ctx.chunk_ingress_state.clone();
-    let block_index = genesis_node
-        .node_ctx
-        .block_producer_inner
-        .block_index
-        .clone();
-    let parent_hash = parent.block_hash;
-    let parent_timestamp = {
-        let tree = block_tree.read();
-        tree.get_block(&parent_hash)
-            .expect("parent block should exist")
-            .timestamp_secs()
-    };
-
-    let result = tokio::task::spawn(async move {
-        // This test exercises stale-txid handling in the publish-candidate path,
-        // not Submit-ledger expiry, so no tx is expired here.
-        let ctx = irys_actors::tx_selector::TxSelectionContext {
-            block_tree: &block_tree,
-            db: &db,
-            reth_adapter: &reth_adapter,
-            config: &config,
-            mempool_state: mempool_guard.atomic_state(),
-            chunk_ingress_state: &chunk_ingress_state,
-            block_index: &block_index,
-            mempool_guard: &mempool_guard,
-        };
-        irys_actors::tx_selector::select_best_txs(
-            parent_hash,
-            irys_types::UnixTimestamp::from_secs(parent_timestamp.as_secs() + 1),
-            &ctx,
-        )
-        .await
-    })
-    .await;
+    let result = select_best_txs_in_task(&genesis_node).await?;
 
     // The spawned task should panic due to debug_assert
     assert!(
@@ -181,6 +190,82 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
 
     genesis_node.stop().await;
 
+    Ok(())
+}
+
+/// The mempool prune removes a tx first. The cache service scrubs the txid
+/// from `CachedDataRoot.txid_set` later, on its own thread. Tx selection in
+/// that window sees a publish candidate that is in neither the mempool nor
+/// the DB. It must skip the txid, also in debug builds.
+#[tokio::test]
+async fn pruned_txid_before_cache_scrub_is_skipped() -> eyre::Result<()> {
+    let config = NodeConfig::testing()
+        .with_consensus(|consensus| {
+            consensus.chunk_size = 32;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
+            consensus.block_migration_depth = 1;
+            consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        })
+        .with_genesis_peer_discovery_timeout(1000);
+    let genesis_signer = config.signer();
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("GENESIS", 30)
+        .await;
+    genesis_node.mine_blocks(2).await?;
+
+    let chunks: Vec<[u8; 32]> = vec![[11; 32], [21; 32], [31; 32]];
+    let data: Vec<u8> = chunks.iter().flat_map(|c| c.iter()).copied().collect();
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data.len() as u64)
+        .await?;
+    let anchor = genesis_node.get_anchor().await?;
+    let data_tx = genesis_signer.create_publish_transaction(
+        data,
+        anchor,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let data_tx = genesis_signer.sign_transaction(data_tx)?;
+    let txid = data_tx.header.id;
+    let data_root = data_tx.header.data_root;
+    genesis_node.post_data_tx_raw(&data_tx.header).await;
+    genesis_node.wait_for_mempool(txid, 30).await?;
+
+    // A stored proof makes the data root a publish candidate.
+    let ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        data_root,
+        chunks.iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        anchor,
+    )?;
+    genesis_node.node_ctx.db.update_cache_eyre(|db_tx| {
+        irys_database::store_ingress_proof_checked(db_tx, &ingress_proof, &genesis_signer)
+    })?;
+
+    // The mempool half of the prune, without the cache scrub that follows it.
+    genesis_node
+        .node_ctx
+        .mempool_guard
+        .atomic_state()
+        .batch_prune_data_txs(&[(txid, anchor)])
+        .await?;
+    genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
+        let cdr = irys_database::cached_data_root_by_data_root(db_tx, data_root)?
+            .expect("CachedDataRoot should exist");
+        assert!(cdr.txid_set.contains(&txid), "the scrub has not run yet");
+        Ok(())
+    })?;
+
+    let selected = select_best_txs_in_task(&genesis_node)
+        .await?
+        .expect("tx selection must not panic on a pruned txid")?;
+    assert!(
+        selected.publish_tx.txs.iter().all(|tx| tx.id != txid),
+        "a pruned tx must not be promoted"
+    );
+
+    genesis_node.stop().await;
     Ok(())
 }
 
