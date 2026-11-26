@@ -211,8 +211,8 @@ struct TipMove {
     fcu_markers: ForkChoiceMarkers,
     /// Set when the move abandons blocks of the old canonical chain.
     reorg_event: Option<ReorgEvent>,
-    /// The first epoch block among the new canonical blocks.
-    epoch_block: Option<Arc<IrysBlockHeader>>,
+    /// The epoch blocks among the new canonical blocks, oldest first.
+    epoch_blocks: Vec<Arc<IrysBlockHeader>>,
     /// Set on a reorg whose old fork has an epoch block and whose new fork has
     /// none: the highest epoch height on the old fork. The storage modules
     /// applied that epoch's assignments, so the new tip's assignments are sent
@@ -1269,7 +1269,7 @@ impl BlockTreeServiceInner {
         // equation, so it's always tip + `depth` that's kept around
         cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
-        let (epoch_block, orphaned_epoch_height, reorg_event, blocks_to_confirm) = if is_reorg {
+        let (epoch_blocks, orphaned_epoch_height, reorg_event, blocks_to_confirm) = if is_reorg {
             // Handle blockchain reorganization
             let fork_block: Arc<IrysBlockHeader> = split.lca.header().clone();
             let fork_hash: BlockHash = fork_block.block_hash;
@@ -1328,10 +1328,10 @@ impl BlockTreeServiceInner {
             };
 
             // Was there a new epoch block found in the reorg
-            let new_epoch_block = self.epoch_block_in_tip_move(&event.new_fork);
+            let new_epoch_blocks = self.epoch_blocks_in_tip_move(&event.new_fork);
             // A new fork epoch block sends its own events. Without one, an
             // orphaned epoch block's assignments must be replaced.
-            let orphaned_epoch_height = if new_epoch_block.is_none() {
+            let orphaned_epoch_height = if new_epoch_blocks.is_empty() {
                 event
                     .old_fork
                     .iter()
@@ -1344,7 +1344,7 @@ impl BlockTreeServiceInner {
             };
 
             (
-                new_epoch_block,
+                new_epoch_blocks,
                 orphaned_epoch_height,
                 Some(event),
                 blocks_to_confirm,
@@ -1363,16 +1363,16 @@ impl BlockTreeServiceInner {
             // tip, oldest first. Confirm each one and detect an epoch block among
             // them, as on a reorg.
             let blocks_to_confirm: Vec<Arc<SealedBlock>> = split.new_divergent;
-            let new_epoch_block = self.epoch_block_in_tip_move(&blocks_to_confirm);
+            let new_epoch_blocks = self.epoch_blocks_in_tip_move(&blocks_to_confirm);
 
-            (new_epoch_block, None, None, blocks_to_confirm)
+            (new_epoch_blocks, None, None, blocks_to_confirm)
         };
 
         Ok(Some(TipMove {
             new_tip,
             fcu_markers,
             reorg_event,
-            epoch_block,
+            epoch_blocks,
             orphaned_epoch_height,
             blocks_to_confirm,
             old_tip_diff,
@@ -1389,7 +1389,7 @@ impl BlockTreeServiceInner {
             new_tip,
             fcu_markers,
             reorg_event,
-            epoch_block,
+            epoch_blocks,
             orphaned_epoch_height,
             blocks_to_confirm,
             old_tip_diff,
@@ -1397,9 +1397,12 @@ impl BlockTreeServiceInner {
         } = tip_move;
 
         // Send epoch events which require a Read lock
-        if let Some(epoch_block) = epoch_block {
-            // Send the epoch events
-            self.send_epoch_events(&epoch_block)?;
+        if !epoch_blocks.is_empty() {
+            // Each epoch block's events, oldest first, as if the blocks had
+            // arrived one at a time: services end on the newest epoch.
+            for epoch_block in &epoch_blocks {
+                self.send_epoch_events(epoch_block)?;
+            }
         } else if let Some(orphaned_epoch_height) = orphaned_epoch_height {
             // Only the assignments: the canonical chain has no epoch block to
             // expire partitions or prune the cache for.
@@ -1871,35 +1874,22 @@ impl BlockTreeServiceInner {
             .is_multiple_of(self.config.consensus.epoch.num_blocks_in_epoch)
     }
 
-    /// The epoch block among the blocks a tip move adds, oldest first.
+    /// The epoch blocks among the blocks a tip move adds, oldest first.
     ///
-    /// A tip move holds at most one epoch block. It adds at most
-    /// `block_tree_depth` blocks: the tree holds no more, and a reorg whose
-    /// fork point would be pruned is refused (`validate_reorg_within_cache_window`).
-    /// `Config::validate` requires `num_blocks_in_epoch > block_tree_depth`
-    /// on real networks, so those blocks span at most one epoch boundary.
-    ///
-    /// Test run modes skip that check and may use shorter epochs. A move that
-    /// crossed two boundaries would send only the first epoch block's events,
-    /// and services would keep stale assignments until the next epoch update.
-    /// That is never handled: it panics, so a config or test that reaches it
-    /// fails loudly instead.
-    fn epoch_block_in_tip_move(&self, added: &[Arc<SealedBlock>]) -> Option<Arc<IrysBlockHeader>> {
-        let mut epoch_blocks = added
+    /// On a real network a move holds at most one: it adds at most
+    /// `block_tree_depth` blocks (the tree holds no more, and a reorg whose
+    /// fork point would be pruned is refused, `validate_reorg_within_cache_window`),
+    /// and `Config::validate` requires `num_blocks_in_epoch > block_tree_depth`.
+    /// Test run modes skip that check and use short epochs, so a move there can
+    /// cross several boundaries; every epoch block is returned so each one's
+    /// events are sent.
+    fn epoch_blocks_in_tip_move(&self, added: &[Arc<SealedBlock>]) -> Vec<Arc<IrysBlockHeader>> {
+        added
             .iter()
             .map(|sb| sb.header())
-            .filter(|header| self.is_epoch_block(header));
-        let first = epoch_blocks.next().map(Arc::clone);
-        let skipped: Vec<u64> = epoch_blocks.map(|header| header.height).collect();
-        assert!(
-            skipped.is_empty(),
-            "tip move crosses more than one epoch boundary: first epoch block at {:?}, also {skipped:?} \
-             (num_blocks_in_epoch {} must be > block_tree_depth {})",
-            first.as_ref().map(|header| header.height),
-            self.config.consensus.epoch.num_blocks_in_epoch,
-            self.config.consensus.block_tree_depth,
-        );
-        first
+            .filter(|header| self.is_epoch_block(header))
+            .map(Arc::clone)
+            .collect()
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %epoch_block.block_hash(), block.height = epoch_block.height()))]
@@ -4195,6 +4185,66 @@ mod tests {
             vec![(0, old_epoch_block.height)],
             "a reorg that orphans the only epoch block must send the new tip's \
              snapshot (its epoch height) once, at the orphaned update height"
+        );
+    }
+
+    /// A reorg onto a fork that crosses two epoch boundaries (test configs
+    /// allow epochs shorter than the block tree) sends each epoch block's
+    /// assignments, oldest first, so the storage modules end on the newest
+    /// epoch, as if the blocks had arrived one at a time.
+    #[tokio::test]
+    async fn reorg_across_two_epoch_boundaries_sends_each_epoch_oldest_first() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (height 1, canonical)
+        //         -> a (1) -> first_epoch (2) -> c (3) -> second_epoch (4), heavier only at its tip
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let a = h.add_child_block(&genesis, 5_010, true);
+        let first_epoch = h.add_child_block(&a, 5_020, true);
+        let c = h.add_child_block(&first_epoch, 5_030, true);
+        let second_epoch = h.add_child_block(&c, 5_300, true);
+        set_mappable_epoch_snapshot(&mut h, first_epoch.block_hash, first_epoch.height);
+        set_mappable_epoch_snapshot(&mut h, second_epoch.block_hash, second_epoch.height);
+        // The lighter fork blocks are validated first; the tip stays put.
+        for block in [&a, &first_epoch, &c] {
+            h.inner
+                .on_block_validation_finished(block.block_hash, ValidationResult::Valid)
+                .await
+                .expect("validation result handled");
+        }
+        assert_eq!(
+            h.tip(),
+            old_tip.block_hash,
+            "the lighter fork does not move the tip"
+        );
+        drain_assignment_update_heights(&mut h);
+
+        h.inner
+            .on_block_validation_finished(second_epoch.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            second_epoch.block_hash,
+            "the tip moves to the heavier fork"
+        );
+        let event = h
+            .reorg_rx
+            .try_recv()
+            .expect("the tip move abandons the old fork");
+        assert_eq!(block_hashes(&event.old_fork), vec![old_tip.block_hash]);
+        assert_eq!(
+            drain_assignment_update_heights(&mut h),
+            vec![
+                (first_epoch.height, first_epoch.height),
+                (second_epoch.height, second_epoch.height),
+            ],
+            "each crossed epoch block's assignments are sent, oldest first"
         );
     }
 
