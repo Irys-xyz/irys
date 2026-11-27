@@ -172,13 +172,16 @@ fn placement_key(a: &PartitionAssignment) -> (u32, H256) {
 /// that must wait because it leaves its recorded ledger slot with a record
 /// newer than the epoch: otherwise the first drive in config order would
 /// wait and leave the partition unserved, and reversing the order would serve
-/// it. Config order only breaks ties.
+/// it. Among the drives that can take it, one whose recorded slot already
+/// matches the assignment is preferred: another holder would have to leave
+/// its slot and repack its data first. Config order only breaks ties.
 fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
     let by_hash: HashMap<H256, PartitionAssignment> = inputs
         .assignments
         .iter()
         .map(|a| (a.partition_hash, *a))
         .collect();
+    let mut exact = HashMap::new();
     let mut eligible = HashMap::new();
     let mut first = HashMap::new();
     for (i, (_, f)) in inputs.drives.iter().enumerate() {
@@ -189,10 +192,14 @@ fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
             first.entry(h).or_insert(i);
             if !waits_on_a_newer_record(inputs, p, new) {
                 eligible.entry(h).or_insert(i);
+                if (p.ledger, p.slot) == (new.ledger_id, new.slot_index) {
+                    exact.entry(h).or_insert(i);
+                }
             }
         }
     }
     first.extend(eligible);
+    first.extend(exact);
     first
 }
 
@@ -1069,6 +1076,34 @@ mod tests {
     /// Two drives record the same assigned partition. The one that must wait
     /// (it leaves its recorded slot with a record newer than the epoch) does
     /// not shadow the one that can take the assignment, in either order.
+    /// Two eligible holders of one partition: the drive whose recorded slot
+    /// already matches the assignment keeps it, whatever the config order.
+    /// The other waits, so no drive leaves its slot and repacks for nothing.
+    #[test]
+    fn duplicate_holder_on_the_assigned_slot_wins_whatever_the_order() {
+        let on_slot = rec(v2(1, Some(DataLedger::Publish), Some(0), 100));
+        let off_slot = rec(v2(1, Some(DataLedger::Submit), Some(3), 50));
+        let a = [pa(1, Some(DataLedger::Publish), Some(0))];
+        for on_slot_first in [true, false] {
+            let drives = if on_slot_first {
+                [drive(0, on_slot.clone()), drive(1, off_slot.clone())]
+            } else {
+                [drive(0, off_slot.clone()), drive(1, on_slot.clone())]
+            };
+            let (on, off) = if on_slot_first { (0, 1) } else { (1, 0) };
+            let (d, u) = run(&drives, &a, true);
+            assert_eq!(d[on].verdict, DriveVerdict::Ours, "{on_slot_first}");
+            assert_eq!(d[on].action, DriveAction::Assign(a[0]), "{on_slot_first}");
+            assert_eq!(
+                d[off].verdict,
+                DriveVerdict::Wait(WaitReason::DuplicateHolder(h(1))),
+                "{on_slot_first}"
+            );
+            assert_eq!(d[off].action, DriveAction::Idle, "{on_slot_first}");
+            assert!(u.is_empty());
+        }
+    }
+
     #[test]
     fn eligible_duplicate_holder_wins_whatever_the_order() {
         let newer = rec(v2(1, Some(DataLedger::Publish), Some(1), 150));

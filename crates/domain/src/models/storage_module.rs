@@ -2228,6 +2228,9 @@ thread_local! {
     /// Test open fails to read the packing params back after writing them.
     static FAIL_OPEN_PARAMS_READBACK: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test open fails the per-submodule re-read in the uniform-record check.
+    static FAIL_OPEN_UNIFORM_READBACK: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
     /// Test open fails after a slot exit rewrote a submodule's interval file
     /// and before its coverage drop and the packing params rebind.
     static FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS: std::cell::Cell<bool> =
@@ -2768,19 +2771,38 @@ impl StorageModule {
             None => None,
         };
 
-        let recorded_uniform = initial_recorded.is_some_and(|first| {
-            storage_module_info.submodules.iter().all(|(_, dir)| {
+        // Every submodule file records the first file's slot. A read error is
+        // an I/O fault, as for the first read above: the open fails.
+        let mut recorded_uniform = initial_recorded.is_some();
+        if let Some(first) = initial_recorded {
+            for (_, dir) in &storage_module_info.submodules {
                 let path = config
                     .node_config
                     .base_directory
                     .join(dir)
                     .join(PACKING_PARAMS_FILE_NAME);
-                PackingParams::from_toml(&path).is_ok_and(|params| {
-                    (params.partition_hash, params.ledger, params.slot)
-                        == (first.partition_hash, first.ledger, first.slot)
-                })
-            })
-        });
+                let read = PackingParams::from_toml(&path);
+                #[cfg(test)]
+                let read = if FAIL_OPEN_UNIFORM_READBACK.with(|flag| flag.replace(false)) {
+                    Err(eyre!("injected packing params re-read failure"))
+                } else {
+                    read
+                };
+                let params = read.wrap_err_with(|| {
+                    format!(
+                        "storage module {}: packing params at {} could not be read back at open; \
+                         check the drive before restarting",
+                        storage_module_info.id,
+                        path.display()
+                    )
+                })?;
+                if (params.partition_hash, params.ledger, params.slot)
+                    != (first.partition_hash, first.ledger, first.slot)
+                {
+                    recorded_uniform = false;
+                }
+            }
+        }
 
         // Attempt to load a global set of intervals from the submodules
         let mut loaded_intervals: NoditMap<
@@ -4492,7 +4514,13 @@ impl StorageModule {
     /// or the capacity assignment another writer already stored. A different
     /// hash stays too. `Ok(None)` means the module was not reset. A read
     /// error is `Err` and does not reset. The capacity assignment is stored
-    /// before the lock is released; `Err` means it was not stored.
+    /// before the lock is released. `Err` leaves the in-memory assignment
+    /// unchanged, but not always the file: a store whose rename succeeded and
+    /// whose directory sync then failed leaves the file naming capacity. The
+    /// caller stops the node on `Err`. The next open is consistent either
+    /// way: the `Uninitialized` image and the row clears ran before the store,
+    /// so a file on the old slot repeats the exit and a file on capacity opens
+    /// with the old data already relabelled.
     ///
     /// The reset keeps the partition's entropy, as
     /// [`Self::reset_keep_entropy_with_assignment`] does. `Ok(Some(spans))`
@@ -23250,6 +23278,31 @@ mod tests {
             &module_info(&sub, Some(leave_ledger(&config, hash))),
             &config,
         )?;
+        Ok(())
+    }
+
+    /// The uniform-record check re-reads each submodule's packing file. A
+    /// read error there is an I/O fault too: the open fails naming the file,
+    /// instead of opening the module as "not uniform".
+    #[test]
+    fn open_fails_when_a_submodule_file_cannot_be_reread() -> eyre::Result<()> {
+        let hash = H256::repeat_byte(0x67);
+        let (_tmp, config, sub) = seed_assigned_entropy("open_reread_fails", hash)?;
+        FAIL_OPEN_UNIFORM_READBACK.with(|flag| flag.set(true));
+        let result = StorageModule::new(
+            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
+            &config,
+        );
+        FAIL_OPEN_UNIFORM_READBACK.with(|flag| flag.set(false));
+        let text = format!(
+            "{:#}",
+            result.expect_err("a re-read failure fails the open")
+        );
+        assert!(
+            text.contains("could not be read back at open")
+                && text.contains("injected packing params re-read failure"),
+            "{text}"
+        );
         Ok(())
     }
 
