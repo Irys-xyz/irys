@@ -4248,6 +4248,61 @@ mod tests {
         );
     }
 
+    /// A plain extension (no reorg) that adds two epoch blocks at once sends
+    /// each one's assignments, oldest first. Blocks that tie the tip's
+    /// cumulative difficulty are validated without becoming the tip, so the
+    /// heavier block after them moves the tip by three blocks.
+    #[tokio::test]
+    async fn extension_across_two_epoch_boundaries_sends_each_epoch_oldest_first() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+
+        // tip (height 1) -> first_epoch (2, tie) -> b (3, tie) -> second_epoch (4, heavier)
+        let tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let first_epoch = h.add_child_block(&tip, 5_100, true);
+        let b = h.add_child_block(&first_epoch, 5_100, true);
+        let second_epoch = h.add_child_block(&b, 5_300, true);
+        set_mappable_epoch_snapshot(&mut h, first_epoch.block_hash, first_epoch.height);
+        set_mappable_epoch_snapshot(&mut h, second_epoch.block_hash, second_epoch.height);
+        for block in [&first_epoch, &b] {
+            h.inner
+                .on_block_validation_finished(block.block_hash, ValidationResult::Valid)
+                .await
+                .expect("validation result handled");
+        }
+        assert_eq!(
+            h.tip(),
+            tip.block_hash,
+            "a cumulative difficulty tie keeps the tip"
+        );
+        drain_assignment_update_heights(&mut h);
+
+        h.inner
+            .on_block_validation_finished(second_epoch.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            second_epoch.block_hash,
+            "the tip extends by three blocks"
+        );
+        assert!(
+            h.reorg_rx.try_recv().is_err(),
+            "an extension is not a reorg"
+        );
+        assert_eq!(
+            drain_assignment_update_heights(&mut h),
+            vec![
+                (first_epoch.height, first_epoch.height),
+                (second_epoch.height, second_epoch.height),
+            ],
+            "each epoch block the extension adds sends its assignments, oldest first"
+        );
+    }
+
     /// A tip extension whose fork point is below the post-prune cache window aborts
     /// before prune, as a deep reorg does: prune would evict the oldest new block before
     /// it is confirmed. With `block_tree_depth = 2`, a two-block extension is one block

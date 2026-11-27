@@ -1426,6 +1426,34 @@ pub enum EntropyRejection {
     NotUninitialized(Option<ChunkType>),
 }
 
+/// Whether a drive fault on an assignment path panics instead of aborting.
+/// Off in production. Only tests turn it on, through
+/// [`panic_on_drive_fault_for_tests`]; a runtime switch, not a feature, so a
+/// workspace build that unifies `test-utils` into the node still aborts.
+static DRIVE_FAULT_PANICS: AtomicBool = AtomicBool::new(false);
+
+/// Stop the node for a drive fault on a path that changes what a drive holds
+/// (an I/O error, or a broken drive-state invariant). The process aborts at
+/// once, as a crash would: nothing (disk lane, chunk migration, data sync,
+/// packing, a module's drop flush) can write to a drive after it, and the
+/// next open recovers exactly as from a crash. The operator must look at the
+/// drive before restarting. Tests that turned panics on get a catchable panic.
+pub fn stop_node_for_drive_fault(message: &str) -> ! {
+    if DRIVE_FAULT_PANICS.load(Ordering::SeqCst) {
+        panic!("{message}");
+    }
+    error!("{message}");
+    eprintln!("{message}");
+    std::process::abort()
+}
+
+/// Make [`stop_node_for_drive_fault`] panic instead of aborting, so a test
+/// can catch it. Process-wide; never called by the node.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn panic_on_drive_fault_for_tests() {
+    DRIVE_FAULT_PANICS.store(true, Ordering::SeqCst);
+}
+
 /// Defines how chunk data is processed and stored
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ChunkType {
@@ -3174,11 +3202,11 @@ impl StorageModule {
     /// idempotent slot exit, open-time reconciles).
     pub fn expect_drive_io<T>(&self, operation: &str, result: eyre::Result<T>) -> T {
         result.unwrap_or_else(|err| {
-            panic!(
+            stop_node_for_drive_fault(&format!(
                 "storage module {} ({}): {operation} failed; stopping the node: {err:#}",
                 self.id,
                 self.display_paths()
-            )
+            ))
         })
     }
 

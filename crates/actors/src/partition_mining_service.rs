@@ -1309,6 +1309,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "expire the ledger slot to capacity failed; stopping the node")]
     fn failed_expiry_reset_stops_the_node() {
+        irys_domain::panic_on_drive_fault_for_tests();
         let (_tmp, config, storage_module, partition_hash) =
             open_expiry_module(0x77, Some((DataLedger::Submit, 0)));
         let submit = storage_module.partition_assignment().expect("assigned");
@@ -1324,6 +1325,7 @@ mod tests {
     /// before the index or the assignment change.
     #[test]
     fn unreadable_packing_params_on_expiry_stops_the_node_unchanged() {
+        irys_domain::panic_on_drive_fault_for_tests();
         let (tmp_dir, config, storage_module, partition_hash) =
             open_expiry_module(0x82, Some((DataLedger::Submit, 0)));
         let submit = storage_module.partition_assignment().expect("assigned");

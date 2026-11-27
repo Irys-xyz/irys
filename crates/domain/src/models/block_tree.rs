@@ -1958,9 +1958,9 @@ mod tests {
     }
 
     /// Restore does not read drives: a corrupt packing file does not stop
-    /// the epoch replay (startup judges that drive Foreign and does not open
-    /// it). This test stores no start block header, so restore stops at that
-    /// read, after the replay.
+    /// the epoch replay (startup refuses that drive afterwards and stops the
+    /// node). This test stores no start block header, so restore stops at
+    /// that read, after the replay.
     #[test]
     fn corrupt_packing_file_does_not_stop_restore() -> eyre::Result<()> {
         use crate::{BlockIndex, BlockIndexReadGuard, EpochReplayData, PACKING_PARAMS_FILE_NAME};

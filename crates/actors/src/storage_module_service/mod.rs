@@ -22,6 +22,7 @@ use irys_domain::{
     drive_verdict::{
         self, ChainIdentity, DriveAction, DriveDecision, DriveFile, DriveVerdict, VerdictInputs,
     },
+    stop_node_for_drive_fault,
 };
 use irys_types::{
     Config, H256, PartitionChunkRange, TokioServiceHandle, Traced, partition::PartitionAssignment,
@@ -526,11 +527,11 @@ impl StorageModuleServiceInner {
                 // Open fails when the file cannot be read back, and every
                 // store updates the record, so an open module always has one.
                 let params = module.recorded_params().unwrap_or_else(|| {
-                    panic!(
+                    stop_node_for_drive_fault(&format!(
                         "storage module {} ({}) has no recorded packing params; stopping the node",
                         module.id,
                         module.display_paths()
-                    )
+                    ))
                 });
                 let file = DriveFile::Recorded(params);
                 (path, file)
@@ -577,7 +578,9 @@ impl StorageModuleServiceInner {
         // records this node's miner and chain, so a foreign record here is a
         // broken invariant.
         let decisions = drive_verdict::decide(&inputs).unwrap_or_else(|err| {
-            panic!("open drive failed the verdict; stopping the node: {err:#}")
+            stop_node_for_drive_fault(&format!(
+                "open drive failed the verdict; stopping the node: {err:#}"
+            ))
         });
         let unplaced = drive_verdict::unplaced(&inputs, &decisions);
         self.log_changed_decisions(&ids, &decisions, &unplaced, &inputs, update_height);
@@ -1695,6 +1698,7 @@ mod assignment_reset_tests {
     /// Apply `message` and return the message it panics with.
     async fn message_panics(harness: &mut Harness, message: StorageModuleServiceMessage) -> String {
         use futures::FutureExt as _;
+        irys_domain::panic_on_drive_fault_for_tests();
         let payload = std::panic::AssertUnwindSafe(harness.inner.apply_assignment(message))
             .catch_unwind()
             .await
