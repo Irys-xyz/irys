@@ -196,5 +196,6 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // finally, mine block to ensure block is valid
     node.mine_block().await?;
 
+    node.stop().await;
     Ok(())
 }

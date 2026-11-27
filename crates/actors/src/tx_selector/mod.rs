@@ -33,7 +33,7 @@ use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     BlockHash, BoundedFee, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
-    IrysTransactionId,
+    IrysTransactionId, TxKnownStatus,
 };
 use irys_types::{Config, H256, IrysTransactionCommon as _, U256};
 use irys_types::{IrysAddress, SystemLedger, UnixTimestamp};
@@ -982,13 +982,30 @@ async fn get_publish_txs_and_proofs(
                 missing.txids = ?missing,
                 "Skipping txids not found in mempool or DB (stale CachedDataRoot references)"
             );
-            // this debug assert is here so that tests that cause this behaviour hard-fail
-            debug_assert!(
-                missing.is_empty(),
-                "Stale txids found in publish candidate lookup — \
-                 CachedDataRoot.txid_set contains txids not in mempool or DB: {:?}",
-                missing
-            );
+            // The mempool prune removes a tx first, and the cache service
+            // scrubs it from `txid_set` later on its own thread. Until the
+            // scrub ends, the pruned txid is still a candidate. The prune
+            // marks the tx invalid in the same write, so a missing txid that
+            // the mempool knows as invalid is expected. Any other missing
+            // txid is a stale reference, and this debug assert makes tests
+            // that cause one hard-fail. Limit: a pruned txid whose scrub is
+            // lost (the worker returned an error) also passes while the txid
+            // stays in the mempool's bounded invalid-tx cache.
+            if cfg!(debug_assertions) {
+                let mut unexplained = Vec::new();
+                for txid in &missing {
+                    let status = ctx.mempool_state.mempool_data_tx_status(txid).await;
+                    if !matches!(status, Some(TxKnownStatus::InvalidSeen)) {
+                        unexplained.push(*txid);
+                    }
+                }
+                debug_assert!(
+                    unexplained.is_empty(),
+                    "Stale txids found in publish candidate lookup — \
+                     CachedDataRoot.txid_set contains txids not in mempool or DB: {:?}",
+                    unexplained
+                );
+            }
         }
 
         // Same priority as the Submit ledger: highest fee first, then tx id.

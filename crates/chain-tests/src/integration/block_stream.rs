@@ -150,6 +150,7 @@ async fn observed_emitted_with_data_roots_and_replays_without_gap() -> eyre::Res
         "observed emitted once per block"
     );
 
+    node.stop().await;
     Ok(())
 }
 
@@ -177,6 +178,7 @@ async fn finalized_emitted_on_migration() -> eyre::Result<()> {
     assert_eq!(finalized.kind(), "finalized");
     assert_eq!(finalized.block_hash(), Some(blk1.block_hash));
 
+    node.stop().await;
     Ok(())
 }
 
@@ -214,6 +216,7 @@ async fn observed_seq_precedes_finalized_for_same_block() -> eyre::Result<()> {
         finalized.seq
     );
 
+    node.stop().await;
     Ok(())
 }
 
@@ -301,6 +304,7 @@ async fn internal_reads_by_height_and_range() -> eyre::Result<()> {
         .await?;
     assert_eq!(resp.status(), 400);
 
+    node.stop().await;
     Ok(())
 }
 
@@ -555,6 +559,7 @@ async fn internal_events_endpoint_pages_and_regimes() -> eyre::Result<()> {
             && page["lowest_retained_seq"].is_u64()
     );
 
+    node.stop().await;
     Ok(())
 }
 
@@ -627,6 +632,7 @@ async fn internal_events_equal_sse_over_same_range() -> eyre::Result<()> {
         "expected a finalized frame"
     );
 
+    node.stop().await;
     Ok(())
 }
 

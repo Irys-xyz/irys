@@ -214,5 +214,6 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     );
     info!("Test passed: Unpromoted tx received refund, promoted tx did not");
 
+    node.stop().await;
     Ok(())
 }
