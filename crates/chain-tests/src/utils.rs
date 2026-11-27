@@ -481,7 +481,19 @@ impl IrysNodeTest<()> {
     }
 
     #[diag_slow(state = "start".to_string())]
-    pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
+    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
+        match self.try_start().await {
+            Ok(node) => node,
+            Err((err, _stopped)) => panic!("node cannot be initialized: {err:?}"),
+        }
+    }
+
+    /// [`Self::start`], returning the error and the stopped node when the
+    /// node cannot be initialized (for example a drive it refuses to start
+    /// with) instead of panicking. The node's runtime is dropped on a
+    /// blocking thread on that error (dropping it inside an async context
+    /// panics), and that drop is awaited.
+    pub async fn try_start(mut self) -> Result<IrysNodeTest<IrysNodeCtx>, (eyre::Report, Self)> {
         let held_listeners = self.held_listeners.take();
         let span = self.get_span();
         let _enter = span.enter();
@@ -600,8 +612,19 @@ impl IrysNodeTest<()> {
             .expect("Failed to create IrysNode")
             .with_runtime_handle(runtime.handle().clone());
 
-        let node_ctx = node.start().await.expect("node cannot be initialized");
-        IrysNodeTest {
+        let node_ctx = match node.start().await {
+            Ok(node_ctx) => node_ctx,
+            Err(err) => {
+                // Drop the node's runtime off the async thread and wait for
+                // it, so the failed start releases its databases before the
+                // caller starts again.
+                tokio::task::spawn_blocking(move || drop(runtime))
+                    .await
+                    .expect("runtime shutdown should not panic");
+                return Err((err, self));
+            }
+        };
+        Ok(IrysNodeTest {
             cfg: node_ctx.config.node_config.clone(),
             node_ctx,
             temp_dir: self.temp_dir,
@@ -612,7 +635,7 @@ impl IrysNodeTest<()> {
             runtime: RuntimeGuard(Some(runtime)),
             time_mode_override: self.time_mode_override,
             held_listeners: None,
-        }
+        })
     }
 
     fn get_span(&self) -> tracing::Span {

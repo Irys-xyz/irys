@@ -12,17 +12,18 @@ use irys_types::{
     Config, DataLedger, H256, IrysAddress, PartitionChunkOffset, partition::PartitionAssignment,
     partition_chunk_offset_ie,
 };
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::storage_module::{
     PACKING_PARAMS_FILE_NAME, PACKING_PARAMS_VERSION, PackingParams, StorageModuleInfo,
 };
 
-/// What was found at a drive's `packing_params.toml`.
+/// What was found at a drive's `packing_params.toml`. A file that cannot be
+/// read or parsed is not a drive state: it stops the node (see
+/// [`drive_verdict_inputs_from_disk`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriveFile {
     Missing,
-    Unreadable(String),
     Recorded(PackingParams),
 }
 
@@ -48,7 +49,6 @@ pub struct VerdictInputs<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriveVerdict {
-    Foreign(String),
     Ours,
     Empty,
     Released,
@@ -87,8 +87,6 @@ impl std::fmt::Display for WaitReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriveAction {
-    /// Foreign: never open, never touch.
-    Skip,
     /// Open (or keep) with no assignment; file untouched.
     Idle,
     /// Hold this partition (same hash: keep bytes; Empty/Released: wipe and bind).
@@ -111,7 +109,6 @@ impl DriveVerdict {
     /// Lower-case name for logs.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Foreign(_) => "foreign",
             Self::Ours => "ours",
             Self::Empty => "empty",
             Self::Released => "released",
@@ -119,10 +116,9 @@ impl DriveVerdict {
         }
     }
 
-    /// Why a drive is Foreign or Wait; empty otherwise.
+    /// Why a drive waits; empty otherwise.
     pub fn reason(&self) -> String {
         match self {
-            Self::Foreign(why) => why.clone(),
             Self::Wait(why) => why.to_string(),
             Self::Ours | Self::Empty | Self::Released => String::new(),
         }
@@ -133,7 +129,6 @@ impl DriveAction {
     /// Lower-case name for logs.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Skip => "skip",
             Self::Idle => "idle",
             Self::Assign(_) => "assign",
             Self::Clear => "clear",
@@ -141,6 +136,9 @@ impl DriveAction {
     }
 }
 
+/// Why a recorded file is not this node's to manage: a newer file version,
+/// another chain id, or another packing address. Such a drive stops the
+/// node; it is never skipped.
 fn is_foreign(p: &PackingParams, id: &ChainIdentity) -> Option<String> {
     if p.version.is_some_and(|v| v > PACKING_PARAMS_VERSION) {
         return Some(format!("newer file version {:?}", p.version));
@@ -168,7 +166,7 @@ fn placement_key(a: &PartitionAssignment) -> (u32, H256) {
     (rank, a.partition_hash)
 }
 
-/// First holder (in id order) of each assigned hash among non-foreign drives.
+/// First holder (in id order) of each assigned hash.
 fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
     let assigned: HashSet<H256> = inputs
         .assignments
@@ -178,7 +176,6 @@ fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
     let mut m = HashMap::new();
     for (i, (_, f)) in inputs.drives.iter().enumerate() {
         if let DriveFile::Recorded(p) = f
-            && is_foreign(p, inputs.identity).is_none()
             && let Some(h) = p.partition_hash
             && assigned.contains(&h)
         {
@@ -186,13 +183,6 @@ fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
         }
     }
     m
-}
-
-fn any_unreadable(inputs: &VerdictInputs<'_>) -> bool {
-    inputs
-        .drives
-        .iter()
-        .any(|(_, f)| matches!(f, DriveFile::Unreadable(_)))
 }
 
 /// Assignments no drive holds, in placement order.
@@ -211,10 +201,21 @@ fn unheld(inputs: &VerdictInputs<'_>) -> Vec<PartitionAssignment> {
 /// Decide, for every drive, what it keeps or receives. Exactly one decision per
 /// drive, in id order. Pure: no I/O, clocks or global state.
 ///
-/// Unreadable-suppression rule: while any drive is `Unreadable` we cannot know
-/// it does not hold an unheld assignment, so no unheld assignment is placed on
-/// an Empty or Released drive; leftovers are reported by [`unplaced`].
-pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
+/// A drive whose file is foreign (newer version, other chain id, other
+/// packing address) is an error naming its path: the node does not run with
+/// a drive it cannot account for, and no drive is skipped.
+pub fn decide(inputs: &VerdictInputs<'_>) -> eyre::Result<Vec<DriveDecision>> {
+    for (path, file) in inputs.drives {
+        if let DriveFile::Recorded(p) = file
+            && let Some(why) = is_foreign(p, inputs.identity)
+        {
+            eyre::bail!(
+                "drive {} is not this node's: {why} (packing params at {})",
+                path.display(),
+                path.join(PACKING_PARAMS_FILE_NAME).display()
+            );
+        }
+    }
     let holders = first_holders(inputs);
     let by_hash: HashMap<H256, PartitionAssignment> = inputs
         .assignments
@@ -228,10 +229,6 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
         .enumerate()
         .map(|(id, (path, file))| {
             let c = match file {
-                DriveFile::Unreadable(e) => Classified::new(
-                    DriveVerdict::Foreign(format!("unreadable: {e}")),
-                    DriveAction::Skip,
-                ),
                 DriveFile::Missing => Classified::new(DriveVerdict::Empty, DriveAction::Idle),
                 DriveFile::Recorded(p) => classify(inputs, id, p, &holders, &by_hash),
             };
@@ -245,17 +242,15 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> Vec<DriveDecision> {
         })
         .collect();
 
-    if !any_unreadable(inputs) {
-        let mut queue = unheld(inputs).into_iter();
-        for want in [DriveVerdict::Empty, DriveVerdict::Released] {
-            for d in out.iter_mut().filter(|d| d.verdict == want) {
-                if let Some(a) = queue.next() {
-                    d.action = DriveAction::Assign(a);
-                }
+    let mut queue = unheld(inputs).into_iter();
+    for want in [DriveVerdict::Empty, DriveVerdict::Released] {
+        for d in out.iter_mut().filter(|d| d.verdict == want) {
+            if let Some(a) = queue.next() {
+                d.action = DriveAction::Assign(a);
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// One drive's verdict, action and stamp flags.
@@ -287,9 +282,6 @@ fn classify(
     by_hash: &HashMap<H256, PartitionAssignment>,
 ) -> Classified {
     let ident = inputs.identity;
-    if let Some(why) = is_foreign(p, ident) {
-        return Classified::new(DriveVerdict::Foreign(why), DriveAction::Skip);
-    }
     let Some(hash) = p.partition_hash else {
         return Classified::new(DriveVerdict::Empty, DriveAction::Idle);
     };
@@ -353,12 +345,13 @@ pub fn unplaced(
 
 /// Reads each configured drive's `packing_params.toml`, in configured order
 /// (index = module id). A relative path resolves against the base directory.
-/// No file is `Missing`; a file that cannot be checked, read or parsed is
-/// `Unreadable`. Never writes.
+/// No file is `Missing` (a fresh drive). A file that cannot be checked, read
+/// or parsed is an error naming the drive: the node stops rather than skip a
+/// drive whose contents it cannot know. Never writes.
 pub fn drive_verdict_inputs_from_disk(
     config: &Config,
     paths: &[PathBuf],
-) -> Vec<(PathBuf, DriveFile)> {
+) -> eyre::Result<Vec<(PathBuf, DriveFile)>> {
     paths
         .iter()
         .map(|path| {
@@ -369,13 +362,22 @@ pub fn drive_verdict_inputs_from_disk(
                 .join(PACKING_PARAMS_FILE_NAME);
             let found = match file.try_exists() {
                 Ok(false) => DriveFile::Missing,
-                Ok(true) => match PackingParams::from_toml(&file) {
-                    Ok(params) => DriveFile::Recorded(params),
-                    Err(err) => DriveFile::Unreadable(format!("{err:#}")),
-                },
-                Err(err) => DriveFile::Unreadable(format!("stat {}: {err}", file.display())),
+                Ok(true) => {
+                    DriveFile::Recorded(PackingParams::from_toml(&file).map_err(|err| {
+                        eyre::eyre!(
+                            "drive {}: packing params at {} cannot be read: {err:#}",
+                            path.display(),
+                            file.display()
+                        )
+                    })?)
+                }
+                Err(err) => eyre::bail!(
+                    "drive {}: packing params at {} cannot be checked: {err}",
+                    path.display(),
+                    file.display()
+                ),
             };
-            (path.clone(), found)
+            Ok((path.clone(), found))
         })
         .collect()
 }
@@ -391,16 +393,15 @@ fn applied_assignment(decision: &DriveDecision, file: &DriveFile) -> Option<Part
     };
     let recorded = match file {
         DriveFile::Recorded(params) => params.partition_hash,
-        DriveFile::Missing | DriveFile::Unreadable(_) => None,
+        DriveFile::Missing => None,
     };
     recorded
         .is_none_or(|hash| hash == assignment.partition_hash)
         .then_some(assignment)
 }
 
-/// One [`StorageModuleInfo`] per drive that is opened, in id order. `Skip`
-/// drives are left out, so a module id is always its configured path index
-/// and ids can have gaps.
+/// One [`StorageModuleInfo`] per configured drive, in id order: every drive
+/// is opened, and a module id is its configured path index.
 pub fn storage_module_infos(
     drives: &[(PathBuf, DriveFile)],
     decisions: &[DriveDecision],
@@ -408,7 +409,6 @@ pub fn storage_module_infos(
 ) -> Vec<StorageModuleInfo> {
     decisions
         .iter()
-        .filter(|decision| decision.action != DriveAction::Skip)
         .map(|decision| StorageModuleInfo {
             id: decision.id,
             partition_assignment: applied_assignment(decision, &drives[decision.id].1),
@@ -424,7 +424,8 @@ pub fn storage_module_infos(
 /// miner, reading the configured drives' files: [`decide`] then
 /// [`storage_module_infos`]. Startup is never in sync. For tests that open
 /// drives without a running node; a node applies verdicts at startup
-/// (`chain.rs`) and in the storage module service.
+/// (`chain.rs`) and in the storage module service. Panics where startup
+/// would fail: an unreadable or foreign drive file.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn startup_storage_module_infos(
     snapshot: &crate::EpochSnapshot,
@@ -442,23 +443,23 @@ pub fn startup_storage_module_infos(
         miner: config.node_config.miner_address(),
     };
     let assignments = snapshot.get_partition_assignments(identity.miner);
-    let drives = drive_verdict_inputs_from_disk(config, &paths);
+    let drives = drive_verdict_inputs_from_disk(config, &paths).expect("drive files are readable");
     let decisions = decide(&VerdictInputs {
         drives: &drives,
         assignments: &assignments,
         epoch_height: snapshot.epoch_height,
         in_sync: false,
         identity: &identity,
-    });
+    })
+    .expect("no drive is foreign");
     let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
         .expect("num_chunks_in_partition fits u32");
     storage_module_infos(&drives, &decisions, num_chunks)
 }
 
 /// Logs one INFO line per drive (id, path, verdict, action, recorded and
-/// applied partition, reason), an ERROR for each drive that is not opened, a
-/// WARN for each drive left waiting, and a WARN for each assignment no drive
-/// holds or receives.
+/// applied partition, reason), a WARN for each drive left waiting, and a WARN
+/// for each assignment no drive holds or receives.
 pub fn log_decisions(
     inputs: &VerdictInputs<'_>,
     decisions: &[DriveDecision],
@@ -468,7 +469,7 @@ pub fn log_decisions(
         let file = &inputs.drives[decision.id].1;
         let recorded = match file {
             DriveFile::Recorded(params) => params.partition_hash,
-            DriveFile::Missing | DriveFile::Unreadable(_) => None,
+            DriveFile::Missing => None,
         };
         let applied = infos
             .iter()
@@ -477,7 +478,6 @@ pub fn log_decisions(
         let (verdict, reason) = (decision.verdict.name(), decision.verdict.reason());
         let reason = reason.as_str();
         let action = match &decision.action {
-            DriveAction::Skip => "skip",
             DriveAction::Idle => "idle",
             DriveAction::Assign(_) if applied.is_none() => "idle until the service reassigns",
             DriveAction::Assign(_) => "assign",
@@ -497,12 +497,6 @@ pub fn log_decisions(
             "drive verdict"
         );
         match &decision.verdict {
-            DriveVerdict::Foreign(why) => error!(
-                storage_module.id = decision.id,
-                storage_module.path = %decision.path.display(),
-                drive.reason = %why,
-                "drive is not opened and is left untouched"
-            ),
             DriveVerdict::Wait(why) => warn!(
                 storage_module.id = decision.id,
                 storage_module.path = %decision.path.display(),
@@ -595,9 +589,24 @@ mod tests {
             in_sync: sync,
             identity: &id,
         };
-        let d = decide(&inputs);
+        let d = decide(&inputs).expect("no foreign drive");
         let u = unplaced(&inputs, &d);
         (d, u)
+    }
+    /// The error `decide` returns for these drives.
+    fn decide_err(drives: &[(PathBuf, DriveFile)], assignments: &[PartitionAssignment]) -> String {
+        let id = ident();
+        let inputs = VerdictInputs {
+            drives,
+            assignments,
+            epoch_height: 100,
+            in_sync: true,
+            identity: &id,
+        };
+        format!(
+            "{:#}",
+            decide(&inputs).expect_err("a foreign drive stops the node")
+        )
     }
     fn assigned_hash(d: &DriveDecision) -> Option<H256> {
         match &d.action {
@@ -606,60 +615,28 @@ mod tests {
         }
     }
 
+    /// A foreign drive file (other miner, other chain, newer version) is an
+    /// error naming the drive: the node does not start with it, and no drive
+    /// is skipped.
     #[test]
-    fn foreign_other_miner_is_skipped() {
-        let mut p = v2(1, Some(DataLedger::Publish), Some(0), 10);
-        p.packing_address = IrysAddress::from([0xBB; 20]);
-        let (d, _) = run(
-            &[drive(0, rec(p))],
-            &[pa(1, Some(DataLedger::Publish), Some(0))],
-            true,
-        );
-        assert!(matches!(d[0].verdict, DriveVerdict::Foreign(_)));
-        assert_eq!(d[0].action, DriveAction::Skip);
-    }
-
-    #[test]
-    fn foreign_other_chain_is_skipped() {
-        let mut p = v2(1, Some(DataLedger::Publish), Some(0), 10);
-        p.chain_id = Some(CHAIN + 1);
-        let (d, _) = run(
-            &[drive(0, rec(p))],
-            &[pa(1, Some(DataLedger::Publish), Some(0))],
-            true,
-        );
-        assert!(matches!(d[0].verdict, DriveVerdict::Foreign(_)));
-        assert_eq!(d[0].action, DriveAction::Skip);
-    }
-
-    #[test]
-    fn foreign_newer_version_is_skipped() {
-        let mut p = v2(1, Some(DataLedger::Publish), Some(0), 10);
-        p.version = Some(3);
-        let (d, _) = run(
-            &[drive(0, rec(p))],
-            &[pa(1, Some(DataLedger::Publish), Some(0))],
-            true,
-        );
-        assert!(matches!(d[0].verdict, DriveVerdict::Foreign(_)));
-        assert_eq!(d[0].action, DriveAction::Skip);
-    }
-
-    #[test]
-    fn unreadable_is_skipped_and_its_partition_is_not_placed() {
-        let drives = [
-            drive(0, DriveFile::Unreadable("EIO".into())),
-            drive(1, DriveFile::Missing),
-            drive(2, rec(v2(60, Some(DataLedger::Submit), Some(0), 10))),
-        ];
-        let a = [pa(1, Some(DataLedger::Publish), Some(0))];
-        let (d, u) = run(&drives, &a, true);
-        assert_eq!(d[0].action, DriveAction::Skip);
-        assert_eq!(d[1].verdict, DriveVerdict::Empty);
-        assert_eq!(d[1].action, DriveAction::Idle);
-        assert_eq!(d[2].verdict, DriveVerdict::Released);
-        assert_eq!(d[2].action, DriveAction::Clear);
-        assert_eq!(u, a.to_vec());
+    fn foreign_drive_is_an_error_naming_the_drive() {
+        let assigned = [pa(1, Some(DataLedger::Publish), Some(0))];
+        let mut other_miner = v2(1, Some(DataLedger::Publish), Some(0), 10);
+        other_miner.packing_address = IrysAddress::from([0xBB; 20]);
+        let mut other_chain = v2(1, Some(DataLedger::Publish), Some(0), 10);
+        other_chain.chain_id = Some(CHAIN + 1);
+        let mut newer = v2(1, Some(DataLedger::Publish), Some(0), 10);
+        newer.version = Some(3);
+        for (params, why) in [
+            (other_miner, "other packing address"),
+            (other_chain, "other chain id"),
+            (newer, "newer file version"),
+        ] {
+            let drives = [drive(0, DriveFile::Missing), drive(1, rec(params))];
+            let err = decide_err(&drives, &assigned);
+            assert!(err.contains("/d1"), "{err}");
+            assert!(err.contains(why), "{err}");
+        }
     }
 
     #[test]
@@ -994,10 +971,10 @@ mod tests {
     }
 
     /// Startup reads each drive's file without writing: no file is Missing,
-    /// a corrupt file is Unreadable, and a relative path resolves against the
-    /// base directory.
+    /// and a relative path resolves against the base directory. A corrupt
+    /// file is an error naming the drive and its file.
     #[test]
-    fn inputs_from_disk_reads_missing_unreadable_and_recorded() {
+    fn inputs_from_disk_reads_missing_and_recorded_and_fails_on_corrupt() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("drive_inputs")
             .build();
@@ -1021,17 +998,10 @@ mod tests {
         params.write_to_disk(&held_file).unwrap();
         let held_bytes = std::fs::read(&held_file).unwrap();
 
-        let inputs = drive_verdict_inputs_from_disk(
-            &config,
-            &[missing.clone(), corrupt.clone(), held.clone()],
-        );
-
+        let inputs = drive_verdict_inputs_from_disk(&config, &[missing.clone(), held.clone()])
+            .expect("readable drives");
         assert_eq!(inputs[0], (missing.clone(), DriveFile::Missing));
-        assert!(
-            matches!(&inputs[1], (p, DriveFile::Unreadable(e)) if *p == corrupt && e.contains("packing params")),
-            "{inputs:?}"
-        );
-        assert_eq!(inputs[2], (held, DriveFile::Recorded(params)));
+        assert_eq!(inputs[1], (held.clone(), DriveFile::Recorded(params)));
         assert!(
             !tmp.path()
                 .join(&missing)
@@ -1039,17 +1009,40 @@ mod tests {
                 .exists()
         );
         assert_eq!(std::fs::read(&held_file).unwrap(), held_bytes);
+
+        let err = drive_verdict_inputs_from_disk(&config, &[missing, corrupt, held])
+            .expect_err("a corrupt file stops the node");
+        let err = format!("{err:#}");
+        assert!(err.contains("drive corrupt"), "{err}");
+        assert!(err.contains(&corrupt_file.display().to_string()), "{err}");
     }
 
-    /// Skipped drives are not opened and ids keep their path index. Open
-    /// never replaces a recorded partition: a Released drive that receives a
-    /// new partition opens idle, as does a Clear drive.
+    /// An unreadable file (an I/O error, here a directory in its place) is an
+    /// error naming the drive.
     #[test]
-    fn infos_leave_out_skipped_and_never_replace_a_recorded_partition() {
-        let mut foreign = v2(9, None, None, 10);
-        foreign.packing_address = IrysAddress::from([0xBB; 20]);
+    fn inputs_from_disk_fails_on_an_unreadable_file() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("drive_inputs_eio")
+            .build();
+        let mut node_config = irys_types::NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let unreadable = PathBuf::from("unreadable");
+        std::fs::create_dir_all(tmp.path().join(&unreadable).join(PACKING_PARAMS_FILE_NAME))
+            .unwrap();
+        let err = drive_verdict_inputs_from_disk(&config, &[unreadable])
+            .expect_err("an unreadable file stops the node");
+        let err = format!("{err:#}");
+        assert!(err.contains("drive unreadable"), "{err}");
+    }
+
+    /// Every drive is opened and ids are path indexes. Open never replaces a
+    /// recorded partition: a Released drive that receives a new partition
+    /// opens idle, as does a Clear drive.
+    #[test]
+    fn infos_open_every_drive_and_never_replace_a_recorded_partition() {
         let drives = [
-            drive(0, rec(foreign)),
+            drive(0, rec(v2(9, Some(DataLedger::Submit), Some(3), 200))),
             drive(1, rec(v2(1, Some(DataLedger::Publish), Some(0), 10))),
             drive(2, DriveFile::Missing),
             drive(3, rec(v2(7, None, None, 10))),
@@ -1079,6 +1072,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
+                (0, None, PathBuf::from("/d0")),
                 (1, Some(h(1)), PathBuf::from("/d1")),
                 (2, Some(h(2)), PathBuf::from("/d2")),
                 (3, None, PathBuf::from("/d3")),

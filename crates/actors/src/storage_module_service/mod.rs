@@ -90,12 +90,10 @@ pub struct StorageModuleServiceInner {
     shutdown: Shutdown,
     /// Last heal pass left unrepaired work — run periodic heal until clear.
     index_heal_needs_retry: bool,
-    /// Assignment update whose reset did not finish. The next tick retries it.
+    /// Assignment update that could not be applied yet (the block index has
+    /// no genesis item). The next tick retries it. A drive I/O error is never
+    /// retried: it stops the node.
     pending_assignment: Option<StorageModuleServiceMessage>,
-    /// Configured drives that startup could not read, so did not open. They
-    /// stay out of every runtime verdict but still block new placements:
-    /// such a drive may hold a partition that looks unheld.
-    unreadable_at_startup: Vec<usize>,
     /// Verdict and action last logged per module id. INFO is logged only for
     /// a change.
     last_decisions: HashMap<usize, (DriveVerdict, DriveAction)>,
@@ -148,18 +146,19 @@ impl HealScheduleProbe {
     }
 }
 
-/// Reset did not finish. The assignment is unchanged. The service stays up
-/// and retries the same update.
+/// The update could not be applied yet for a reason that is not a drive
+/// error (the block index has no genesis item). Nothing was changed. The
+/// service stays up and retries the same update.
 #[derive(Debug)]
-struct ResetNotFinished;
+struct UpdateNotApplied;
 
-impl std::fmt::Display for ResetNotFinished {
+impl std::fmt::Display for UpdateNotApplied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("storage module reset did not finish")
+        f.write_str("partition assignment update not applied yet")
     }
 }
 
-impl std::error::Error for ResetNotFinished {}
+impl std::error::Error for UpdateNotApplied {}
 
 /// Send one packing request without blocking.
 ///
@@ -217,8 +216,8 @@ struct PendingSpan {
     while_uninitialized: bool,
 }
 
-fn is_reset_not_finished(err: &eyre::Report) -> bool {
-    err.downcast_ref::<ResetNotFinished>().is_some()
+fn is_update_not_applied(err: &eyre::Report) -> bool {
+    err.downcast_ref::<UpdateNotApplied>().is_some()
 }
 
 impl std::fmt::Debug for StorageModuleServiceInner {
@@ -238,7 +237,6 @@ impl StorageModuleServiceInner {
         service_senders: ServiceSenders,
         config: Config,
         shutdown: Shutdown,
-        unreadable_at_startup: Vec<usize>,
     ) -> Self {
         let submodules_config = match StorageSubmodulesConfig::load(
             config.node_config.base_directory.clone(),
@@ -260,7 +258,6 @@ impl StorageModuleServiceInner {
             resize_done: None,
             index_heal_needs_retry: true, // force heal until first pass reports clean
             pending_assignment: None,
-            unreadable_at_startup,
             last_decisions: HashMap::new(),
             last_unplaced: Vec::new(),
             pending_ranges: HashMap::new(),
@@ -352,27 +349,18 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Apply one assignment update. A reset that does not finish is stored and
-    /// retried. The service stays up. Any other error still aborts it.
+    /// Apply one assignment update. An update that cannot be applied yet
+    /// (no genesis item in the block index) is stored and retried. A drive
+    /// I/O error panics inside and stops the node. Any other error aborts the
+    /// service.
     async fn apply_assignment(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
         match self.handle_message(msg.clone()).await {
             Ok(()) => {
-                // A wipe that is still open must stay pending. Clearing it
-                // here lets a later message that matches memory skip the reset.
-                if self.any_reset_incomplete() {
-                    debug!(
-                        "storage module reset is still incomplete; the assignment update stays pending"
-                    );
-                    self.pending_assignment = Some(msg);
-                } else {
-                    self.pending_assignment = None;
-                }
+                self.pending_assignment = None;
                 Ok(())
             }
-            Err(err) if is_reset_not_finished(&err) => {
-                debug!(
-                    "storage module reset did not finish; the assignment update will be retried"
-                );
+            Err(err) if is_update_not_applied(&err) => {
+                debug!("partition assignment update not applied yet; it will be retried: {err}");
                 self.pending_assignment = Some(msg);
                 Ok(())
             }
@@ -472,11 +460,6 @@ impl StorageModuleServiceInner {
         if let Err(e) = self.start_partition_resize() {
             error!("finalized partition resize failed; will retry: {e:?}");
         }
-        // A stored retry is applied by the run loop before this tick. This
-        // covers the case where that retry was dropped and no message remains.
-        if self.pending_assignment.is_none() {
-            self.finish_dropped_resets();
-        }
         let storage_modules = {
             let guard = self.storage_modules.read().unwrap();
             guard.clone()
@@ -521,23 +504,15 @@ impl StorageModuleServiceInner {
     }
 
     /// One verdict input per open module, in id order, from the module's
-    /// in-memory record of its packing file. Files are never read here: a
-    /// file that became unreadable while running changes nothing. A drive
-    /// startup could not read is listed as unreadable so that no partition is
-    /// placed while it may hold one. A drive startup skipped as foreign is
-    /// left out. Returns the inputs and the module id of each entry.
+    /// in-memory record of its packing file. Files are never read here: every
+    /// write path updates that record. Every configured drive is open, so the
+    /// ids are the configured path indexes. Returns the inputs and the module
+    /// id of each entry.
     fn runtime_drives(
         &self,
         modules: &BTreeMap<usize, Arc<StorageModule>>,
     ) -> (Vec<(PathBuf, DriveFile)>, Vec<usize>) {
-        let mut ids: Vec<usize> = modules.keys().copied().collect();
-        ids.extend(
-            self.unreadable_at_startup
-                .iter()
-                .filter(|id| !modules.contains_key(id)),
-        );
-        ids.sort_unstable();
-        ids.dedup();
+        let ids: Vec<usize> = modules.keys().copied().collect();
         let drives = ids
             .iter()
             .map(|id| {
@@ -547,15 +522,17 @@ impl StorageModuleServiceInner {
                     .get(*id)
                     .cloned()
                     .unwrap_or_default();
-                let file = match modules.get(id) {
-                    Some(module) => match module.recorded_params() {
-                        Some(params) => DriveFile::Recorded(params),
-                        None => DriveFile::Unreadable(
-                            "open module has no recorded packing params".into(),
-                        ),
-                    },
-                    None => DriveFile::Unreadable("not readable at startup".into()),
-                };
+                let module = &modules[id];
+                // Open fails when the file cannot be read back, and every
+                // store updates the record, so an open module always has one.
+                let params = module.recorded_params().unwrap_or_else(|| {
+                    panic!(
+                        "storage module {} ({}) has no recorded packing params; stopping the node",
+                        module.id,
+                        module.display_paths()
+                    )
+                });
+                let file = DriveFile::Recorded(params);
                 (path, file)
             })
             .collect();
@@ -581,7 +558,7 @@ impl StorageModuleServiceInner {
         };
         let Some(genesis) = self.block_index.read().get_item(0) else {
             warn!("block index has no genesis item; the assignment update will be retried");
-            return Err(ResetNotFinished.into());
+            return Err(UpdateNotApplied.into());
         };
         let identity = ChainIdentity {
             chain_id: self.config.consensus.chain_id,
@@ -596,30 +573,18 @@ impl StorageModuleServiceInner {
             in_sync,
             identity: &identity,
         };
-        let decisions = drive_verdict::decide(&inputs);
+        // Every open drive passed the same check at startup, and every store
+        // records this node's miner and chain, so a foreign record here is a
+        // broken invariant.
+        let decisions = drive_verdict::decide(&inputs).unwrap_or_else(|err| {
+            panic!("open drive failed the verdict; stopping the node: {err:#}")
+        });
         let unplaced = drive_verdict::unplaced(&inputs, &decisions);
         self.log_changed_decisions(&ids, &decisions, &unplaced, &inputs, update_height);
 
-        // One module's reset error must not decide the others. Remember the
-        // failure and keep going; the same update is retried. A module
-        // already at its target takes no action on that retry.
-        let mut reset_not_finished: Option<eyre::Report> = None;
         for decision in &decisions {
-            // A drive startup could not read has no module: never touched.
-            let Some(module) = modules.get(&ids[decision.id]) else {
-                continue;
-            };
-            if let Err(err) = self.apply_decision(module, decision, epoch_height) {
-                reset_not_finished.get_or_insert(err);
-            }
-        }
-
-        if let Some(err) = reset_not_finished {
-            // A later module may already be on its new ledger. Heal did not
-            // run. The periodic pass covers that module until this retry
-            // completes and heal runs for the settled set.
-            self.index_heal_needs_retry = true;
-            return Err(err);
+            let module = &modules[&ids[decision.id]];
+            self.apply_decision(module, decision, epoch_height);
         }
 
         // After assignments settle: best-effort gap-scan + index backfill for every
@@ -651,7 +616,7 @@ impl StorageModuleServiceInner {
             }
             let target = match &decision.action {
                 DriveAction::Assign(assignment) => Some(*assignment),
-                DriveAction::Skip | DriveAction::Idle | DriveAction::Clear => None,
+                DriveAction::Idle | DriveAction::Clear => None,
             };
             info!(
                 storage_module.id = id,
@@ -666,17 +631,6 @@ impl StorageModuleServiceInner {
                 update.height = update_height,
                 "drive verdict changed"
             );
-            // A drive the service will not touch (no recorded packing params
-            // in memory, or a foreign or unreadable file) is an operator
-            // problem: an ERROR once, when the service first sees it.
-            if let DriveVerdict::Foreign(why) = &decision.verdict {
-                error!(
-                    storage_module.id = id,
-                    storage_module.path = %decision.path.display(),
-                    drive.reason = %why,
-                    "drive is left untouched: {why}"
-                );
-            }
             self.last_decisions.insert(id, now);
         }
         let hashes: Vec<H256> = unplaced.iter().map(|a| a.partition_hash).collect();
@@ -693,16 +647,16 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Apply one drive's decision to its open module. Every error is
-    /// [`ResetNotFinished`]: the same update is retried, the service stays up.
+    /// Apply one drive's decision to its open module. A drive I/O error
+    /// while changing what the drive holds stops the node (see
+    /// [`StorageModule::expect_drive_io`]); there is no retry.
     fn apply_decision(
         &mut self,
         module: &Arc<StorageModule>,
         decision: &DriveDecision,
         epoch_height: u64,
-    ) -> eyre::Result<()> {
+    ) {
         match &decision.action {
-            DriveAction::Skip => Ok(()),
             DriveAction::Idle => self.idle_module(module),
             DriveAction::Clear => self.clear_released(module, epoch_height),
             DriveAction::Assign(assignment) => {
@@ -711,10 +665,8 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Idle: no assignment in memory, file and bytes untouched. A wipe whose
-    /// marker is durable is finished (it already started); an in-memory flag
-    /// with no marker is cleared, as open would.
-    fn idle_module(&mut self, module: &Arc<StorageModule>) -> eyre::Result<()> {
+    /// Idle: no assignment in memory, file and bytes untouched.
+    fn idle_module(&mut self, module: &Arc<StorageModule>) {
         if let Some(held) = module.park_assignment() {
             warn!(
                 storage_module.id = module.id,
@@ -726,19 +678,11 @@ impl StorageModuleServiceInner {
         }
         // The module cannot pack. A span kept for a full channel is dropped.
         self.pending_ranges.remove(&module.id);
-        if module.reset_incomplete() {
-            self.settle_incomplete_reset(module)?;
-        }
-        Ok(())
     }
 
     /// Released: wipe and record no partition. The drive is Empty.
-    fn clear_released(
-        &mut self,
-        module: &Arc<StorageModule>,
-        epoch_height: u64,
-    ) -> eyre::Result<()> {
-        let range = self.reset_and_install(module, None, epoch_height)?;
+    fn clear_released(&mut self, module: &Arc<StorageModule>, epoch_height: u64) {
+        let range = self.reset_and_install(module, None, epoch_height);
         // The module is unassigned. Do not pack a span the channel deferred.
         self.pending_ranges.remove(&module.id);
         info!(
@@ -746,7 +690,6 @@ impl StorageModuleServiceInner {
             packing.interval = ?range,
             "released storage module wiped; it records no partition now"
         );
-        Ok(())
     }
 
     /// Hold `next`. Keeps the bytes when the module already holds that
@@ -759,10 +702,10 @@ impl StorageModuleServiceInner {
         next: PartitionAssignment,
         stamp_v2: bool,
         epoch_height: u64,
-    ) -> eyre::Result<()> {
+    ) {
         match module.partition_assignment() {
             Some(current) if current.partition_hash == next.partition_hash => {
-                self.keep_or_move(module, current, next, stamp_v2, epoch_height)
+                self.keep_or_move(module, current, next, stamp_v2, epoch_height);
             }
             // A released drive receiving another partition.
             Some(_) => self.install_new(module, next, epoch_height),
@@ -770,96 +713,70 @@ impl StorageModuleServiceInner {
                 let recorded = module
                     .recorded_params()
                     .filter(|params| params.partition_hash == Some(next.partition_hash));
-                // A parked module can carry a flag from a failed release wipe.
-                // Settle it as open would: no marker keeps the bytes and the
-                // recorded slot can be taken back; a durable marker finishes
-                // the wipe, and the adoption below packs every `Uninitialized`
-                // span. Without this, the flag sent a matching slot to a full
-                // wipe.
-                if recorded.is_some() && module.reset_incomplete() {
-                    self.settle_incomplete_reset(module)?;
-                }
                 match recorded {
-                    Some(params) if !module.reset_incomplete() => {
-                        if params.ledger == next.ledger_id && params.slot == next.slot_index {
-                            // An idle module takes back the partition its file
-                            // records, without a reset or a file write. Only its
-                            // Uninitialized spans are packed. A submodule whose
-                            // file records no partition yet (added while the
-                            // module was parked; its spans are Uninitialized)
-                            // is bound by storing the assignment instead, so a
-                            // restart does not reset what packing writes there.
-                            if !module.adopt_recorded(next)
-                                && let Err(err) = module.assign_partition(next, epoch_height)
-                            {
-                                warn!(
-                                    storage_module.id = module.id,
-                                    "held partition was not stored on every submodule; the update will be retried: {err:#}"
-                                );
-                                return Err(ResetNotFinished.into());
-                            }
-                            self.enqueue_uninitialized(module);
-                            if stamp_v2 {
-                                self.stamp_v2(module, next, epoch_height);
-                            }
-                            Ok(())
-                        } else if params.ledger.is_none() {
-                            // Capacity gaining a ledger keeps the bytes.
-                            if let Err(err) = module.assign_partition(next, epoch_height) {
-                                warn!(
-                                    storage_module.id = module.id,
-                                    "held partition was not stored; the update will be retried: {err:#}"
-                                );
-                                return Err(ResetNotFinished.into());
-                            }
-                            self.enqueue_uninitialized(module);
-                            Ok(())
-                        } else {
-                            // Leaving a ledger: the data belongs to the old
-                            // slot. The entropy belongs to the partition.
-                            self.leave_slot(module, next, epoch_height)
+                    Some(params)
+                        if params.ledger == next.ledger_id && params.slot == next.slot_index =>
+                    {
+                        // An idle module takes back the partition its file
+                        // records, without a reset or a file write. Only its
+                        // Uninitialized spans are packed. A submodule whose
+                        // file records no partition yet (added while the
+                        // module was parked; its spans are Uninitialized)
+                        // is bound by storing the assignment instead, so a
+                        // restart does not reset what packing writes there.
+                        if !module.adopt_recorded(next) {
+                            module.expect_drive_io(
+                                "store the held partition on every submodule",
+                                module.assign_partition(next, epoch_height),
+                            );
+                        }
+                        self.enqueue_uninitialized(module);
+                        if stamp_v2 {
+                            self.stamp_v2(module, next, epoch_height);
                         }
                     }
-                    _ => self.install_new(module, next, epoch_height),
+                    Some(params) if params.ledger.is_none() => {
+                        // Capacity gaining a ledger keeps the bytes.
+                        module.expect_drive_io(
+                            "store the held partition's ledger slot",
+                            module.assign_partition(next, epoch_height),
+                        );
+                        self.enqueue_uninitialized(module);
+                    }
+                    // Leaving a ledger: the data belongs to the old slot. The
+                    // entropy belongs to the partition.
+                    Some(_) => self.leave_slot(module, next, epoch_height),
+                    None => self.install_new(module, next, epoch_height),
                 }
             }
         }
     }
 
-    /// Reset and install `next` under one write lock, then pack it. A failed
-    /// reset leaves the module as it was, so the retry takes this path again.
+    /// Reset and install `next` under one write lock, then pack it.
     fn install_new(
         &mut self,
         module: &Arc<StorageModule>,
         next: PartitionAssignment,
         epoch_height: u64,
-    ) -> eyre::Result<()> {
-        let range = self.reset_and_install(module, Some(next), epoch_height)?;
+    ) {
+        let range = self.reset_and_install(module, Some(next), epoch_height);
         self.enqueue_packing(module, range);
-        Ok(())
     }
 
     /// Leave a ledger slot and keep the partition. Entropy does not depend on
     /// the ledger or slot, so only the old slot's data becomes
     /// `Uninitialized` and only `Uninitialized` spans are packed, not the
-    /// whole partition. A failed reset leaves the previous assignment, so
-    /// the retry takes this path again.
+    /// whole partition.
     fn leave_slot(
         &mut self,
         module: &Arc<StorageModule>,
         next: PartitionAssignment,
         epoch_height: u64,
-    ) -> eyre::Result<()> {
-        let spans = match module.reset_keep_entropy_with_assignment(next, epoch_height) {
-            Ok(spans) => spans,
-            Err(err) => {
-                warn!(
-                    storage_module.id = module.id,
-                    "storage module slot exit failed: {err:#}"
-                );
-                return Err(ResetNotFinished.into());
-            }
-        };
+    ) {
+        let spans = module.expect_drive_io(
+            "leave the ledger slot (keep-entropy reset)",
+            module.reset_keep_entropy_with_assignment(next, epoch_height),
+        );
         info!(
             storage_module.id = module.id,
             partition.hash = %next.partition_hash,
@@ -872,7 +789,6 @@ impl StorageModuleServiceInner {
         // turned what still needs packing into `Uninitialized`.
         self.pending_ranges.remove(&module.id);
         self.enqueue_uninitialized(module);
-        Ok(())
     }
 
     /// Send every Uninitialized span of `module`. A full channel keeps them.
@@ -889,30 +805,26 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Rewrite an Ours drive's file as v2 (an in-sync epoch). A failure keeps
-    /// the drive's verdict, which is judged from memory, and is not retried.
+    /// Rewrite an Ours drive's file as v2 (an in-sync epoch).
     fn stamp_v2(
         &self,
         module: &Arc<StorageModule>,
         assignment: PartitionAssignment,
         epoch_height: u64,
     ) {
-        match module.assign_partition(assignment, epoch_height) {
-            Ok(()) => info!(
-                storage_module.id = module.id,
-                epoch.height = epoch_height,
-                "packing params rewritten as v2"
-            ),
-            Err(err) => error!(
-                storage_module.id = module.id,
-                "packing params could not be rewritten as v2; the drive keeps its verdict from memory: {err:#}"
-            ),
-        }
+        module.expect_drive_io(
+            "rewrite packing params as v2",
+            module.assign_partition(assignment, epoch_height),
+        );
+        info!(
+            storage_module.id = module.id,
+            epoch.height = epoch_height,
+            "packing params rewritten as v2"
+        );
     }
 
     /// The module holds `next`'s partition in memory. A ledger or slot change
-    /// is applied; otherwise an unfinished reset is settled and, when due,
-    /// the file is stamped v2.
+    /// is applied; otherwise the file is stamped v2 when due.
     fn keep_or_move(
         &mut self,
         module: &Arc<StorageModule>,
@@ -920,172 +832,46 @@ impl StorageModuleServiceInner {
         next: PartitionAssignment,
         stamp_v2: bool,
         epoch_height: u64,
-    ) -> eyre::Result<()> {
+    ) {
         if (current.ledger_id, current.slot_index) == (next.ledger_id, next.slot_index) {
-            if module.reset_incomplete() {
-                // The ledger and slot match memory. No marker: open would
-                // keep the bytes, so clear the in-memory flag. A marker: the
-                // wipe already started, so finish it. `reset` does not write
-                // the assignment. The partition is still assigned, so the
-                // span is packed. A full channel keeps it.
-                if let Some(range) = self.settle_incomplete_reset(module)?
-                    && module.partition_assignment().is_some()
-                {
-                    self.enqueue_packing(module, range);
-                }
-            }
-            // Settling (no marker, or a finished wipe) keeps this
-            // assignment, so the stamp this in-sync update asks for applies.
-            if stamp_v2 && module.partition_assignment().is_some() {
+            if stamp_v2 {
                 self.stamp_v2(module, next, epoch_height);
             }
-            return Ok(());
+            return;
         }
         if current.ledger_id.is_some() {
             // Leaving a ledger slot (ledger→capacity, or ledger→ledger). Clear
             // the old slot's data and index and store the new assignment
-            // under one write lock; the partition's entropy stays. A failed
-            // reset leaves the previous assignment, so the retry still sees
-            // the change.
-            return self.leave_slot(module, next, epoch_height);
+            // under one write lock; the partition's entropy stays.
+            self.leave_slot(module, next, epoch_height);
+            return;
         }
-        // Capacity→ledger does not reset. Entropy and Data stay unless a
-        // durable marker says the wipe already started. Clear an in-memory
-        // flag that has no marker before the assign. Otherwise the retry of
-        // this same update sees a matching ledger and finishes a wipe this
-        // transition must not do. A marker is finished first, so both applies
-        // agree with open. That clear publishes Uninitialized while the
-        // partition stays assigned, so the span is packed. A full channel
-        // keeps it. Pack even when the ledger write fails: the retry must not
-        // be the only send. No marker: send only a span the channel has not
-        // accepted that is still Uninitialized. Do not pack offsets that are
-        // already Entropy or Data.
-        let wiped = if module.reset_incomplete() {
-            self.settle_incomplete_reset(module)?
-        } else {
-            None
-        };
-        let stored = module.assign_partition(next, epoch_height);
-        if let Some(range) = wiped {
-            self.enqueue_packing(module, range);
-        }
-        if let Err(err) = stored {
-            // The packing-params write failed. The in-memory assignment is
-            // unchanged. Retry the same update. A span the channel did not
-            // accept stays until a later send.
-            warn!(
-                storage_module.id = module.id,
-                "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
-            );
-            return Err(ResetNotFinished.into());
-        }
-        if wiped.is_none() {
-            self.enqueue_deferred_uninitialized(module);
-        }
-        Ok(())
+        // Capacity→ledger does not reset: Entropy and Data stay. Send only a
+        // span the channel has not accepted that is still Uninitialized.
+        module.expect_drive_io(
+            "store the capacity-to-ledger assignment",
+            module.assign_partition(next, epoch_height),
+        );
+        self.enqueue_deferred_uninitialized(module);
     }
 
-    /// Finish a reset that stopped before its marker was dropped.
-    /// Does not write the assignment. A caller that must install a new
-    /// assignment uses [`Self::reset_and_install`].
-    fn finish_reset(&self, module: &Arc<StorageModule>) -> eyre::Result<PartitionChunkRange> {
-        self.map_reset(module, module.reset())
-    }
-
-    /// An in-memory reset with no marker is not a wipe. A marker is finished.
-    ///
-    /// `Ok(None)` means the flag was cleared and the bytes stayed.
-    /// `Ok(Some(range))` is the span the clear published. A read or finish
-    /// error stays pending so the same decision can run again.
-    fn settle_incomplete_reset(
-        &self,
-        module: &Arc<StorageModule>,
-    ) -> eyre::Result<Option<PartitionChunkRange>> {
-        match module.clear_reset_incomplete_without_marker() {
-            Ok(true) => Ok(None),
-            Ok(false) => Ok(Some(self.finish_reset(module)?)),
-            Err(err) => {
-                warn!(
-                    storage_module.id = module.id,
-                    "could not read the reset marker: {err:#}"
-                );
-                Err(ResetNotFinished.into())
-            }
-        }
-    }
-
-    fn any_reset_incomplete(&self) -> bool {
-        self.storage_modules
-            .read()
-            .unwrap()
-            .iter()
-            .any(|module| module.reset_incomplete())
-    }
-
-    /// No assignment retry is stored. No marker: clear the in-memory flag and
-    /// keep the bytes, which is what open does. A marker: finish the wipe.
-    /// An assigned module is packed, ledger or capacity. A full channel keeps
-    /// the span. A ledger also schedules index heal. An unassigned module is
-    /// not packed.
-    fn finish_dropped_resets(&mut self) {
-        let modules = {
-            let guard = self.storage_modules.read().unwrap();
-            guard.clone()
-        };
-        let mut heal = false;
-        for module in modules {
-            if !module.reset_incomplete() {
-                continue;
-            }
-            let range = match self.settle_incomplete_reset(&module) {
-                Ok(Some(range)) => range,
-                Ok(None) => continue,
-                Err(err) => {
-                    debug!(
-                        storage_module.id = module.id,
-                        "incomplete reset is still unfinished: {err}"
-                    );
-                    continue;
-                }
-            };
-            if let Some(assignment) = module.partition_assignment() {
-                self.enqueue_packing(&module, range);
-                if assignment.ledger_id.is_some() {
-                    heal = true;
-                }
-            }
-        }
-        if heal {
-            self.index_heal_needs_retry = true;
-        }
-    }
-
-    /// Reset and install `next` as one critical section. A failed reset
-    /// leaves the previous assignment in place so the update can be retried.
+    /// Reset and install `next` as one critical section: a full wipe behind
+    /// the reset marker, so a crash or a stop mid-way is finished by the next
+    /// open.
     fn reset_and_install(
         &self,
         module: &Arc<StorageModule>,
         next: Option<irys_types::partition::PartitionAssignment>,
         epoch_height: u64,
-    ) -> eyre::Result<PartitionChunkRange> {
-        self.map_reset(module, module.reset_with_assignment(next, epoch_height))
-    }
-
-    fn map_reset(
-        &self,
-        module: &Arc<StorageModule>,
-        result: eyre::Result<nodit::Interval<irys_types::PartitionChunkOffset>>,
-    ) -> eyre::Result<PartitionChunkRange> {
-        match result {
-            Ok(interval) => Ok(PartitionChunkRange(interval)),
-            Err(err) => {
-                warn!(
-                    storage_module.id = module.id,
-                    "storage module reset failed: {err}"
-                );
-                Err(ResetNotFinished.into())
-            }
-        }
+    ) -> PartitionChunkRange {
+        let operation = if next.is_some() {
+            "wipe and install a new partition"
+        } else {
+            "wipe a released partition"
+        };
+        PartitionChunkRange(
+            module.expect_drive_io(operation, module.reset_with_assignment(next, epoch_height)),
+        )
     }
 
     /// Send the deferred spans. A rollback or assignment repack sends only
@@ -1263,7 +1049,6 @@ impl StorageModuleService {
         block_tree: BlockTreeReadGuard,
         service_senders: ServiceSenders,
         config: &Config,
-        unreadable_at_startup: Vec<usize>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         tracing::info!("Spawning storage module service");
@@ -1287,7 +1072,6 @@ impl StorageModuleService {
                         service_senders,
                         config,
                         shutdown_for_inner,
-                        unreadable_at_startup,
                     ),
                 };
                 pending_storage_module_service
@@ -1589,7 +1373,6 @@ mod assignment_reset_tests {
             service_senders,
             config,
             shutdown_rx,
-            vec![],
         );
         Harness {
             _tmp: tmp,
@@ -1652,7 +1435,6 @@ mod assignment_reset_tests {
             service_senders,
             config,
             shutdown_rx,
-            vec![],
         );
         (
             Harness {
@@ -1700,75 +1482,6 @@ mod assignment_reset_tests {
         assert_reopen_chunk(harness, ChunkType::Entropy);
     }
 
-    /// A release wipe that failed before its marker left the in-memory flag on
-    /// a parked module. A later epoch that restores the recorded slot settles
-    /// the flag as open would (no marker: the bytes stay) and takes the slot
-    /// back, instead of wiping the whole partition.
-    #[tokio::test]
-    async fn parked_module_with_a_markerless_flag_takes_back_its_slot() {
-        use irys_domain::storage_module::ChunkType;
-
-        let (mut harness, hash, miner) = parked_harness();
-        harness.module.fail_next_reset_for_test();
-        harness
-            .inner
-            .apply_assignment(update_msg(explicit_unassign(), 4))
-            .await
-            .expect("a failed release is retried, not fatal");
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert!(harness.module.partition_assignment().is_none());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-
-        apply_update(&mut harness, capacity_update(hash, miner), 5).await;
-        assert_eq!(harness.module.partition_hash(), Some(hash));
-        assert!(!harness.module.reset_incomplete());
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Entropy),
-            "a markerless flag must not wipe the recorded slot"
-        );
-        while let Ok(request) = harness.receivers.packing.try_recv() {
-            assert!(
-                request.chunk_range().0.start() > PartitionChunkOffset::from(0),
-                "only Uninitialized offsets are packed, got {:?}",
-                request.chunk_range()
-            );
-        }
-    }
-
-    /// An in-sync matching update that clears a markerless flag still stamps
-    /// the v1 file it asks to stamp.
-    #[tokio::test]
-    async fn matching_update_stamps_after_settling_a_markerless_flag() {
-        let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
-        assert!(!PackingParams::from_toml(&params_path).expect("v1").is_v2());
-        harness.module.fail_next_reset_for_test();
-        assert!(harness.module.reset().is_err());
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-
-        harness
-            .inner
-            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                assignments: publish_update(hash, miner),
-                epoch_height: 7,
-                update_height: 7,
-                in_sync: true,
-            })
-            .await
-            .expect("matching update");
-        assert!(!harness.module.reset_incomplete());
-        assert!(
-            PackingParams::from_toml(&params_path)
-                .expect("params")
-                .is_v2(),
-            "the in-sync stamp was skipped after the flag was settled"
-        );
-    }
-
     /// A parked module assigned a different partition is reset and packed.
     #[tokio::test]
     async fn parked_module_assigned_another_partition_resets() {
@@ -1791,46 +1504,6 @@ mod assignment_reset_tests {
         Arc::new(vec![capacity_assignment(hash, miner)])
     }
 
-    #[tokio::test]
-    async fn expiry_reset_failure_keeps_the_ledger_and_retries() {
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        let hash = harness.module.partition_hash().expect("assigned");
-        let miner = harness
-            .module
-            .partition_assignment()
-            .expect("assigned")
-            .miner_address;
-        let update = capacity_update(hash, miner);
-
-        harness.module.fail_next_reset_for_test();
-        harness
-            .inner
-            .apply_assignment(update_msg(Arc::clone(&update), 4))
-            .await
-            .expect("reset failure is retried, not fatal");
-        assert!(harness.inner.pending_assignment.is_some());
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        // A failed slot exit changed nothing and sets no wipe flag.
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        harness
-            .inner
-            .apply_assignment(update_msg(update, 4))
-            .await
-            .expect("retry finishes the reset");
-        assert!(harness.inner.pending_assignment.is_none());
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.receivers.packing.try_recv().is_ok());
-    }
-
     fn capacity_assignment(hash: H256, miner: irys_types::IrysAddress) -> PartitionAssignment {
         PartitionAssignment {
             partition_hash: hash,
@@ -1838,150 +1511,6 @@ mod assignment_reset_tests {
             ledger_id: None,
             slot_index: None,
         }
-    }
-
-    /// The first module's reset fails. The later module still moves to the
-    /// target. The stored update retries the first module and does not reset
-    /// the module that is already there.
-    #[tokio::test]
-    async fn reset_failure_still_updates_later_modules() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
-        let first = Arc::clone(&harness.modules[0]);
-        let second = Arc::clone(&harness.modules[1]);
-        let miner = first
-            .partition_assignment()
-            .expect("assigned")
-            .miner_address;
-        let update = Arc::new(vec![
-            capacity_assignment(first.partition_hash().expect("hash"), miner),
-            capacity_assignment(second.partition_hash().expect("hash"), miner),
-        ]);
-
-        first.fail_next_reset_for_test();
-        harness
-            .inner
-            .apply_assignment(update_msg(Arc::clone(&update), 4))
-            .await
-            .expect("a reset failure is stored for retry");
-
-        assert_eq!(
-            first.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into()),
-            "the module whose reset failed keeps its assignment"
-        );
-        // A failed slot exit changed nothing and sets no wipe flag.
-        assert!(!first.reset_incomplete());
-        assert_eq!(
-            second.partition_assignment().unwrap().ledger_id,
-            None,
-            "a later module is updated even though the earlier reset failed"
-        );
-        assert!(!second.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_some());
-
-        let offset = PartitionChunkOffset::from(0);
-        assert!(second.write_chunk(offset, vec![0xAB; 32], ChunkType::Entropy));
-        second.force_sync_pending_chunks().expect("sync entropy");
-        assert_eq!(second.get_chunk_type(&offset), Some(ChunkType::Entropy));
-
-        let queued = drain_packing(&mut harness);
-        assert_eq!(queued.len(), 1, "only the module that reset is packed");
-        assert_eq!(queued[0].storage_module().id, second.id);
-        drop(queued);
-
-        let pending = harness
-            .inner
-            .pending_assignment
-            .clone()
-            .expect("retry message");
-        harness
-            .inner
-            .apply_assignment(pending)
-            .await
-            .expect("retry finishes the first module");
-
-        assert_eq!(first.partition_assignment().unwrap().ledger_id, None);
-        assert!(!first.reset_incomplete());
-        assert_eq!(second.partition_assignment().unwrap().ledger_id, None);
-        assert_eq!(
-            second.get_chunk_type(&offset),
-            Some(ChunkType::Entropy),
-            "a retry must not reset a module that is already at the target"
-        );
-        assert!(harness.inner.pending_assignment.is_none());
-
-        let queued = drain_packing(&mut harness);
-        assert_eq!(
-            queued.len(),
-            1,
-            "the retry packs only the module that reset"
-        );
-        assert_eq!(queued[0].storage_module().id, first.id);
-    }
-
-    /// An unassign whose reset fails must not freeze the other module in the
-    /// same update. The retry clears the first module and leaves the second.
-    #[tokio::test]
-    async fn failed_unassign_still_updates_the_other_module() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
-        let first = Arc::clone(&harness.modules[0]);
-        let second = Arc::clone(&harness.modules[1]);
-        let miner = first
-            .partition_assignment()
-            .expect("assigned")
-            .miner_address;
-        let update = Arc::new(vec![capacity_assignment(
-            second.partition_hash().expect("hash"),
-            miner,
-        )]);
-
-        first.fail_next_reset_for_test();
-        harness
-            .inner
-            .apply_assignment(update_msg(Arc::clone(&update), 4))
-            .await
-            .expect("a reset failure is stored for retry");
-
-        assert_eq!(
-            first.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into()),
-            "the module whose reset failed keeps its assignment"
-        );
-        assert!(first.reset_incomplete());
-        assert_eq!(
-            second.partition_assignment().unwrap().ledger_id,
-            None,
-            "the other module is updated even though the unassign reset failed"
-        );
-
-        let offset = PartitionChunkOffset::from(0);
-        assert!(second.write_chunk(offset, vec![0xCD; 32], ChunkType::Entropy));
-        second.force_sync_pending_chunks().expect("sync entropy");
-
-        let pending = harness
-            .inner
-            .pending_assignment
-            .clone()
-            .expect("retry message");
-        harness
-            .inner
-            .apply_assignment(pending)
-            .await
-            .expect("retry clears the first module");
-
-        assert!(first.partition_assignment().is_none());
-        assert!(!first.reset_incomplete());
-        assert_eq!(second.partition_assignment().unwrap().ledger_id, None);
-        assert_eq!(
-            second.get_chunk_type(&offset),
-            Some(ChunkType::Entropy),
-            "a retry must not reset a module that is already at the target"
-        );
-        assert!(harness.inner.pending_assignment.is_none());
     }
 
     fn write_synced_data(module: &StorageModule, byte: u8) {
@@ -1994,149 +1523,6 @@ mod assignment_reset_tests {
 
     fn chunk_type(module: &StorageModule) -> Option<irys_domain::ChunkType> {
         module.get_chunk_type(&PartitionChunkOffset::from(0))
-    }
-
-    /// A failed release wipe set the in-memory flag and wrote no marker. A
-    /// later update that names the same ledger and slot must not wipe: open
-    /// keeps those bytes. The stored unassign retry is dropped. A second apply, an
-    /// idle tick, and a reopen all keep the bytes.
-    #[tokio::test]
-    async fn matching_assignment_without_a_marker_keeps_the_bytes() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x11);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.inner.pending_assignment.is_some());
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-
-        let publish = publish_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&publish), 5).await;
-        assert!(
-            harness.inner.pending_assignment.is_none(),
-            "the unassign retry must not stay pending once the ledger is confirmed"
-        );
-        let assignment = harness.module.partition_assignment().unwrap();
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(0));
-        assert!(
-            !harness.module.reset_incomplete(),
-            "a matching update must clear a flag that has no marker"
-        );
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Data),
-            "no marker means the wipe never started"
-        );
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        apply_update(&mut harness, publish, 5).await;
-        harness.inner.tick().await;
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert_reopen_chunk(harness, ChunkType::Data);
-    }
-
-    /// The marker is durable, so the same matching update finishes the wipe.
-    /// The publish assignment stays. Open would wipe too: the marker is gone
-    /// after the finish, and a reopen stays uninitialized.
-    #[tokio::test]
-    async fn matching_assignment_with_a_durable_marker_finishes_the_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x12);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        assert!(harness.module.reset_incomplete());
-        assert!(reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-
-        let publish = publish_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&publish), 5).await;
-        assert!(harness.inner.pending_assignment.is_none());
-        let assignment = harness.module.partition_assignment().unwrap();
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(0));
-        assert!(!harness.module.reset_incomplete());
-        assert!(
-            !reset_marker(&harness.module),
-            "finishing the clear drops the marker"
-        );
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Uninitialized),
-            "a durable marker means the wipe already started"
-        );
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("an assigned ledger packs the wiped span");
-        assert_full_partition_span(&request);
-        // The request holds the module. Drop it before reopen takes the db.
-        drop(request);
-        assert!(
-            !harness.inner.index_heal_needs_retry,
-            "heal must not keep skipping a reset that has finished"
-        );
-
-        apply_update(&mut harness, publish, 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(!harness.module.reset_incomplete());
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "the second apply must not pack the span again"
-        );
-        assert_reopen_chunk(harness, ChunkType::Uninitialized);
-    }
-
-    /// The flag was cleared because no marker existed. A later capacity
-    /// assignment is a real ledger move: it still resets and packs.
-    #[tokio::test]
-    async fn capacity_move_after_a_markerless_flag_is_cleared_still_resets() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x13);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
-        apply_update(&mut harness, publish_update(hash, miner), 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(!harness.module.reset_incomplete());
-
-        apply_update(&mut harness, capacity_update(hash, miner), 6).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(harness.inner.pending_assignment.is_none());
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("a later capacity move still packs");
-        assert_full_partition_span(&request);
     }
 
     /// Replace `packing_params.toml` with bytes `from_toml` rejects. The
@@ -2155,127 +1541,13 @@ mod assignment_reset_tests {
             .expect("restore packing params");
     }
 
-    /// A release wipes. The wipe commits and the assignment file does not.
-    /// A later message that names the old ledger packs that wiped span once.
-    /// (A slot exit keeps the entropy and sets no marker, so the full-wipe
-    /// retry tests drive the wipe with a release.)
+    /// A slot exit whose assignment store fails stops the node, naming the
+    /// module and the operation. The old slot's data is already relabelled
+    /// and the file still names the old slot, as a crash at that write
+    /// leaves it. A reopen that asks for the new slot repeats the exit: the
+    /// entropy stays and the old data stays `Uninitialized`.
     #[tokio::test]
-    async fn old_ledger_after_failed_assignment_store_packs_the_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x51);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let path = harness.path.clone();
-        let saved = corrupt_packing_params(&path);
-
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.inner.pending_assignment.is_some());
-        assert!(
-            harness.module.reset_incomplete(),
-            "a failed store must leave the wipe unfinished"
-        );
-        assert!(
-            reset_marker(&harness.module),
-            "a failed store must keep the reset marker"
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(0)
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(harness.receivers.packing.try_recv().is_err());
-        harness.inner.tick().await;
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "a stored retry is applied by the run loop, not by this tick"
-        );
-        assert!(harness.module.reset_incomplete());
-
-        restore_packing_params(&path, &saved);
-        let publish = publish_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&publish), 5).await;
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        let assignment = harness.module.partition_assignment().unwrap();
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(0));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("the old ledger packs the wiped span");
-        assert_full_partition_span(&request);
-        drop(request);
-        apply_update(&mut harness, publish, 5).await;
-        harness.inner.tick().await;
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "the span is packed once"
-        );
-    }
-
-    /// Ledger to capacity keeps the entropy. The old slot's data is
-    /// uninitialized and the assignment file does not store. No wipe flag or
-    /// marker: the file still names the old slot. The same capacity message,
-    /// retried after the file is readable, installs capacity and packs once.
-    #[tokio::test]
-    async fn retried_assignment_after_failed_store_packs_once() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x52);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let path = harness.path.clone();
-        let saved = corrupt_packing_params(&path);
-        let update = capacity_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&update), 4).await;
-        assert!(harness.inner.pending_assignment.is_some());
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        restore_packing_params(&path, &saved);
-        apply_update(&mut harness, update, 4).await;
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("the retried capacity assignment packs the uninitialized span");
-        assert_full_partition_span(&request);
-        drop(request);
-        assert!(harness.receivers.packing.try_recv().is_err());
-        harness.inner.tick().await;
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "the successful retry cleared the failed exit's repack list"
-        );
-    }
-
-    /// A slot exit whose assignment store fails has already uninitialized
-    /// the old slot's data. When the old slot is then confirmed again, the
-    /// tick packs that span, and only that span: the entropy stays.
-    #[tokio::test]
-    async fn failed_slot_exit_store_packs_the_relabelled_span_on_tick() {
+    async fn slot_exit_store_failure_stops_the_node_and_reopen_repeats_it() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
@@ -2284,393 +1556,35 @@ mod assignment_reset_tests {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         let path = harness.path.clone();
         let saved = corrupt_packing_params(&path);
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
-        assert!(harness.inner.pending_assignment.is_some());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.get_intervals(ChunkType::Entropy),
-            vec![irys_types::partition_chunk_offset_ii!(1, 9)]
-        );
-
-        restore_packing_params(&path, &saved);
-        apply_update(&mut harness, publish_update(hash, miner), 5).await;
-        assert!(harness.inner.pending_assignment.is_none());
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert!(harness.receivers.packing.try_recv().is_err());
-        harness.inner.tick().await;
-        let spans: Vec<_> = drain_packing(&mut harness)
-            .iter()
-            .map(|request| request.chunk_range().0)
-            .collect();
-        assert_eq!(spans, vec![irys_types::partition_chunk_offset_ii!(0, 0)]);
-        harness.inner.tick().await;
-        assert!(harness.receivers.packing.try_recv().is_err(), "packed once");
-    }
-
-    /// The unassign retry was dropped. The tick finishes the marker and packs
-    /// one span. It does not pack while that retry is still stored.
-    #[tokio::test]
-    async fn dropped_retry_after_failed_store_packs_on_tick() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x53);
-        let path = harness.path.clone();
-        let _saved = corrupt_packing_params(&path);
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.inner.pending_assignment.is_some());
-        harness.inner.tick().await;
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert!(harness.module.reset_incomplete());
-
-        harness.inner.pending_assignment = None;
-        harness.inner.tick().await;
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into()),
-            "the tick does not install the dropped capacity assignment"
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("a dropped retry packs the wiped span");
-        assert_full_partition_span(&request);
-        assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
-    /// The old ledger confirms the wipe while the packing channel is full.
-    /// One span is kept, not one request per chunk, and a later tick sends it.
-    #[tokio::test]
-    async fn full_channel_defers_one_span_after_failed_store() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x54);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let path = harness.path.clone();
-        let saved = corrupt_packing_params(&path);
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(reset_marker(&harness.module));
-        restore_packing_params(&path, &saved);
-        fill_packing_channel(&harness);
-        apply_update(&mut harness, publish_update(hash, miner), 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness).await;
-        assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
-    /// The marker is durable and the finish fails before the clear. The
-    /// matching update stays pending, the marker stays, and the bytes stay
-    /// until a later attempt completes the wipe.
-    #[tokio::test]
-    async fn matching_assignment_finish_failure_keeps_the_retry() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x22);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        let publish = publish_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&publish), 5).await;
+        let message = update_panics(&mut harness, capacity_update(hash, miner), 4).await;
+        assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            harness.inner.pending_assignment.is_some(),
-            "the matching update must stay pending until the wipe finishes"
+            message.contains("leave the ledger slot (keep-entropy reset) failed"),
+            "{message}"
         );
-        assert!(harness.module.reset_incomplete());
-        assert!(
-            reset_marker(&harness.module),
-            "a failed finish leaves the marker"
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        apply_update(&mut harness, publish, 5).await;
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("an assigned ledger packs the wiped span");
-        assert_full_partition_span(&request);
-    }
-
-    /// The retry was dropped and no marker was written. The tick clears the
-    /// flag and keeps the bytes. A stored retry is left alone: the tick must
-    /// not settle while that update is still waiting. A reopen keeps the bytes.
-    #[tokio::test]
-    async fn tick_without_a_marker_keeps_ledger_bytes_when_the_retry_was_dropped() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x33);
-
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.inner.pending_assignment.is_some());
-        harness.inner.tick().await;
-        assert!(
-            harness.module.reset_incomplete(),
-            "a stored unassign retry must finish on apply, not on an idle tick"
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(!reset_marker(&harness.module));
-
-        harness.inner.pending_assignment = None;
-        harness.inner.index_heal_needs_retry = false;
-        harness.inner.tick().await;
-        assert!(
-            !harness.module.reset_incomplete(),
-            "a tick with no stored retry clears a flag that has no marker"
-        );
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Data),
-            "no marker means the wipe never started"
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(0)
-        );
-        assert!(
-            !harness.inner.index_heal_needs_retry,
-            "keeping the bytes must not schedule heal for a cleared index"
-        );
-        assert!(harness.receivers.packing.try_recv().is_err());
-        harness.inner.tick().await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert_reopen_chunk(harness, ChunkType::Data);
-    }
-
-    /// The retry was dropped and the marker is durable. The tick finishes the
-    /// wipe. It does not finish while the retry is still stored. A failed
-    /// finish stays pending for the next tick. A reopen stays uninitialized.
-    #[tokio::test]
-    async fn tick_finishes_a_dropped_ledger_reset_when_the_marker_is_durable() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x34);
-
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        harness.inner.tick().await;
-        assert!(
-            harness.module.reset_incomplete(),
-            "a stored unassign retry must finish on apply, not on an idle tick"
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(reset_marker(&harness.module));
-
-        harness.inner.pending_assignment = None;
-        harness.inner.index_heal_needs_retry = false;
-        harness.module.fail_next_reset_for_test();
-        harness.inner.tick().await;
-        assert!(
-            harness.module.reset_incomplete(),
-            "a failed finish stays incomplete for the next tick"
-        );
-        assert!(reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        harness.inner.tick().await;
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(0)
-        );
-        assert!(
-            harness.inner.index_heal_needs_retry,
-            "heal must run once the wipe has finished and no assignment message will"
-        );
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("an assigned ledger packs the wiped span");
-        assert_full_partition_span(&request);
-        // The request holds the module. Drop it before reopen takes the db.
-        drop(request);
-        assert_reopen_chunk(harness, ChunkType::Uninitialized);
-    }
-
-    /// Same dropped retry on capacity, with no marker. The tick keeps the
-    /// entropy and does not pack.
-    #[tokio::test]
-    async fn tick_without_a_marker_keeps_capacity_bytes() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        harness.inner.tick().await;
-        assert!(
-            harness.module.reset_incomplete(),
-            "a stored unassign must finish on apply, not on an idle tick"
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-
-        harness.inner.pending_assignment = None;
-        harness.inner.tick().await;
-        assert!(!harness.module.reset_incomplete());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert_reopen_chunk(harness, ChunkType::Entropy);
-    }
-
-    /// Same dropped retry on capacity. The marker is durable, so the tick
-    /// finishes the wipe and packs.
-    #[tokio::test]
-    async fn tick_finishes_a_dropped_capacity_reset_and_packs() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        harness.inner.pending_assignment = None;
-        harness.inner.index_heal_needs_retry = false;
-        harness.inner.tick().await;
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert!(
-            !harness.inner.index_heal_needs_retry,
-            "capacity has no ledger index for heal"
-        );
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("a dropped capacity reset is packed from the tick");
-        assert_full_partition_span(&request);
-    }
-
-    /// A failed unassign set the flag and wrote no marker. A later update that
-    /// names the same capacity assignment keeps the entropy and does not pack.
-    #[tokio::test]
-    async fn matching_capacity_without_a_marker_keeps_entropy() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.inner.pending_assignment.is_some());
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        let capacity = capacity_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&capacity), 5).await;
         assert!(
             harness.inner.pending_assignment.is_none(),
-            "the unassign retry must not stay pending once capacity is confirmed"
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        apply_update(&mut harness, capacity, 5).await;
-        harness.inner.tick().await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.receivers.packing.try_recv().is_err());
-        assert_reopen_chunk(harness, ChunkType::Entropy);
-    }
-
-    /// The marker is durable. A later update that names the same capacity
-    /// assignment finishes the wipe and packs it.
-    #[tokio::test]
-    async fn matching_capacity_after_failed_unassign_finishes_and_packs() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        assert!(harness.inner.pending_assignment.is_some());
-        assert!(harness.module.reset_incomplete());
-        assert!(reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        apply_update(&mut harness, capacity_update(hash, miner), 5).await;
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
+            "nothing is retried"
         );
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("capacity is packed after the wipe");
-        assert_full_partition_span(&request);
+
+        restore_packing_params(&path, &saved);
+        let (_tmp, config, path, held) = close_for_reopen(harness);
+        assert_eq!(held.ledger_id, Some(DataLedger::Publish.into()));
+        let capacity = capacity_assignment(hash, miner);
+        let reopened = reopen_module(&config, &path, capacity);
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            reopened.get_intervals(ChunkType::Entropy),
+            vec![irys_types::partition_chunk_offset_ii!(1, 9)],
+            "the reopen keeps the entropy"
+        );
+        let recorded = reopened.recorded_params().expect("recorded");
+        assert_eq!(recorded.ledger, None, "the reopen stores capacity");
+        assert!(!reset_marker(&reopened), "a slot exit writes no marker");
     }
 
     /// A repeated assignment with no incomplete reset is not a wipe.
@@ -2694,50 +1608,6 @@ mod assignment_reset_tests {
             Some(DataLedger::Publish.into())
         );
         assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
-    /// A failed reset then a different slot still installs that slot and packs it.
-    #[tokio::test]
-    async fn failed_reset_then_a_different_slot_still_installs() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Submit.into()));
-        write_synced_data(&harness.module, 0x55);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let update = Arc::new(vec![PartitionAssignment {
-            partition_hash: hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Publish.into()),
-            slot_index: Some(1),
-        }]);
-
-        harness.module.fail_next_reset_for_test();
-        harness
-            .inner
-            .apply_assignment(update_msg(Arc::clone(&update), 8))
-            .await
-            .expect("reset failure is retried");
-        assert!(harness.inner.pending_assignment.is_some());
-        // A failed slot exit changed nothing and sets no wipe flag.
-        assert!(!harness.module.reset_incomplete());
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(0)
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-
-        harness
-            .inner
-            .apply_assignment(update_msg(update, 8))
-            .await
-            .expect("the different slot is installed");
-        let assignment = harness.module.partition_assignment().unwrap();
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(1));
-        assert!(!harness.module.reset_incomplete());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(harness.receivers.packing.try_recv().is_ok());
     }
 
     /// A hash that expired and was backfilled onto another ledger slot in the
@@ -2812,29 +1682,61 @@ mod assignment_reset_tests {
         );
     }
 
+    /// Apply `assignments` at `height` and return the message the update
+    /// panics with. A drive I/O error on an assignment path stops the node.
+    async fn update_panics(
+        harness: &mut Harness,
+        assignments: Arc<Vec<PartitionAssignment>>,
+        height: u64,
+    ) -> String {
+        message_panics(harness, update_msg(assignments, height)).await
+    }
+
+    /// Apply `message` and return the message it panics with.
+    async fn message_panics(harness: &mut Harness, message: StorageModuleServiceMessage) -> String {
+        use futures::FutureExt as _;
+        let payload = std::panic::AssertUnwindSafe(harness.inner.apply_assignment(message))
+            .catch_unwind()
+            .await
+            .expect_err("the update stops the node");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+            })
+            .unwrap_or_default()
+    }
+
+    /// A drive error during a release wipe stops the node with the module,
+    /// its path and the operation. Nothing is retried. The injected failure
+    /// lands before the reset marker, as a crash there would: a reopen keeps
+    /// the assignment and the bytes.
     #[tokio::test]
-    async fn unassign_reset_failure_keeps_the_assignment() {
+    async fn release_wipe_failure_stops_the_node() {
+        use irys_domain::storage_module::ChunkType;
+
         let mut harness = harness(Some(DataLedger::Publish.into()));
-        let update = explicit_unassign();
-
+        write_synced_data(&harness.module, 0x66);
         harness.module.fail_next_reset_for_test();
-        let err = harness
-            .inner
-            .handle_partition_assignments_update(Arc::clone(&update), 4, 4, false)
-            .await
-            .expect_err("reset failure");
-        assert!(super::is_reset_not_finished(&err));
-        assert!(harness.module.partition_assignment().is_some());
-        assert!(harness.module.reset_incomplete());
-
-        harness
-            .inner
-            .handle_partition_assignments_update(update, 4, 4, false)
-            .await
-            .expect("retry clears the assignment");
-        assert!(harness.module.partition_assignment().is_none());
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.receivers.packing.try_recv().is_err());
+        let message = update_panics(&mut harness, explicit_unassign(), 4).await;
+        assert!(message.contains("storage module 0"), "{message}");
+        assert!(
+            message.contains(&harness.path.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("wipe a released partition failed; stopping the node"),
+            "{message}"
+        );
+        assert!(
+            harness.inner.pending_assignment.is_none(),
+            "nothing is retried"
+        );
+        assert!(!reset_marker(&harness.module));
+        assert_reopen_chunk(harness, ChunkType::Data);
     }
 
     fn reset_marker(module: &StorageModule) -> bool {
@@ -2909,206 +1811,6 @@ mod assignment_reset_tests {
         assert_eq!(recorded.partition_hash, Some(hash));
         assert_eq!(recorded.slot, Some(1));
         assert_eq!(stored_height(&harness.path), Some(50));
-    }
-
-    /// An unassign by an epoch below the drive's assigned height is not a
-    /// provable release: the drive is parked, not wiped. It must not stay
-    /// pending. No marker was written, so the bytes and the recorded slot
-    /// stay, and the in-memory flag is cleared. A later reapply and tick must
-    /// not wipe what open would keep, and the slot is taken back without a
-    /// reset when an epoch assigns it again.
-    #[tokio::test]
-    async fn stale_unassign_does_not_pin_an_incomplete_reset() {
-        use irys_domain::storage_module::ChunkType;
-
-        let (mut harness, hash, miner) = store_slot_one_with_data(50, 0xAB).await;
-        let path = harness.path.clone();
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 60).await;
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(1)
-        );
-
-        let unassign = explicit_unassign();
-        apply_update(&mut harness, Arc::clone(&unassign), 10).await;
-        assert!(
-            !harness.module.reset_incomplete(),
-            "a parking unassign must clear an in-memory flag that has no marker"
-        );
-        assert!(
-            harness.inner.pending_assignment.is_none(),
-            "a park must not become the stored retry"
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert_parked_on_slot_one(&harness, hash);
-        assert!(!reset_marker(&harness.module));
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        apply_update(&mut harness, unassign, 10).await;
-        harness.inner.tick().await;
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert_parked_on_slot_one(&harness, hash);
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        apply_update(&mut harness, publish_slot_update(hash, miner, 1), 60).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(1),
-            "the recorded slot is taken back"
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert_eq!(
-            stored_height(&path),
-            Some(50),
-            "taking it back writes nothing"
-        );
-    }
-
-    /// The marker is durable. The same lower unassign parks the drive and
-    /// finishes the clear (it already started); it does not stay pending. The
-    /// parked drive cannot pack; the file keeps the newer local slot.
-    #[tokio::test]
-    async fn stale_unassign_finishes_a_durable_reset() {
-        use irys_domain::storage_module::ChunkType;
-
-        let (mut harness, hash, miner) = store_slot_one_with_data(50, 0xCD).await;
-        let path = harness.path.clone();
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 60).await;
-        set_reset_marker(&harness.module);
-        assert!(harness.module.reset_incomplete());
-        assert!(reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-
-        apply_update(&mut harness, explicit_unassign(), 10).await;
-        assert!(
-            !harness.module.reset_incomplete(),
-            "a durable marker must be finished, not left pinned"
-        );
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(
-            !reset_marker(&harness.module),
-            "finishing the clear drops the marker"
-        );
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Uninitialized),
-            "a durable marker means the wipe already started"
-        );
-        assert_parked_on_slot_one(&harness, hash);
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "a parked module is not packed"
-        );
-
-        apply_update(&mut harness, publish_slot_update(hash, miner, 1), 60).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(1)
-        );
-        assert_eq!(stored_height(&path), Some(50));
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("taking the slot back packs the wiped span");
-        assert_full_partition_span(&request);
-    }
-
-    /// The finish can fail. The lower unassign stays pending only until the
-    /// clear completes. It must not skip forever.
-    #[tokio::test]
-    async fn stale_unassign_retries_a_durable_reset_until_it_finishes() {
-        use irys_domain::storage_module::ChunkType;
-
-        let (mut harness, hash, _miner) = store_slot_one_with_data(50, 0xEF).await;
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 60).await;
-        set_reset_marker(&harness.module);
-        harness.module.fail_next_reset_for_test();
-
-        let unassign = explicit_unassign();
-        apply_update(&mut harness, Arc::clone(&unassign), 10).await;
-        assert!(
-            harness.inner.pending_assignment.is_some(),
-            "a failed finish of a durable marker stays pending"
-        );
-        assert!(harness.module.reset_incomplete());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert_parked_on_slot_one(&harness, hash);
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "a failed finish has not published the wipe"
-        );
-
-        apply_update(&mut harness, unassign, 10).await;
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_parked_on_slot_one(&harness, hash);
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "a parked module is not packed"
-        );
-    }
-
-    /// The same lower unassign on a capacity module whose wipe already started
-    /// parks it and finishes the clear. Taking capacity back packs the span.
-    #[tokio::test]
-    async fn stale_unassign_finishes_a_durable_capacity_reset_and_packs() {
-        use irys_domain::storage_module::ChunkType;
-
-        let (mut harness, hash, miner) = store_slot_one_with_data(50, 0x11).await;
-        let path = harness.path.clone();
-        apply_update(&mut harness, capacity_update(hash, miner), 50).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert_eq!(stored_height(&path), Some(50));
-        let _packed = drain_packing(&mut harness);
-        let offset = PartitionChunkOffset::from(0);
-        assert!(
-            harness
-                .module
-                .write_chunk(offset, vec![0x5A_u8; 32], ChunkType::Entropy,)
-        );
-        harness
-            .module
-            .force_sync_pending_chunks()
-            .expect("entropy is durable");
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 60).await;
-        set_reset_marker(&harness.module);
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-
-        apply_update(&mut harness, explicit_unassign(), 10).await;
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(harness.module.partition_assignment().is_none());
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        apply_update(&mut harness, capacity_update(hash, miner), 60).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("finished capacity wipe is packed once capacity is taken back");
-        assert_eq!(*request.chunk_range().0.start(), 0);
-        assert_eq!(*request.chunk_range().0.end(), 9);
     }
 
     /// A parked drive (no assignment in memory) whose file records a ledger
@@ -3229,201 +1931,6 @@ mod assignment_reset_tests {
         );
         assert!(!reopened.reset_incomplete());
         assert!(!reset_marker(&reopened));
-    }
-
-    /// Failed unassign, no marker. Both applies of capacity→ledger keep entropy.
-    /// The flag does not stay set, so the second apply is not a wipe.
-    #[tokio::test]
-    async fn capacity_to_ledger_after_failed_unassign_keeps_entropy_on_both_applies() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-
-        let update = publish_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&update), 5).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert!(
-            !harness.module.reset_incomplete(),
-            "capacity to ledger must not leave the incomplete flag set"
-        );
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(!reset_marker(&harness.module));
-
-        apply_update(&mut harness, update, 5).await;
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Entropy),
-            "the retry must keep the entropy the first apply kept"
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
-    /// The marker is durable, so capacity→ledger finishes the clear before
-    /// the assign. The retry of that same update does not wipe again.
-    #[tokio::test]
-    async fn capacity_to_ledger_after_a_durable_marker_finishes_the_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-
-        let update = publish_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&update), 5).await;
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Uninitialized),
-            "a durable marker means the wipe already started"
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert!(harness.inner.pending_assignment.is_none());
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("an assigned ledger packs the wiped span");
-        assert_full_partition_span(&request);
-
-        apply_update(&mut harness, update, 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "the second apply must not pack the span again"
-        );
-    }
-
-    /// The wipe finished and the ledger write failed. The span is packed
-    /// under the assignment that is still stored. The retry stores the
-    /// ledger and does not send the span again.
-    #[tokio::test]
-    async fn capacity_to_ledger_packs_a_finished_wipe_when_the_ledger_write_fails() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let path = harness.path.clone();
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-
-        let params_path = path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
-        let saved = std::fs::read(&params_path).expect("packing params");
-        let _restore = RestoredBytes(params_path.clone(), saved.clone());
-        std::fs::write(&params_path, b"not = toml [[[").expect("corrupt packing params");
-
-        let update = publish_update(hash, miner);
-        apply_update(&mut harness, Arc::clone(&update), 5).await;
-        assert_eq!(
-            chunk_type(&harness.module),
-            Some(ChunkType::Uninitialized),
-            "the marker wipe finishes before the ledger write"
-        );
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None,
-            "a failed ledger write leaves the capacity assignment"
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-        assert!(harness.inner.pending_assignment.is_some());
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("the wiped span is packed while the partition stays assigned");
-        assert_full_partition_span(&request);
-
-        std::fs::write(&params_path, saved).expect("restore packing params");
-        apply_update(&mut harness, update, 5).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "the retry must not pack the span again"
-        );
-    }
-
-    /// The packing-params write fails after the flag is settled. The retry
-    /// stores the ledger and still does not wipe.
-    #[tokio::test]
-    async fn capacity_to_ledger_write_error_after_failed_unassign_does_not_arm_a_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let path = harness.path.clone();
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        assert!(harness.module.reset_incomplete());
-        assert!(!reset_marker(&harness.module));
-
-        let update = publish_update(hash, miner);
-        let _restore = WritableDir(path.clone());
-        set_dir_mode(&path, 0o555);
-        apply_update(&mut harness, Arc::clone(&update), 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert!(
-            !harness.module.reset_incomplete(),
-            "a failed ledger write must not leave a flag that a later retry wipes"
-        );
-        assert!(harness.inner.pending_assignment.is_some());
-
-        set_dir_mode(&path, 0o755);
-        apply_update(&mut harness, Arc::clone(&update), 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
-
-        apply_update(&mut harness, update, 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
-        assert!(harness.receivers.packing.try_recv().is_err());
     }
 
     /// Open recovery keeps entropy when the reset never wrote its marker.
@@ -3578,63 +2085,36 @@ mod assignment_reset_tests {
         }
     }
 
-    /// Writes `bytes` back on drop. Used when a test corrupts a file.
-    struct RestoredBytes(std::path::PathBuf, Vec<u8>);
-
-    impl Drop for RestoredBytes {
-        fn drop(&mut self) {
-            let _ = std::fs::write(&self.0, &self.1);
-        }
-    }
-
-    /// A packing-params write error on capacity→ledger is retried. The
-    /// in-memory assignment stays capacity. A later successful write stores
-    /// the ledger. A path mismatch is still fatal.
+    /// A packing-params write error on capacity→ledger stops the node. The
+    /// in-memory assignment and the file stay capacity, as a crash at that
+    /// write leaves them, and a reopen keeps the bytes.
     #[tokio::test]
-    async fn capacity_to_ledger_write_error_is_retried() {
+    async fn capacity_to_ledger_write_error_stops_the_node() {
+        use irys_domain::storage_module::ChunkType;
+
         let mut harness = harness(None);
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        let hash = harness.module.partition_hash().expect("assigned");
-        let miner = harness
-            .module
-            .partition_assignment()
-            .expect("assigned")
-            .miner_address;
-        let update = publish_update(hash, miner);
-        let _restore = WritableDir(harness.path.clone());
+        write_synced_entropy(&harness.module);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let restore = WritableDir(harness.path.clone());
         set_dir_mode(&harness.path, 0o555);
 
-        harness
-            .inner
-            .apply_assignment(update_msg(Arc::clone(&update), 6))
-            .await
-            .expect("a packing-params write error is retried, not fatal");
+        let message = update_panics(&mut harness, publish_update(hash, miner), 6).await;
+        assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            harness.inner.pending_assignment.is_some(),
-            "the update is stored for the retry tick"
+            message.contains("store the capacity-to-ledger assignment failed"),
+            "{message}"
         );
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
             None,
             "a failed write leaves the in-memory assignment unchanged"
         );
-        assert!(!harness.module.reset_incomplete());
-        assert!(harness.receivers.packing.try_recv().is_err());
-
-        set_dir_mode(&harness.path, 0o755);
-        harness
-            .inner
-            .apply_assignment(update_msg(update, 6))
-            .await
-            .expect("retry stores the ledger");
-        assert!(harness.inner.pending_assignment.is_none());
-        let assignment = harness.module.partition_assignment().unwrap();
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(0));
-        assert_eq!(assignment.partition_hash, hash);
+        assert!(
+            harness.inner.pending_assignment.is_none(),
+            "nothing is retried"
+        );
+        drop(restore);
+        assert_reopen_chunk(harness, ChunkType::Entropy);
     }
 
     /// Capacity→ledger does not reset. Packed bytes stay, and packing is not
@@ -4478,73 +2958,6 @@ mod assignment_reset_tests {
         );
     }
 
-    /// A packing-params write error must not drop the uninitialized span.
-    /// The retry still sends it.
-    #[tokio::test]
-    async fn capacity_to_ledger_write_error_keeps_the_deferred_span() {
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        defer_capacity_reset(&mut harness).await;
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        let path = harness.path.clone();
-        let update = publish_update(hash, miner);
-        let _restore = WritableDir(path.clone());
-        set_dir_mode(&path, 0o555);
-        harness
-            .inner
-            .apply_assignment(update_msg(Arc::clone(&update), 5))
-            .await
-            .expect("a packing-params write error is retried");
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None,
-            "a failed write leaves the capacity assignment"
-        );
-        let pending = harness
-            .inner
-            .pending_ranges
-            .get(&0)
-            .cloned()
-            .unwrap_or_default();
-        assert_eq!(
-            pending.len(),
-            1,
-            "a failed capacity-to-ledger write must keep the uninitialized span"
-        );
-        assert_eq!(*pending[0].range.0.start(), 0);
-        assert_eq!(*pending[0].range.0.end(), 9);
-
-        set_dir_mode(&path, 0o755);
-        harness
-            .inner
-            .apply_assignment(update_msg(update, 5))
-            .await
-            .expect("retry stores the ledger");
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        let _fillers = drain_packing(&mut harness);
-        harness.inner.tick().await;
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("the retry packs the span the failed write kept");
-        assert_full_partition_span(&request);
-    }
-
-    fn assert_one_deferred_full_span(harness: &Harness) {
-        let pending = harness
-            .inner
-            .pending_ranges
-            .get(&0)
-            .cloned()
-            .unwrap_or_default();
-        assert_eq!(pending.len(), 1, "a full channel keeps one wipe span");
-        assert_eq!(*pending[0].range.0.start(), 0);
-        assert_eq!(*pending[0].range.0.end(), 9);
-    }
-
     fn assert_only_filler_ranges(queued: &[PackingRequest]) {
         assert!(
             queued
@@ -4610,54 +3023,6 @@ mod assignment_reset_tests {
         deferred_span_is_sent_on_tick(&mut harness).await;
     }
 
-    /// A marker wipe on capacity→ledger publishes `Uninitialized` while the
-    /// channel is full. The span stays one range and is sent once it has room.
-    #[tokio::test]
-    async fn full_channel_defers_a_capacity_to_ledger_marker_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(None);
-        write_synced_entropy(&harness.module);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        fill_packing_channel(&harness);
-        apply_update(&mut harness, publish_update(hash, miner), 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness).await;
-        assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
-    /// A marker wipe on a matching ledger update publishes `Uninitialized`
-    /// while the channel is full. One span is kept and sent later.
-    #[tokio::test]
-    async fn full_channel_defers_a_matching_ledger_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x41);
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        fill_packing_channel(&harness);
-        apply_update(&mut harness, publish_update(hash, miner), 5).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness).await;
-        assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
     /// After a reorg that orphans the only epoch block, the block tree resends
     /// the new tip's assignments: `epoch_height` is that snapshot's epoch,
     /// `update_height` the orphaned one. The drive was assigned at the
@@ -4704,59 +3069,43 @@ mod assignment_reset_tests {
 
     /// The file of a drive that is ours becomes unreadable while the node
     /// runs. The verdict is judged from the module's in-memory record, so the
-    /// drive stays ours: nothing is wiped or reassigned. The v1 stamp that an
-    /// in-sync epoch asks for cannot be written; that is logged as an ERROR
-    /// and not retried.
+    /// drive stays ours and nothing is wiped. The v2 stamp an in-sync epoch
+    /// asks for cannot be written, which stops the node naming the module
+    /// and the operation.
     #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn runtime_verdict_uses_memory_not_disk() {
+    async fn v2_stamp_failure_stops_the_node() {
         use irys_domain::storage_module::ChunkType;
 
-        let mut harness = open_modules_with(2, Some(DataLedger::Publish.into()), |_| {}, false);
-        let first = Arc::clone(&harness.modules[0]);
-        let second = Arc::clone(&harness.modules[1]);
-        write_synced_data(&first, 0x61);
-        let held_first = first.partition_assignment().expect("assigned");
-        let held_second = second.partition_assignment().expect("assigned");
-        let corrupted = corrupt_packing_params(&harness.paths[0]);
+        let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
+        write_synced_data(&harness.module, 0x61);
+        let held = harness.module.partition_assignment().expect("assigned");
+        let _corrupted = corrupt_packing_params(&harness.path);
 
-        harness
-            .inner
-            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                assignments: Arc::new(vec![held_first, held_second]),
+        let message = message_panics(
+            &mut harness,
+            StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                assignments: Arc::new(vec![held]),
                 epoch_height: 5,
                 update_height: 5,
                 in_sync: true,
-            })
-            .await
-            .expect("an unreadable file does not fail the update");
-
-        assert_eq!(first.partition_assignment(), Some(held_first));
-        assert_eq!(second.partition_assignment(), Some(held_second));
-        assert_eq!(chunk_type(&first), Some(ChunkType::Data));
-        assert!(!first.reset_incomplete());
-        assert!(!reset_marker(&first));
-        assert!(harness.inner.pending_assignment.is_none());
-        assert!(harness.receivers.packing.try_recv().is_err());
+            },
+        )
+        .await;
+        assert!(message.contains("storage module 0"), "{message}");
+        assert!(
+            message.contains("rewrite packing params as v2 failed; stopping the node"),
+            "{message}"
+        );
         assert_eq!(
             harness.inner.last_decisions.get(&0).map(|(v, _)| v.clone()),
-            Some(DriveVerdict::Ours)
+            Some(DriveVerdict::Ours),
+            "the verdict comes from memory"
         );
-        assert!(logs_contain(
-            "packing params could not be rewritten as v2; the drive keeps its verdict from memory"
-        ));
-        assert_eq!(
-            std::fs::read(harness.paths[0].join(irys_domain::PACKING_PARAMS_FILE_NAME))
-                .expect("file"),
-            b"not-toml",
-            "the unreadable file is left as it is"
-        );
-        assert_ne!(corrupted, b"not-toml");
+        assert_eq!(harness.module.partition_assignment(), Some(held));
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert!(
-            PackingParams::from_toml(harness.paths[1].join(irys_domain::PACKING_PARAMS_FILE_NAME))
-                .expect("second file")
-                .is_v2(),
-            "the readable drive is stamped"
+            harness.inner.pending_assignment.is_none(),
+            "nothing is retried"
         );
     }
 
@@ -4911,101 +3260,20 @@ mod assignment_reset_tests {
         );
     }
 
-    /// An open module with no in-memory packing params (open could not read
-    /// its file back) is left untouched, and that is an ERROR the first time
-    /// the service sees it, not only an INFO verdict line.
+    /// An open module always has recorded packing params (open fails when
+    /// the file cannot be read back, and every store updates them). A module
+    /// without them stops the node, naming the module.
     #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn module_without_recorded_params_is_an_error() {
+    async fn module_without_recorded_params_stops_the_node() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         harness.module.forget_recorded_params_for_test();
-        apply_update(&mut harness, publish_update(hash, miner), 5).await;
-        assert_eq!(
-            harness
-                .module
-                .partition_assignment()
-                .map(|a| a.partition_hash),
-            Some(hash),
-            "the module is not touched"
+        let message = update_panics(&mut harness, publish_update(hash, miner), 5).await;
+        assert!(message.contains("storage module 0"), "{message}");
+        assert!(
+            message.contains("has no recorded packing params"),
+            "{message}"
         );
-        logs_assert(|lines: &[&str]| {
-            let n = lines
-                .iter()
-                .filter(|l| {
-                    l.contains("ERROR") && l.contains("open module has no recorded packing params")
-                })
-                .count();
-            if n == 1 {
-                Ok(())
-            } else {
-                Err(format!("{n} ERROR lines"))
-            }
-        });
-        apply_update(&mut harness, publish_update(hash, miner), 6).await;
-        logs_assert(|lines: &[&str]| {
-            let n = lines
-                .iter()
-                .filter(|l| {
-                    l.contains("ERROR") && l.contains("open module has no recorded packing params")
-                })
-                .count();
-            if n == 1 {
-                Ok(())
-            } else {
-                Err(format!("{n} ERROR lines after a second update"))
-            }
-        });
-    }
-
-    /// A marker wipe on a stale unassign publishes `Uninitialized` on a
-    /// parked drive, which keeps no span. Taking the newer slot back while
-    /// the channel is full keeps one span, sent later.
-    #[tokio::test]
-    async fn full_channel_defers_a_newer_local_ledger_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let (mut harness, hash, miner) = store_slot_one_with_data(50, 0x42).await;
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 60).await;
-        set_reset_marker(&harness.module);
-        fill_packing_channel(&harness);
-        apply_update(&mut harness, explicit_unassign(), 10).await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_parked_on_slot_one(&harness, hash);
-        assert!(!harness.inner.pending_ranges.contains_key(&0));
-        apply_update(&mut harness, publish_slot_update(hash, miner, 1), 60).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().slot_index,
-            Some(1)
-        );
-        assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness).await;
-        assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
-    /// A dropped retry finishes a marker wipe while the channel is full.
-    /// The tick keeps one span and sends it once the channel has room.
-    #[tokio::test]
-    async fn full_channel_defers_a_dropped_ledger_wipe() {
-        use irys_domain::storage_module::ChunkType;
-
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        write_synced_data(&harness.module, 0x43);
-        harness.module.fail_next_reset_for_test();
-        apply_update(&mut harness, explicit_unassign(), 4).await;
-        set_reset_marker(&harness.module);
-        harness.inner.pending_assignment = None;
-        fill_packing_channel(&harness);
-        harness.inner.tick().await;
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            Some(DataLedger::Publish.into())
-        );
-        assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness).await;
-        assert!(harness.receivers.packing.try_recv().is_err());
     }
 
     /// A later update with the same ledger and slot must not drop a span the

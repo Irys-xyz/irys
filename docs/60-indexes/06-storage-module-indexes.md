@@ -103,6 +103,25 @@ sparse, so the reserve runs, and on a large file that reserve can
 dominate the first open. `EOPNOTSUPP` leaves the file sparse. Any other
 `fallocate` error fails the open.
 
+Startup reads every configured drive's `packing_params.toml` before it
+opens any. A missing file is a fresh, empty drive. A file that cannot be
+read or parsed, or that is foreign (a newer file version, another chain
+id, another packing address), stops startup with an error that names the
+drive path and the reason. No drive is skipped: fix or clear that drive,
+or remove its path from `.irys_submodules.toml`, and start again.
+
+While the node runs, a drive I/O error on a path that changes what a
+drive holds (storing an assignment or the packing params, the v2 stamp,
+a release wipe, a full reset, the keep-entropy slot exit, a term-slot
+expiry) panics with the module id, its path, the operation and the
+error, and the node stops. Nothing is retried. The panic leaves the
+drive as a crash at that point would, and the next open brings it to a
+consistent state: a full wipe's reset marker is finished, the slot exit
+is repeated or its labels are reconciled, and submodule files that
+disagree are brought to one slot. Chunk data paths (mining reads,
+packing writes, sync and serving reads, checksum checks) are not
+changed by this.
+
 When the partition hash in `packing_params.toml` matches the assignment
 and the ledger or the slot does not, open keeps or clears the stored
 bytes by the ledger the file already names. The same hash, ledger, and

@@ -1986,13 +1986,12 @@ impl IrysNode {
                 ledger.total_chunks
             );
         }
-        let (storage_module_infos, chain_genesis_hash, unreadable_drive_ids) =
-            Self::drive_verdicts_at_startup(
-                &config,
-                &storage_submodules_config.submodule_paths,
-                &epoch_snapshot,
-                &block_index_guard,
-            )?;
+        let (storage_module_infos, chain_genesis_hash) = Self::drive_verdicts_at_startup(
+            &config,
+            &storage_submodules_config.submodule_paths,
+            &epoch_snapshot,
+            &block_index_guard,
+        )?;
         let logical_chunks = epoch_snapshot.partition_chunks();
 
         let storage_modules = Self::init_storage_modules(
@@ -2394,7 +2393,6 @@ impl IrysNode {
             block_tree_guard.clone(),
             service_senders.clone(),
             &config,
-            unreadable_drive_ids,
             runtime_handle.clone(),
         );
         // Apply the startup verdict's destructive half now, not at the next
@@ -2889,17 +2887,17 @@ impl IrysNode {
     }
 
     /// Decides what every configured drive holds before any is opened, logs
-    /// the verdicts, and returns the modules to open (a Foreign or unreadable
-    /// drive is not opened), the genesis hash later writes stamp, and the ids
-    /// of the drives whose file could not be read (they keep blocking new
-    /// placements at runtime). Nothing is written here. Startup is never in
-    /// sync.
+    /// the verdicts, and returns the modules to open (every configured drive)
+    /// and the genesis hash later writes stamp. A drive whose packing params
+    /// cannot be read or parsed, or that is foreign (newer version, other
+    /// chain, other miner), fails startup with an error naming it: no drive
+    /// is skipped. Nothing is written here. Startup is never in sync.
     fn drive_verdicts_at_startup(
         config: &Config,
         paths: &[std::path::PathBuf],
         epoch_snapshot: &irys_domain::EpochSnapshot,
         block_index_guard: &BlockIndexReadGuard,
-    ) -> eyre::Result<(Vec<StorageModuleInfo>, H256, Vec<usize>)> {
+    ) -> eyre::Result<(Vec<StorageModuleInfo>, H256)> {
         use irys_domain::drive_verdict;
 
         let genesis_hash = block_index_guard
@@ -2914,7 +2912,7 @@ impl IrysNode {
             genesis_hash,
             miner,
         };
-        let drives = drive_verdict::drive_verdict_inputs_from_disk(config, paths);
+        let drives = drive_verdict::drive_verdict_inputs_from_disk(config, paths)?;
         let inputs = drive_verdict::VerdictInputs {
             drives: &drives,
             assignments: &assignments,
@@ -2922,20 +2920,14 @@ impl IrysNode {
             in_sync: false,
             identity: &identity,
         };
-        let decisions = drive_verdict::decide(&inputs);
+        let decisions = drive_verdict::decide(&inputs)?;
         // Existing module paths retain their physical layout; logical bounds are
         // resolved separately and the finalized migration removes their suffix.
         let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
             .wrap_err("num_chunks_in_partition exceeds u32")?;
         let infos = drive_verdict::storage_module_infos(&drives, &decisions, num_chunks);
         drive_verdict::log_decisions(&inputs, &decisions, &infos);
-        let unreadable = drives
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, file))| matches!(file, drive_verdict::DriveFile::Unreadable(_)))
-            .map(|(id, _)| id)
-            .collect();
-        Ok((infos, genesis_hash, unreadable))
+        Ok((infos, genesis_hash))
     }
 
     async fn init_storage_modules(
