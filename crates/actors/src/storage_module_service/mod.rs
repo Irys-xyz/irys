@@ -110,6 +110,9 @@ pub struct StorageModuleServiceInner {
     last_decisions: HashMap<usize, (DriveVerdict, DriveAction)>,
     /// Assignments no drive held or received at the last update.
     last_unplaced: Vec<H256>,
+    /// The non-mining warning was logged (see
+    /// [`Self::warn_if_assigned_without_mining`]).
+    non_mining_warned: bool,
     /// Spans the packing channel did not accept. `tick` sends them until the
     /// channel accepts. A range stays one interval, so a full partition is not
     /// expanded into one repair offset per chunk.
@@ -254,6 +257,7 @@ impl StorageModuleServiceInner {
             identity,
             last_decisions: HashMap::new(),
             last_unplaced: Vec::new(),
+            non_mining_warned: false,
             pending_ranges: HashMap::new(),
             #[cfg(test)]
             heal_probe: None,
@@ -541,6 +545,7 @@ impl StorageModuleServiceInner {
             let module = &modules[&ids[decision.id]];
             self.apply_decision(module, decision, epoch_height).await?;
         }
+        self.warn_if_assigned_without_mining(&modules);
 
         // After assignments settle: best-effort gap-scan + index backfill for every
         // local SM on a data ledger. Do not fail membership updates if heal hard-
@@ -596,6 +601,31 @@ impl StorageModuleServiceInner {
                 );
             }
             self.last_unplaced = hashes;
+        }
+    }
+
+    /// A node converted from a mining mode keeps the partitions its drives
+    /// hold. It will not mine them, and the network cannot reassign a slot
+    /// that is still pledged, so the capacity is stranded. Say so once, after
+    /// the first update that leaves a module assigned, rather than leaving
+    /// the operator to infer it from packing on a node expected to go quiet.
+    fn warn_if_assigned_without_mining(&mut self, modules: &BTreeMap<usize, Arc<StorageModule>>) {
+        let node_mode = self.config.node_config.node_mode;
+        if self.non_mining_warned || node_mode.mines() {
+            return;
+        }
+        let assigned = modules
+            .values()
+            .filter(|module| module.partition_assignment().is_some())
+            .count();
+        if assigned > 0 {
+            self.non_mining_warned = true;
+            warn!(
+                "node_mode {node_mode:?} does not mine, but {assigned} storage module(s) \
+                 still hold partition assignments. This node keeps packing them and keeps \
+                 their slots pledged without ever mining them. Submit unpledge commitments \
+                 for those partitions if you meant to release the capacity."
+            );
         }
     }
 
