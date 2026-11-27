@@ -115,8 +115,10 @@ Open never changes what a drive holds. Startup opens every drive parked
 the drive mines nothing). The storage module service then applies the
 startup verdict from the first assignment update, through the same code
 as every later epoch. An open given an assignment the file does not
-record is refused. A crash during a full wipe is still finished at open
-from its reset marker.
+record is refused, and so is a module whose submodule packing files do
+not all record the same partition, ledger and slot (a file that records
+none, or a missing one, beside a recorded one counts). A crash during a
+full wipe is still finished at open from its reset marker.
 
 The service keeps the stored bytes when the drive keeps its partition on
 the same ledger slot, and when capacity gains a ledger. Leaving a ledger

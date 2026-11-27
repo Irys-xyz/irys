@@ -571,9 +571,8 @@ enum SyncFailurePoint {
     AfterResetIntervals,
     /// `store_assignment` has not written. The reset, if it ran, is done.
     AssignmentStore,
-    /// One submodule's `packing_params.toml` write inside `store_assignment`.
-    AssignmentFileWrite,
-    /// After that write's rename, as a failed directory fsync would return.
+    /// After one submodule's `packing_params.toml` rename inside
+    /// `store_assignment`, as a failed directory fsync would return.
     AssignmentFileWritten,
 }
 
@@ -902,11 +901,6 @@ pub struct StorageModule {
     /// In-memory copy of the first submodule's `packing_params.toml`. Set at
     /// open and by every write path.
     recorded_params: RwLock<Option<PackingParams>>,
-    /// Every submodule's file records the same partition, ledger and slot as
-    /// `recorded_params`. Set at open and by every successful store. A parked
-    /// open leaves a new submodule's file with no partition, so the first
-    /// file alone does not describe the module.
-    recorded_uniform: AtomicBool,
     /// Genesis hash stamped into v2 params. Set once after open.
     genesis_hash: RwLock<Option<H256>>,
     /// Bumped under the assignment write lock at the start of
@@ -2283,9 +2277,6 @@ thread_local! {
     /// Test open fails to read the packing params back after writing them.
     static FAIL_OPEN_PARAMS_READBACK: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
-    /// Test open fails the per-submodule re-read in the uniform-record check.
-    static FAIL_OPEN_UNIFORM_READBACK: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
     /// Runs once in a slot exit before the relabel reads the queued repairs.
     static BEFORE_KEEP_ENTROPY_RELABEL: std::cell::Cell<Option<fn(&StorageModule)>> =
         const { std::cell::Cell::new(None) };
@@ -2420,6 +2411,56 @@ impl StorageModule {
         Ok(())
     }
 
+    /// Every submodule file of a module must record the same partition,
+    /// ledger and slot: open never reconciles files that disagree, and a
+    /// file that records nothing (or is missing) beside one that records a
+    /// partition disagrees too. A module whose files are all missing is
+    /// fresh. The error names each file and what it records. Production
+    /// modules have one submodule; a split store needs the operator.
+    fn refuse_disagreeing_files(
+        storage_module_info: &StorageModuleInfo,
+        config: &Config,
+    ) -> eyre::Result<()> {
+        let mut records = Vec::new();
+        for (_, dir) in &storage_module_info.submodules {
+            let path = config
+                .node_config
+                .base_directory
+                .join(dir)
+                .join(PACKING_PARAMS_FILE_NAME);
+            let record = if path.exists() {
+                // A file that does not parse is refused by the open below.
+                let Ok(params) = PackingParams::from_toml(&path) else {
+                    continue;
+                };
+                Some((params.partition_hash, params.ledger, params.slot))
+            } else {
+                None
+            };
+            records.push((path, record));
+        }
+        let all_missing = records.iter().all(|(_, record)| record.is_none());
+        let first = records.first().map(|(_, record)| *record);
+        if all_missing || records.iter().all(|(_, record)| Some(*record) == first) {
+            return Ok(());
+        }
+        let listed: Vec<String> = records
+            .iter()
+            .map(|(path, record)| match record {
+                Some((hash, ledger, slot)) => format!(
+                    "{} records partition {hash:?} ledger {ledger:?} slot {slot:?}",
+                    path.display()
+                ),
+                None => format!("{} is missing", path.display()),
+            })
+            .collect();
+        eyre::bail!(
+            "storage module {}: its submodule packing params files disagree ({}); open does not reconcile them. Clear the submodules that do not belong to the partition this drive holds.",
+            storage_module_info.id,
+            listed.join("; ")
+        )
+    }
+
     fn open(
         storage_module_info: &StorageModuleInfo,
         config: &Config,
@@ -2448,76 +2489,10 @@ impl StorageModule {
         // Bind after a pending reset clears the old partition hash. Binding
         // first refuses a new partition, or the reset clear drops the new one.
         let mut pack_binds = Vec::new();
-        // Address, partition hash, and packing identity are checked before a
-        // submodule directory changes. Hash, ledger, and slot changes are
-        // written only after `bind_packing_identity` accepts. The reset
-        // marker is written after every later check that can refuse. A hash
-        // change sets it. The same hash leaving a ledger keeps its entropy
-        // and uninitializes the rest before the file names the new slot.
-        // Capacity gaining a ledger keeps the stored bytes.
-        let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
-            Vec::new();
-        let mut reset_dbs: Vec<SubmoduleIndex> = Vec::new();
-        let mut keep_entropy_starts: Vec<PartitionChunkOffset> = Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
 
-        // A store that failed between two submodule files and could not be
-        // put back leaves files of one module that disagree. A submodule whose
-        // file already names the wanted slot may then still hold labels and
-        // rows written for another slot, so every submodule takes the slot
-        // exit to the wanted slot. A parked open follows the first file that
-        // records a partition. Read only: a file that does not parse is
-        // refused by the loop below.
-        //
-        // Only files that record a partition hash are compared. A file with no
-        // hash is a new or released submodule (a parked open writes one for a
-        // new directory). It is already a new partition for its own submodule
-        // and says nothing about the slot of its siblings: counting it would
-        // relabel a sibling's data, and a parked open that took its slot from
-        // it would wipe the held partition (mainnet 2026-11-06).
-        let recorded_slots: Vec<(Option<H256>, Option<u32>, Option<usize>)> = storage_module_info
-            .submodules
-            .iter()
-            .filter_map(|(_, dir)| {
-                let path = config
-                    .node_config
-                    .base_directory
-                    .join(dir)
-                    .join(PACKING_PARAMS_FILE_NAME);
-                path.exists()
-                    .then(|| PackingParams::from_toml(&path).ok())
-                    .flatten()
-                    .filter(|params| params.partition_hash.is_some())
-                    .map(|params| (params.partition_hash, params.ledger, params.slot))
-            })
-            .collect();
-        // A parked open picks no partition between files that record
-        // different ones: either choice would wipe the other by directory
-        // order. The open is refused before any submodule is changed. With an
-        // assignment, a file of another partition is refused per submodule.
-        if storage_module_info.partition_assignment.is_none() {
-            let hashes: BTreeSet<H256> = recorded_slots
-                .iter()
-                .filter_map(|(hash, ..)| *hash)
-                .collect();
-            ensure!(
-                hashes.len() <= 1,
-                "storage module {} has no assignment and its submodule files record different partitions {:?}; refusing to choose one by directory order. Clear the submodules that do not belong to the partition this drive holds.",
-                storage_module_info.id,
-                hashes
-            );
-        }
-        let mixed_files = recorded_slots
-            .iter()
-            .any(|recorded| Some(recorded) != recorded_slots.first());
-        if mixed_files {
-            warn!(
-                storage_module.id = storage_module_info.id,
-                files = ?recorded_slots,
-                "the submodule packing params files of this module disagree; every submodule leaves its recorded slot for the wanted one"
-            );
-        }
+        Self::refuse_disagreeing_files(storage_module_info, config)?;
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
@@ -2607,52 +2582,10 @@ impl StorageModule {
             let chunks_file = opened.file;
 
             // A missing file is a fresh module. The identity check above did
-            // not refuse it. Write the current miner and consensus.
-            if let Some(params) = existing_params {
-                // Derive the desired state from the epoch snapshot.
-                // Address, partition hash, and packing identity already matched.
-                //
-                // No assignment parks the module: the file, labels and index
-                // stay. The epoch mapping opens a module without an assignment
-                // when it cannot place the partition the module holds (an
-                // old-format file, or a partition recorded after this epoch),
-                // and that partition may still be the miner's. Wiping here
-                // destroyed held partitions (mainnet 2026-11-06). A partition
-                // the chain has really released is wiped when the module is
-                // given a different one, or by the service's unassign path.
-                let (want_hash, want_ledger, want_slot) =
-                    match storage_module_info.partition_assignment {
-                        Some(pa) => (Some(pa.partition_hash), pa.ledger_id, pa.slot_index),
-                        None if mixed_files => recorded_slots[0],
-                        None => (params.partition_hash, params.ledger, params.slot),
-                    };
-
-                // A different partition clears the old labels and index rows.
-                // The marker is written after packing validation, interval
-                // repair, and coverage. A refusal before that leaves the bytes
-                // alone. The same partition leaving a ledger keeps its
-                // entropy: entropy does not depend on the ledger or slot. Its
-                // data belongs to the previous slot and is uninitialized
-                // before the file names the new slot. Capacity gaining a
-                // ledger keeps the bytes.
-                let ledger_or_slot_changed =
-                    params.ledger != want_ledger || params.slot != want_slot;
-                let leaving_a_ledger = params.ledger.is_some() && ledger_or_slot_changed;
-                let new_partition = params.partition_hash != want_hash;
-                if new_partition {
-                    reset_dbs.push(submodule_db.clone());
-                } else if leaving_a_ledger || mixed_files {
-                    keep_entropy_starts.push(submodule_interval.start());
-                }
-                if new_partition || ledger_or_slot_changed {
-                    rebind_after_bind.push((
-                        params_path.clone(),
-                        want_hash,
-                        want_ledger,
-                        want_slot,
-                    ));
-                }
-            } else {
+            // not refuse it. Write the current miner and consensus. An
+            // existing file stays as it is: open never changes what a drive
+            // holds.
+            if existing_params.is_none() {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
                     entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
@@ -2674,12 +2607,7 @@ impl StorageModule {
             if let Err(err) = packing_params_valid_for_module(&recorded, &expected) {
                 return Err(eyre!("{err} at {}", params_path.display()));
             }
-            // The file still names the old hash until bind accepts.
-            let bound_partition = rebind_after_bind
-                .iter()
-                .find(|(path, ..)| path == &params_path)
-                .map(|(_, hash, ..)| *hash)
-                .unwrap_or(params.partition_hash);
+            let bound_partition = params.partition_hash;
 
             let intervals_file_path = sub_base_path.join("intervals.json");
 
@@ -2735,13 +2663,6 @@ impl StorageModule {
         for (index, _partition, packing) in &pack_binds {
             index.bind_packing_identity(None, packing)?;
         }
-        // Marker first. A crash before it leaves `crc_complete` set on an
-        // intact module. `finish_pending_resets` clears the flag again.
-        for index in &reset_dbs {
-            index.set_reset_in_progress()?;
-            index.set_chunk_crc_complete(false)?;
-        }
-
         // A crash during reset leaves the marker set. Finish the clear and
         // rewrite that submodule's intervals before the file is loaded.
         // The packing bind runs after that clear, so a new partition hash is
@@ -2749,25 +2670,6 @@ impl StorageModule {
         Self::finish_pending_resets(&submodule_map)?;
         for (index, partition, packing) in pack_binds {
             index.bind_packing_identity(partition, &packing)?;
-        }
-        // Before the file names the new slot. A crash before the rebind
-        // reopens with the old slot recorded and repeats this.
-        Self::uninitialize_old_slot_at_open(
-            &submodule_map,
-            &keep_entropy_starts,
-            config.consensus.chunk_size,
-        )?;
-        // Bind accepted. The file may now name the new partition, ledger, and slot.
-        for (path, hash, ledger, slot) in rebind_after_bind {
-            let mut params = PackingParams::from_toml(&path)?;
-            params.partition_hash = hash;
-            params.ledger = ledger;
-            params.slot = slot;
-            // Only a parked open rebinds (disagreeing submodule files, to the
-            // first file's slot). No epoch approved it: claim no trusted height.
-            params.last_updated_height = Some(0);
-            params.assigned_height = None;
-            params.write_to_disk(&path)?;
         }
         // The service judges this drive from this in-memory copy. Open read
         // and wrote this file moments ago, so a read error here is an I/O
@@ -2801,39 +2703,6 @@ impl StorageModule {
             }
             None => None,
         };
-
-        // Every submodule file records the first file's slot. A read error is
-        // an I/O fault, as for the first read above: the open fails.
-        let mut recorded_uniform = initial_recorded.is_some();
-        if let Some(first) = initial_recorded {
-            for (_, dir) in &storage_module_info.submodules {
-                let path = config
-                    .node_config
-                    .base_directory
-                    .join(dir)
-                    .join(PACKING_PARAMS_FILE_NAME);
-                let read = PackingParams::from_toml(&path);
-                #[cfg(test)]
-                let read = if FAIL_OPEN_UNIFORM_READBACK.with(|flag| flag.replace(false)) {
-                    Err(eyre!("injected packing params re-read failure"))
-                } else {
-                    read
-                };
-                let params = read.wrap_err_with(|| {
-                    format!(
-                        "storage module {}: packing params at {} could not be read back at open; \
-                         check the drive before restarting",
-                        storage_module_info.id,
-                        path.display()
-                    )
-                })?;
-                if (params.partition_hash, params.ledger, params.slot)
-                    != (first.partition_hash, first.ledger, first.slot)
-                {
-                    recorded_uniform = false;
-                }
-            }
-        }
 
         // Attempt to load a global set of intervals from the submodules
         let mut loaded_intervals: NoditMap<
@@ -2911,7 +2780,6 @@ impl StorageModule {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             recorded_params: RwLock::new(initial_recorded),
-            recorded_uniform: AtomicBool::new(recorded_uniform),
             genesis_hash: RwLock::new(None),
             rollback_generation: AtomicU64::new(0),
             index_recovery: RwLock::new(()),
@@ -3198,23 +3066,20 @@ impl StorageModule {
     }
 
     /// Take back the partition this module's file records, in memory only.
-    /// Applies when the module holds no assignment in memory and every
-    /// submodule file records `assignment`'s hash, ledger and slot; no file
-    /// is rewritten. Returns whether the assignment was installed. A module
-    /// whose files disagree (a new submodule that records no partition) is
-    /// not adopted: the caller stores the assignment, which binds every file
-    /// before packing can write into that submodule.
+    /// Applies when the module holds no assignment in memory and its file
+    /// records `assignment`'s hash, ledger and slot (open refuses submodule
+    /// files that disagree); no file is rewritten. Returns whether the
+    /// assignment was installed.
     pub fn adopt_recorded(&self, assignment: PartitionAssignment) -> bool {
         let mut current = self.partition_assignment.write().unwrap();
         if current.is_some() {
             return false;
         }
-        let matches = self.recorded_uniform.load(Ordering::SeqCst)
-            && self
-                .recorded_params
-                .read()
-                .unwrap()
-                .is_some_and(|params| params.records(&assignment));
+        let matches = self
+            .recorded_params
+            .read()
+            .unwrap()
+            .is_some_and(|params| params.records(&assignment));
         if matches {
             *current = Some(assignment);
         }
@@ -3241,14 +3106,12 @@ impl StorageModule {
     /// leaves the in-memory assignment unchanged.
     ///
     /// The files are written one by one. An error is not recovered here: the
-    /// assignment paths stop the node on it (see [`Self::expect_drive_io`]),
-    /// which leaves the files exactly as a crash at that write would. Open
-    /// brings same-partition submodule files that disagree to one slot (see
-    /// `uninitialize_old_slot_at_open`), and a full wipe's marker is still
-    /// set, so the next open finishes it. A module with several submodules
-    /// whose store changed the partition and stopped between two files is
-    /// refused at open instead (its files name two partitions) and needs the
-    /// operator. A production drive has one submodule, so one atomic file.
+    /// assignment paths stop the node on it, which leaves the files exactly
+    /// as a crash at that write would. A full wipe's marker is still set, so
+    /// the next open finishes it. A module with several submodules that
+    /// stopped between two files is refused at open (its files disagree) and
+    /// needs the operator. A production drive has one submodule, so one
+    /// atomic file.
     fn store_assignment(
         &self,
         assignment: &mut Option<PartitionAssignment>,
@@ -3293,7 +3156,6 @@ impl StorageModule {
         if let Some((_, params)) = updated.first() {
             *self.recorded_params.write().unwrap() = Some(*params);
         }
-        self.recorded_uniform.store(true, Ordering::SeqCst);
         *assignment = next;
         if old_hash != new_hash {
             self.entropy_cache.lock().unwrap().clear();
@@ -3302,8 +3164,6 @@ impl StorageModule {
     }
 
     fn write_params_file(&self, path: &Path, params: &PackingParams) -> eyre::Result<()> {
-        #[cfg(test)]
-        self.inject_sync_failure(SyncFailurePoint::AssignmentFileWrite)?;
         params.write_to_disk(path)?;
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AssignmentFileWritten)?;
@@ -4617,20 +4477,8 @@ impl StorageModule {
                 match recorded {
                     Some(params) if params.records(&next) => {
                         // Take back the recorded slot without a reset or a
-                        // write. A submodule whose file records no partition
-                        // yet (its spans are Uninitialized) is bound by a
-                        // store instead, so a restart does not reset it.
-                        if self.recorded_uniform.load(Ordering::SeqCst) {
-                            *assignment = Some(next);
-                        } else {
-                            self.store_assignment(&mut assignment, Some(next), height)
-                                .map_err(|err| {
-                                    self.drive_fault(
-                                        "store the held partition on every submodule",
-                                        err,
-                                    )
-                                })?;
-                        }
+                        // write. Open refused submodule files that disagree.
+                        *assignment = Some(next);
                         if stamp_v2 {
                             stamp(self, &mut assignment)?;
                         }
@@ -7015,68 +6863,6 @@ impl StorageModule {
             file.write_all(serde_json::to_string(&map)?.as_bytes())?;
             file.commit()?;
             submodule.db.clear_reset_in_progress()?;
-        }
-        Ok(())
-    }
-
-    /// A submodule that keeps its partition and leaves a ledger slot, at open.
-    ///
-    /// Its interval file is rewritten with every label that is not `Entropy`
-    /// as `Uninitialized`. A span in the mid-write log is `Uninitialized` too:
-    /// its bytes may be a cut-off data write. The replace is atomic and
-    /// durable. Then its tx coverage, data-root placements and body jobs are
-    /// dropped over the whole submodule, `Entropy` included: those rows name
-    /// the old slot's txs. The later load, [`Self::reconcile_presence`] and
-    /// [`Self::reconcile_uninitialized_coverage`] drop the offset rows and
-    /// keep entropy checksums.
-    ///
-    /// Runs after [`Self::finish_pending_resets`] (a durable wipe marker wins
-    /// and leaves nothing to keep) and before the packing params name the new
-    /// slot. It is idempotent: a crash anywhere before that rebind reopens with
-    /// the old slot recorded and runs it again.
-    fn uninitialize_old_slot_at_open(
-        submodules: &SubmoduleMap,
-        starts: &[PartitionChunkOffset],
-        chunk_size: u64,
-    ) -> eyre::Result<()> {
-        if starts.is_empty() {
-            return Ok(());
-        }
-        let mid_writes = Self::load_mid_write_logs(submodules)?;
-        for (interval, submodule) in submodules.iter() {
-            if !starts.contains(&interval.start()) {
-                continue;
-            }
-            let path = recover_mutex(&submodule.intervals_file).clone();
-            let mut stored = read_intervals_file(&path)?;
-            for span in mid_writes.get(&interval.start()).into_iter().flatten() {
-                let _ = stored.cut(*span);
-                let _ =
-                    stored.insert_merge_touching_if_values_equal(*span, ChunkType::Uninitialized);
-            }
-            let mut kept = StorageIntervals::new();
-            for (span, kind) in stored.iter() {
-                let kind = match kind {
-                    ChunkType::Entropy => ChunkType::Entropy,
-                    ChunkType::Data | ChunkType::Interrupted | ChunkType::Uninitialized => {
-                        ChunkType::Uninitialized
-                    }
-                };
-                kept.insert_merge_touching_if_values_equal(*span, kind)
-                    .map_err(|err| eyre!("keep-entropy interval span: {err:?}"))?;
-            }
-            // Uninitialized offsets lose their checksums. A later scan sets
-            // the flag again once the module is settled.
-            submodule.db.set_chunk_crc_complete(false)?;
-            submodule.crc_complete.store(false, Ordering::SeqCst);
-            let mut file = get_atomic_file(&path)?;
-            file.write_all(serde_json::to_string(&kept)?.as_bytes())?;
-            file.commit()?;
-            // The whole submodule, `Entropy` included: every coverage row names
-            // the old slot. Offset (checksum) rows are not touched.
-            submodule
-                .db
-                .drop_uninitialized_coverage(&[(interval.start(), interval.end())], chunk_size)?;
         }
         Ok(())
     }
@@ -15518,10 +15304,6 @@ mod tests {
         )
     }
 
-    fn recorded_slot(tmp: &Path, dir: &str) -> eyre::Result<Option<usize>> {
-        Ok(PackingParams::from_toml(tmp.join(dir).join(PACKING_PARAMS_FILE_NAME))?.slot)
-    }
-
     /// Data at 0 and 2, entropy at 1 and 3, and a root indexed over the whole
     /// slot 0 (coverage, data-root infos and body jobs in both submodules).
     fn seed_two_submodules(storage: &StorageModule, root: H256) -> eyre::Result<()> {
@@ -15538,53 +15320,6 @@ mod tests {
         assert_eq!(tx_rows_in(storage, 0, 1)?, 1);
         assert_eq!(tx_rows_in(storage, 2, 3)?, 1);
         assert!(!storage.collect_data_root_infos(root)?.0.is_empty());
-        Ok(())
-    }
-
-    /// A parked open never takes its slot from a file that records no
-    /// partition, whichever submodule comes first: the held partition's data
-    /// and files stay as they were.
-    #[test]
-    fn parked_open_ignores_a_no_hash_file() -> eyre::Result<()> {
-        for (blank, kept) in [("hdd0", 2_u32), ("hdd1", 0_u32)] {
-            let tmp = TempDirBuilder::new()
-                .prefix(&format!("keep_entropy_nohash_parked_{blank}"))
-                .build();
-            let config = testing_config(tmp.path(), 32, 4);
-            let hash = H256::repeat_byte(0x5D);
-            let root = H256::repeat_byte(0x48);
-            let storage = two_submodules(tmp.path(), &config, Some(submit_slot(&config, hash, 0)))?;
-            seed_two_submodules(&storage, root)?;
-            drop(storage);
-            forget_recorded_partition(&tmp.path().join(blank))?;
-            let held = if blank == "hdd0" { "hdd1" } else { "hdd0" };
-            let before = fs::read(tmp.path().join(held).join(PACKING_PARAMS_FILE_NAME))?;
-
-            let parked = two_submodules(tmp.path(), &config, None)?;
-            assert_eq!(parked.partition_assignment(), None);
-            assert_eq!(
-                live_label(&parked, kept),
-                Some(ChunkType::Data),
-                "{blank}: held data wiped"
-            );
-            assert_eq!(
-                tx_rows_in(&parked, kept, kept + 1)?,
-                1,
-                "{blank}: held coverage dropped"
-            );
-            assert_eq!(
-                fs::read(tmp.path().join(held).join(PACKING_PARAMS_FILE_NAME))?,
-                before,
-                "{blank}: the held file was rewritten"
-            );
-            assert_eq!(
-                PackingParams::from_toml(tmp.path().join(blank).join(PACKING_PARAMS_FILE_NAME))?
-                    .partition_hash,
-                None
-            );
-            drop(parked);
-            drop(tmp);
-        }
         Ok(())
     }
 
@@ -15784,79 +15519,77 @@ mod tests {
         Ok(())
     }
 
-    /// A parked open whose submodule files record different partitions is
-    /// refused before any file changes: directory order must not pick the
-    /// partition that survives.
+    /// Open refuses a module whose submodule files disagree: another
+    /// partition, another slot, a file that records no partition, or a
+    /// missing file beside a recorded one. Nothing changes on either drive,
+    /// parked or assigned. Open never reconciles them.
     #[test]
-    fn parked_open_refuses_files_of_different_partitions() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new()
-            .prefix("keep_entropy_two_hashes")
-            .build();
-        let config = testing_config(tmp.path(), 32, 4);
-        let hash = H256::repeat_byte(0x5F);
-        let storage = two_submodules(tmp.path(), &config, Some(submit_slot(&config, hash, 0)))?;
-        seed_two_submodules(&storage, H256::repeat_byte(0x49))?;
-        drop(storage);
-        let path = tmp.path().join("hdd1").join(PACKING_PARAMS_FILE_NAME);
-        let mut params = PackingParams::from_toml(&path)?;
-        params.partition_hash = Some(H256::repeat_byte(0x60));
-        params.write_to_disk(&path)?;
-        let files_before = [
-            fs::read(tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME))?,
-            fs::read(&path)?,
-            fs::read(tmp.path().join("hdd0").join("intervals.json"))?,
-            fs::read(tmp.path().join("hdd1").join("intervals.json"))?,
+    fn open_refuses_disagreeing_submodule_files() -> eyre::Result<()> {
+        let edits: [(&str, fn(&mut PackingParams)); 3] = [
+            ("other_hash", |p| {
+                p.partition_hash = Some(H256::repeat_byte(0x60))
+            }),
+            ("other_slot", |p| p.slot = Some(1)),
+            ("no_hash", |p| {
+                p.partition_hash = None;
+                p.ledger = None;
+                p.slot = None;
+            }),
         ];
-
-        let err = two_submodules(tmp.path(), &config, None)
-            .expect_err("a parked open must not choose between partitions");
-        assert!(
-            err.to_string().contains("record different partitions"),
-            "{err}"
-        );
-        let files_after = [
-            fs::read(tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME))?,
-            fs::read(&path)?,
-            fs::read(tmp.path().join("hdd0").join("intervals.json"))?,
-            fs::read(tmp.path().join("hdd1").join("intervals.json"))?,
-        ];
-        assert_eq!(files_after, files_before, "a refused open changed a file");
-        drop(tmp);
-        Ok(())
-    }
-
-    /// A parked module whose second submodule records no partition is not
-    /// adopted from the first file alone. Storing the assignment binds every
-    /// file; a module whose files agree is adopted without a write.
-    #[test]
-    fn adoption_requires_every_submodule_file() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new()
-            .prefix("keep_entropy_adopt_blank")
-            .build();
-        let config = testing_config(tmp.path(), 32, 4);
-        let hash = H256::repeat_byte(0x61);
-        let slot = submit_slot(&config, hash, 0);
-        let storage = two_submodules(tmp.path(), &config, Some(slot))?;
-        drop(storage);
-        forget_recorded_partition(&tmp.path().join("hdd1"))?;
-
-        let parked = two_submodules(tmp.path(), &config, None)?;
-        assert!(!parked.adopt_recorded(slot), "adopted with a blank sibling");
-        assert_eq!(parked.partition_assignment(), None);
-        parked.assign_partition(slot, 3)?;
-        assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(0));
-        assert_eq!(
-            PackingParams::from_toml(tmp.path().join("hdd1").join(PACKING_PARAMS_FILE_NAME))?
-                .partition_hash,
-            Some(hash)
-        );
-        drop(parked);
-
-        let parked = two_submodules(tmp.path(), &config, None)?;
-        assert!(parked.adopt_recorded(slot), "files that agree are adopted");
-        assert_eq!(parked.partition_assignment(), Some(slot));
-        drop(parked);
-        drop(tmp);
+        for (case, edit) in edits
+            .into_iter()
+            .map(|(c, e)| (c, Some(e)))
+            .chain([("missing", None)])
+        {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("open_disagreeing_{case}"))
+                .build();
+            let config = testing_config(tmp.path(), 32, 4);
+            let hash = H256::repeat_byte(0x5F);
+            let slot = submit_slot(&config, hash, 0);
+            let storage = two_submodules(tmp.path(), &config, Some(slot))?;
+            seed_two_submodules(&storage, H256::repeat_byte(0x49))?;
+            drop(storage);
+            let path = tmp.path().join("hdd1").join(PACKING_PARAMS_FILE_NAME);
+            match edit {
+                Some(edit) => {
+                    let mut params = PackingParams::from_toml(&path)?;
+                    edit(&mut params);
+                    params.write_to_disk(&path)?;
+                }
+                None => fs::remove_file(&path)?,
+            }
+            let files_before = [
+                fs::read(tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME))?,
+                fs::read(&path).unwrap_or_default(),
+                fs::read(tmp.path().join("hdd0").join("intervals.json"))?,
+                fs::read(tmp.path().join("hdd1").join("intervals.json"))?,
+            ];
+            for assignment in [None, Some(slot)] {
+                let err = two_submodules(tmp.path(), &config, assignment)
+                    .expect_err("disagreeing files are refused");
+                assert!(
+                    err.to_string()
+                        .contains("submodule packing params files disagree"),
+                    "{case}: {err}"
+                );
+                assert!(
+                    err.to_string().contains(&path.display().to_string()),
+                    "{case}: {err}"
+                );
+            }
+            let files_after = [
+                fs::read(tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME))?,
+                fs::read(&path).unwrap_or_default(),
+                fs::read(tmp.path().join("hdd0").join("intervals.json"))?,
+                fs::read(tmp.path().join("hdd1").join("intervals.json"))?,
+            ];
+            assert_eq!(
+                files_after, files_before,
+                "{case}: a refused open changed a file"
+            );
+            drop(tmp);
+        }
         Ok(())
     }
 
@@ -23184,31 +22917,6 @@ mod tests {
         );
         // A later open with a readable file works.
         StorageModule::new(&module_info(&sub, None), &config)?;
-        Ok(())
-    }
-
-    /// The uniform-record check re-reads each submodule's packing file. A
-    /// read error there is an I/O fault too: the open fails naming the file,
-    /// instead of opening the module as "not uniform".
-    #[test]
-    fn open_fails_when_a_submodule_file_cannot_be_reread() -> eyre::Result<()> {
-        let hash = H256::repeat_byte(0x67);
-        let (_tmp, config, sub) = seed_assigned_entropy("open_reread_fails", hash)?;
-        FAIL_OPEN_UNIFORM_READBACK.with(|flag| flag.set(true));
-        let result = StorageModule::new(
-            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
-            &config,
-        );
-        FAIL_OPEN_UNIFORM_READBACK.with(|flag| flag.set(false));
-        let text = format!(
-            "{:#}",
-            result.expect_err("a re-read failure fails the open")
-        );
-        assert!(
-            text.contains("could not be read back at open")
-                && text.contains("injected packing params re-read failure"),
-            "{text}"
-        );
         Ok(())
     }
 
