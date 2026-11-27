@@ -198,6 +198,12 @@ fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
 
 /// The drive records `new`'s partition on another ledger slot, installed
 /// after the epoch judged here: it waits for a later epoch.
+///
+/// Only leaving a ledger slot waits. A drive that records capacity and is
+/// given a ledger slot by an older epoch takes it: a reorg made that epoch
+/// canonical again, the slot is this drive's on that chain, and gaining a
+/// slot destroys nothing (data is written over entropy only where data goes).
+/// Leaving would relabel and repack the slot's data, so it is held back.
 fn waits_on_a_newer_record(
     inputs: &VerdictInputs<'_>,
     p: &PackingParams,

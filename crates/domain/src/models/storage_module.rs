@@ -2310,10 +2310,36 @@ fn recover_read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 
 impl StorageModule {
     /// Initializes a new StorageModule. The submodule index is RocksDB v1.
+    ///
+    /// A slot change applied here records no trusted assigned height: this
+    /// caller did not say which epoch approved it. Startup uses
+    /// [`Self::new_approved`].
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
         Self::open(
             storage_module_info,
             config,
+            None,
+            #[cfg(feature = "bench")]
+            None,
+            #[cfg(feature = "bench")]
+            None,
+        )
+    }
+
+    /// Open with an assignment the startup drive verdict approved against the
+    /// epoch at `approved_epoch_height`. A slot change applied at open records
+    /// that height as the file's assigned height, as a runtime store records
+    /// the epoch that installed the slot. The older-epoch guard and a later
+    /// release then work as for any other stored assignment.
+    pub fn new_approved(
+        storage_module_info: &StorageModuleInfo,
+        config: &Config,
+        approved_epoch_height: u64,
+    ) -> eyre::Result<Self> {
+        Self::open(
+            storage_module_info,
+            config,
+            Some(approved_epoch_height),
             #[cfg(feature = "bench")]
             None,
             #[cfg(feature = "bench")]
@@ -2335,7 +2361,7 @@ impl StorageModule {
         split: Arc<SplitBacking>,
         index: BenchIndex,
     ) -> eyre::Result<Self> {
-        Self::open(storage_module_info, config, Some(split), Some(index))
+        Self::open(storage_module_info, config, None, Some(split), Some(index))
     }
 
     /// Both the span built at open and the loaded file must cover the partition.
@@ -2364,6 +2390,7 @@ impl StorageModule {
     fn open(
         storage_module_info: &StorageModuleInfo,
         config: &Config,
+        approved_epoch_height: Option<u64>,
         #[cfg(feature = "bench")] split: Option<Arc<SplitBacking>>,
         #[cfg(feature = "bench")] index: Option<BenchIndex>,
     ) -> eyre::Result<Self> {
@@ -2689,10 +2716,23 @@ impl StorageModule {
             params.partition_hash = hash;
             params.ledger = ledger;
             params.slot = slot;
-            params.last_updated_height = Some(0);
-            // Open does not know when this assignment was installed, so a v2
-            // file must not claim a trusted height.
-            params.assigned_height = None;
+            match approved_epoch_height {
+                // The startup verdict accepted this assignment at that epoch,
+                // so it is the height that installed it. Recording it keeps
+                // the older-epoch guard and a later release working; clearing
+                // it would erase a trusted height the file already had.
+                Some(height) => {
+                    params.last_updated_height = Some(height);
+                    if params.is_v2() {
+                        params.assigned_height = Some(height);
+                    }
+                }
+                // No approving epoch: claim no trusted height.
+                None => {
+                    params.last_updated_height = Some(0);
+                    params.assigned_height = None;
+                }
+            }
             params.write_to_disk(&path)?;
         }
         // The service judges this drive from this in-memory copy. Open read
@@ -23091,6 +23131,97 @@ mod tests {
         fn drop(&mut self) {
             FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.set(false));
         }
+    }
+
+    /// Startup applies a same-partition slot change at open, approved by the
+    /// drive verdict at epoch 2000. The file records 2000 as its trusted
+    /// assigned height, not "no height", so the verdict still guards the
+    /// drive: an older epoch (1500) asking for the old slot waits, and a later
+    /// epoch (3000) that drops the partition releases it. A plain `new` open
+    /// still claims no height.
+    #[test]
+    fn approved_open_slot_change_records_the_approving_epoch() -> eyre::Result<()> {
+        use crate::drive_verdict::{
+            ChainIdentity, DriveAction, DriveFile, DriveVerdict, VerdictInputs, WaitReason, decide,
+        };
+
+        let hash = H256::repeat_byte(0x65);
+        let (_tmp, config, sub) = seed_assigned_entropy("approved_open_height", hash)?;
+        let path = sub.join(PACKING_PARAMS_FILE_NAME);
+        let genesis = H256::repeat_byte(0x9E);
+        PackingParams::from_toml(&path)?
+            .stamped(config.consensus.chain_id, genesis, 1000)
+            .write_to_disk(&path)?;
+        let publish = PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            ..submit_slot(&config, hash, 0)
+        };
+
+        let module = StorageModule::new_approved(&module_info(&sub, Some(publish)), &config, 2000)?;
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Entropy),
+            "the slot change keeps the entropy"
+        );
+        let recorded = PackingParams::from_toml(&path)?;
+        assert_eq!(recorded.ledger, Some(DataLedger::Publish.into()));
+        assert_eq!(recorded.trusted_assigned_height(), Some(2000));
+        assert_eq!(recorded.last_updated_height, Some(2000));
+        assert_eq!(
+            module
+                .recorded_params()
+                .and_then(|p| p.trusted_assigned_height()),
+            Some(2000)
+        );
+        drop(module);
+
+        let identity = ChainIdentity {
+            chain_id: config.consensus.chain_id,
+            genesis_hash: genesis,
+            miner: config.node_config.miner_address(),
+        };
+        let drives = [(sub, DriveFile::Recorded(recorded))];
+        let judge = |assignments: &[PartitionAssignment], epoch_height| {
+            decide(&VerdictInputs {
+                drives: &drives,
+                assignments,
+                epoch_height,
+                in_sync: true,
+                identity: &identity,
+            })
+        };
+        let older = judge(&[submit_slot(&config, hash, 0)], 1500)?;
+        assert_eq!(
+            older[0].verdict,
+            DriveVerdict::Wait(WaitReason::RecordedNewerThanEpoch),
+            "an epoch older than the approved slot change does not move the drive back"
+        );
+        assert_eq!(older[0].action, DriveAction::Idle);
+        let dropped = judge(&[], 3000)?;
+        assert_eq!(dropped[0].verdict, DriveVerdict::Released);
+        assert_eq!(dropped[0].action, DriveAction::Clear);
+        Ok(())
+    }
+
+    /// Without an approving epoch, an open slot change claims no trusted
+    /// height (the file may be ahead of no known epoch).
+    #[test]
+    fn unapproved_open_slot_change_claims_no_height() -> eyre::Result<()> {
+        let hash = H256::repeat_byte(0x66);
+        let (_tmp, config, sub) = seed_assigned_entropy("unapproved_open_height", hash)?;
+        let path = sub.join(PACKING_PARAMS_FILE_NAME);
+        PackingParams::from_toml(&path)?
+            .stamped(config.consensus.chain_id, H256::repeat_byte(0x9E), 1000)
+            .write_to_disk(&path)?;
+        drop(StorageModule::new(
+            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &config,
+        )?);
+        let recorded = PackingParams::from_toml(&path)?;
+        assert_eq!(recorded.ledger, None);
+        assert_eq!(recorded.trusted_assigned_height(), None);
+        assert_eq!(recorded.last_updated_height, Some(0));
+        Ok(())
     }
 
     /// A packing params file that cannot be read back right after open

@@ -20,6 +20,7 @@ pub(super) async fn open_storage_modules(
     infos: Vec<StorageModuleInfo>,
     consensus: Arc<DatabaseEnv>,
     partition_chunks: u64,
+    approved_epoch_height: Option<u64>,
     #[cfg(test)] open_delay: Duration,
 ) -> eyre::Result<Vec<Arc<StorageModule>>> {
     // The first RocksDB open in the process fixes the shared cache and write
@@ -42,7 +43,11 @@ pub(super) async fn open_storage_modules(
             }
             // MDBX-SUBMODULE-INDEX: delete this call with submodule_index_migration.
             migrate_submodule_indexes(&info, &config, &consensus, partition_chunks)?;
-            StorageModule::new(&info, &config).map(Arc::new)
+            match approved_epoch_height {
+                Some(height) => StorageModule::new_approved(&info, &config, height),
+                None => StorageModule::new(&info, &config),
+            }
+            .map(Arc::new)
         })
     });
     let results = futures::future::join_all(opens).await;
@@ -222,6 +227,7 @@ mod tests {
                 vec![info(1, "moved")],
                 consensus,
                 u64::from(CHUNKS),
+                None,
                 Duration::ZERO,
             )
         };
@@ -256,9 +262,15 @@ mod tests {
         }
         let infos = vec![info(10, "good-0"), info(20, "good-1"), info(30, "good-2")];
         let started = Instant::now();
-        let opened =
-            open_storage_modules(&config, infos, consensus.clone(), u64::from(CHUNKS), DELAY)
-                .await?;
+        let opened = open_storage_modules(
+            &config,
+            infos,
+            consensus.clone(),
+            u64::from(CHUNKS),
+            None,
+            DELAY,
+        )
+        .await?;
         let elapsed = started.elapsed();
         let ids: Vec<_> = opened.iter().map(|module| module.id).collect();
         assert_eq!(ids, vec![10, 20, 30]);
@@ -296,6 +308,7 @@ mod tests {
             ],
             consensus,
             u64::from(CHUNKS),
+            None,
             Duration::ZERO,
         )
         .await

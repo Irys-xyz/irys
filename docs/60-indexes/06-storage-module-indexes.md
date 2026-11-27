@@ -113,9 +113,10 @@ or remove its path from `.irys_submodules.toml`, and start again.
 While the node runs, a drive I/O error on a path that changes what a
 drive holds (storing an assignment or the packing params, the v2 stamp,
 a release wipe, a full reset, the keep-entropy slot exit, a term-slot
-expiry) panics with the module id, its path, the operation and the
-error, and the node stops. Nothing is retried. The panic leaves the
-drive as a crash at that point would, and the next open brings it to a
+expiry) logs the module id, its path, the operation and the error, and
+aborts the process at once: nothing can write to a drive after it.
+Nothing is retried. The abort leaves the drive as a crash at that point
+would, and the next open brings it to a
 consistent state: a full wipe's reset marker is finished, the slot exit
 is repeated or its labels are reconciled, and submodule files that
 disagree are brought to one slot. Chunk data paths (mining reads,
@@ -480,3 +481,15 @@ directory.
 Both directories stay on disk. Free space must cover a second copy.
 Measure the live index with `du` before you start. Leave extra room for
 the RocksDB WAL. Verify reads both copies.
+
+A drive is never moved off a ledger slot, or released, on an epoch older
+than the assignment its packing file records: the verdict waits for a
+later epoch. Gaining a slot is not held back the same way. When a reorg
+makes an older epoch canonical again and that epoch puts a capacity
+partition back on a ledger slot, the drive takes the slot at once: that
+destroys nothing (data is written over entropy only where data goes),
+and the canonical chain says the slot is this drive's. An open that
+applies a slot change approved by the startup verdict records the
+verdict's epoch as the file's assigned height, as a runtime store does,
+so the guard keeps working after a restart.
+

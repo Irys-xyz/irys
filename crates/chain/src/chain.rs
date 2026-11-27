@@ -1998,11 +1998,14 @@ impl IrysNode {
         )?;
         let logical_chunks = epoch_snapshot.partition_chunks();
 
+        // The verdict judged every drive against this epoch: a slot change
+        // that open applies records it as the drive's assigned height.
         let storage_modules = Self::init_storage_modules(
             &config,
             storage_module_infos,
             Arc::clone(irys_db.consensus()),
             logical_chunks,
+            epoch_snapshot.epoch_height,
         )
         .await?;
         for module in storage_modules.read().unwrap().iter() {
@@ -2939,12 +2942,14 @@ impl IrysNode {
         storage_module_infos: Vec<StorageModuleInfo>,
         consensus: Arc<irys_database::reth_db::DatabaseEnv>,
         partition_chunks: u64,
+        approved_epoch_height: u64,
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
         let storage_modules = crate::storage_module_init::open_storage_modules(
             config,
             storage_module_infos,
             consensus,
             partition_chunks,
+            Some(approved_epoch_height),
             #[cfg(test)]
             Duration::ZERO,
         )
