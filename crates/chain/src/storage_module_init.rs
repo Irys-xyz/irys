@@ -85,7 +85,7 @@ fn migrate_submodule_indexes(
             .submodules
             .iter()
             .map(|(_, dir)| {
-                let path = config.node_config.base_directory.join(dir);
+                let path = irys_domain::submodule_dir(config, dir);
                 let label = path.display().to_string();
                 let span = span.clone();
                 let handle = scope.spawn(move || {
@@ -326,6 +326,81 @@ mod tests {
             assert!(base.join(name).join("db").join("mdbx.dat").is_file());
             assert!(!base.join(name).join("rocks").exists());
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod relative_path_tests {
+    use irys_config::submodules::StorageSubmodulesConfig;
+    use irys_domain::drive_verdict::{self, DriveFile};
+    use irys_domain::{PACKING_PARAMS_FILE_NAME, PackingParams, StorageModule};
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::partition::PartitionAssignment;
+    use irys_types::{
+        Config, ConsensusConfig, ConsensusOptions, DataLedger, H256, NodeConfig, NodeMode,
+    };
+    use std::path::PathBuf;
+
+    /// A relative base directory and the generated relative submodule paths,
+    /// with the process directory not the base: the file a store writes is
+    /// the one the startup verdict and the next open read, beside the
+    /// chunks, the index and the intervals.
+    #[test]
+    fn relative_paths_store_where_open_and_the_verdict_read() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("relative_paths").build();
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&cwd)?;
+        // Each nextest test runs in its own process.
+        std::env::set_current_dir(&cwd)?;
+        let cwd = std::env::current_dir()?;
+        let base = PathBuf::from("node");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.node_mode = NodeMode::Miner;
+        node_config.base_directory = base.clone();
+        node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 10,
+            ..ConsensusConfig::testing()
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // The generated config records `node/storage_modules/submodule_N`,
+        // relative. Its data lives under the base directory joined with it.
+        let submodules = StorageSubmodulesConfig::load(base, NodeMode::Miner)?;
+        let dir = cwd.join("node/node/storage_modules/submodule_0");
+        assert_eq!(submodules.submodule_paths[0], dir);
+        let paths = &submodules.submodule_paths[..1];
+
+        let genesis = H256::repeat_byte(0x9E);
+        let startup = drive_verdict::read_startup_drives(&config, paths, genesis)?;
+        let module = StorageModule::new(&startup.parked[0], &config)?;
+        module.set_chain_identity(genesis);
+        let next = PartitionAssignment {
+            partition_hash: H256::repeat_byte(0x42),
+            miner_address: config.node_config.miner_address(),
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(3),
+        };
+        module.hold(Some(next), 7, false)?;
+        drop(module);
+
+        let stored = PackingParams::from_toml(dir.join(PACKING_PARAMS_FILE_NAME))?;
+        assert!(stored.records(&next), "{stored:?}");
+        assert_eq!(stored.assigned_height, Some(7));
+        assert_eq!(stored.last_updated_height, Some(7));
+        assert!(
+            !cwd.join("node/storage_modules/submodule_0")
+                .join(PACKING_PARAMS_FILE_NAME)
+                .exists(),
+            "no packing file is written beside the unjoined path"
+        );
+
+        let startup = drive_verdict::read_startup_drives(&config, paths, genesis)?;
+        assert_eq!(startup.drives[0].1, DriveFile::Recorded(stored));
+        let reopened = StorageModule::new(&startup.parked[0], &config)?;
+        assert_eq!(reopened.recorded_params(), stored);
         Ok(())
     }
 }

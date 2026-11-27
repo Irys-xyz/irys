@@ -65,7 +65,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let genesis_parts_before;
     let signer1_parts_before;
     let signer2_parts_before;
-    let sm_infos_before;
+    let live_before;
 
     let node = {
         // Start a test node with custom configuration
@@ -250,15 +250,14 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             &signer2_address,
         ));
 
-        sm_infos_before = node
-            .node_ctx
-            .block_tree_guard
-            .read()
-            .canonical_epoch_snapshot()
-            .map_storage_modules_to_partition_assignments()
-            .expect("packing params");
-
         node.wait_until_height_confirmed(6, 10).await?;
+        live_before = live_assignments(&node);
+        assert!(
+            live_before
+                .iter()
+                .any(|(_, assignment)| assignment.is_some()),
+            "the genesis node's modules hold partitions before the restart"
+        );
 
         node
     };
@@ -329,15 +328,16 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     assert_eq!(signer1_parts_after, signer1_parts_before);
     assert_eq!(signer2_parts_after, signer2_parts_before);
 
-    let sm_infos_after = restarted_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_epoch_snapshot()
-        .map_storage_modules_to_partition_assignments()
-        .expect("packing params");
-
-    assert_eq!(sm_infos_before, sm_infos_after);
+    // Each open module holds the same assignment after the restart.
+    let mut live_after = live_assignments(&restarted_node);
+    for _ in 0..20 {
+        if live_after == live_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        live_after = live_assignments(&restarted_node);
+    }
+    assert_eq!(live_after, live_before);
 
     // ===== TEST CLEANUP =====
     restarted_node.stop().await;
@@ -1065,4 +1065,16 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     node.stop().await;
     Ok(())
+}
+
+/// Each open storage module's id and its live (in-memory) assignment.
+fn live_assignments(
+    node: &IrysNodeTest<IrysNodeCtx>,
+) -> Vec<(usize, Option<irys_types::partition::PartitionAssignment>)> {
+    node.node_ctx
+        .storage_modules_guard
+        .read()
+        .iter()
+        .map(|sm| (sm.id, sm.partition_assignment()))
+        .collect()
 }

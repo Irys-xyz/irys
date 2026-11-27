@@ -2010,7 +2010,6 @@ mod tests {
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            storage_submodules_config: None,
             config: config.clone(),
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),

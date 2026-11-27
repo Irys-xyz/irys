@@ -37,6 +37,16 @@ pub struct StorageSubmodulesConfig {
 pub const SUBMODULES_CONFIG_FILE_NAME: &str = ".irys_submodules.toml";
 
 impl StorageSubmodulesConfig {
+    /// Writes this config to [`SUBMODULES_CONFIG_FILE_NAME`] in
+    /// `instance_dir`, creating the directory, and returns the file's path.
+    pub fn write_to(&self, instance_dir: &Path) -> eyre::Result<PathBuf> {
+        fs::create_dir_all(instance_dir)?;
+        let path = instance_dir.join(SUBMODULES_CONFIG_FILE_NAME);
+        fs::write(&path, toml::to_string(self)?)
+            .map_err(|err| eyre::eyre!("failed to write {}: {err}", path.display()))?;
+        Ok(path)
+    }
+
     /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path.
     ///
     /// Genesis nodes require at least 3 submodules to ensure minimum network
@@ -59,6 +69,25 @@ impl StorageSubmodulesConfig {
         Ok(config)
     }
 
+    /// Every submodule path resolved to where its data lives:
+    /// `instance_dir.join(path)`, with `instance_dir` made absolute against
+    /// the process's current directory. An absolute configured path stays
+    /// itself; a relative one names the directory under the node's base
+    /// directory that open has always used. Every consumer then sees the same
+    /// stable path.
+    pub fn resolved(mut self, instance_dir: &Path) -> eyre::Result<Self> {
+        let base = std::path::absolute(instance_dir).map_err(|err| {
+            eyre::eyre!(
+                "cannot resolve base directory {}: {err}",
+                instance_dir.display()
+            )
+        })?;
+        for path in &mut self.submodule_paths {
+            *path = base.join(&*path);
+        }
+        Ok(self)
+    }
+
     pub fn load_for_test(instance_dir: PathBuf, num_submodules: usize) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
@@ -78,21 +107,20 @@ impl StorageSubmodulesConfig {
             is_using_hardcoded_paths: true,
             submodule_paths,
         };
-
-        fs::create_dir_all(instance_dir).expect(".irys config dir can be created");
-        let toml = toml::to_string(&config).expect("Able to serialize config");
-        fs::write(&config_path_local, toml).unwrap_or_else(|_| {
-            panic!("Failed to write config to {}", config_path_local.display())
-        });
+        config
+            .write_to(&instance_dir)
+            .expect("test submodule config can be written");
 
         for path in &config.submodule_paths {
             fs::create_dir_all(path).expect("to create submodule dir");
         }
 
         // Tests don't enforce genesis minimum — pass Miner to skip the check.
-        Self::from_toml(config_path_local, NodeMode::Miner)
+        Self::from_toml(config_path_local, NodeMode::Miner)?.resolved(&instance_dir)
     }
 
+    /// Loads (or creates) the config in `instance_dir`, the node's base
+    /// directory, with every submodule path resolved (see [`Self::resolved`]).
     pub fn load(instance_dir: PathBuf, node_mode: NodeMode) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
@@ -124,7 +152,7 @@ impl StorageSubmodulesConfig {
         if config_path_local.exists() {
             let config = Self::from_toml(config_path_local, node_mode)?;
             if config.is_using_hardcoded_paths {
-                return Ok(config);
+                return config.resolved(&instance_dir);
             };
             let submodule_paths = &config.submodule_paths;
             for idx in 0..submodule_paths.len() {
@@ -149,7 +177,7 @@ impl StorageSubmodulesConfig {
                 }
             }
 
-            Ok(config)
+            config.resolved(&instance_dir)
         } else {
             tracing::info!("Creating default config at {:?}", config_path_local);
             let config = Self {
@@ -160,18 +188,15 @@ impl StorageSubmodulesConfig {
                     Path::new(&instance_dir).join("storage_modules/submodule_2"),
                 ],
             };
-
-            fs::create_dir_all(instance_dir).expect(".irys config dir can be created");
-            let toml = toml::to_string(&config).expect("Able to serialize config");
-            fs::write(&config_path_local, toml).unwrap_or_else(|_| {
-                panic!("Failed to write config to {}", config_path_local.display())
-            });
+            config
+                .write_to(&instance_dir)
+                .expect("default submodule config can be written");
 
             for path in &config.submodule_paths {
                 fs::create_dir_all(path).expect("to create submodule dir");
             }
 
-            Self::from_toml(config_path_local, node_mode)
+            Self::from_toml(config_path_local, node_mode)?.resolved(&instance_dir)
         }
     }
 }
@@ -217,14 +242,11 @@ mod tests {
 
     fn write_config_toml(dir: &Path, count: usize) -> eyre::Result<PathBuf> {
         let paths: Vec<PathBuf> = (0..count).map(|i| dir.join(format!("sub_{}", i))).collect();
-        let config = StorageSubmodulesConfig {
+        StorageSubmodulesConfig {
             is_using_hardcoded_paths: true,
             submodule_paths: paths,
-        };
-        let toml_str = toml::to_string(&config)?;
-        let path = dir.join("test.toml");
-        fs::write(&path, &toml_str)?;
-        Ok(path)
+        }
+        .write_to(dir)
     }
 
     #[rstest]

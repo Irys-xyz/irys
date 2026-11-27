@@ -70,7 +70,7 @@ async fn mine_until(
 /// it would be. The restore sweep regenerates it from the persisted compact
 /// leaves.
 #[test_log::test(tokio::test)]
-async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()> {
+async fn slow_heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()> {
     initialize_tracing();
 
     let anchor_expiry_depth = 5_u16;

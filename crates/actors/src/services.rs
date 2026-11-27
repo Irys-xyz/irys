@@ -79,13 +79,6 @@ impl ServiceSenders {
     pub fn send_mining_difficulty(&self, msg: crate::mining_bus::BroadcastDifficultyUpdate) {
         let _ = self.0.mining_bus.send_difficulty(msg);
     }
-
-    pub fn send_partitions_expiration(
-        &self,
-        msg: crate::mining_bus::BroadcastPartitionsExpiration,
-    ) {
-        let _ = self.0.mining_bus.send_partitions_expiration(msg);
-    }
 }
 
 #[derive(Debug)]

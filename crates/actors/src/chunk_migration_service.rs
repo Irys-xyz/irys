@@ -2651,14 +2651,9 @@ mod tests {
     }
 
     /// Shrink `chunks.dat` so the next durable read hits a short file.
-    /// `StorageSubmodule::path` is the directory name under the node base.
-    fn truncate_chunk_file(config: &Config, module: &StorageModule) -> eyre::Result<()> {
+    fn truncate_chunk_file(module: &StorageModule) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        let path = config
-            .node_config
-            .base_directory
-            .join(&submodule.path)
-            .join("chunks.dat");
+        let path = submodule.path.join("chunks.dat");
         std::fs::OpenOptions::new()
             .write(true)
             .open(&path)?
@@ -2904,7 +2899,7 @@ mod tests {
             .map_err(|err| eyre::eyre!("write healthy replica: {err:?}"))?;
         broken.force_sync_pending_chunks()?;
         healthy.force_sync_pending_chunks()?;
-        truncate_chunk_file(&f.config, &broken)?;
+        truncate_chunk_file(&broken)?;
         let broken_read = broken
             .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0));
         assert!(
@@ -2968,7 +2963,7 @@ mod tests {
             .write_data_chunk(&unpacked_at(&f, 0))
             .map_err(|err| eyre::eyre!("write broken replica: {err:?}"))?;
         broken.force_sync_pending_chunks()?;
-        truncate_chunk_file(&f.config, &broken)?;
+        truncate_chunk_file(&broken)?;
         let broken_read = broken
             .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0));
         assert!(

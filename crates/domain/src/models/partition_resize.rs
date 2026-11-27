@@ -156,12 +156,7 @@ impl StorageModule {
             .submodules
             .first_key_value()
             .ok_or_eyre("module has no submodules")?;
-        Ok(self
-            .config
-            .node_config
-            .base_directory
-            .join(&submodule.path)
-            .join(RESIZE_JOURNAL))
+        Ok(submodule.path.join(RESIZE_JOURNAL))
     }
 
     pub(super) fn read_resize_journal(
@@ -173,11 +168,7 @@ impl StorageModule {
             .iter()
             .min_by_key(|(range, _)| *range.start())
             .ok_or_eyre("module has no submodules")?;
-        let path = config
-            .node_config
-            .base_directory
-            .join(path)
-            .join(RESIZE_JOURNAL);
+        let path = submodule_dir(config, path).join(RESIZE_JOURNAL);
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

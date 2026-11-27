@@ -1,4 +1,3 @@
-use irys_config::StorageSubmodulesConfig;
 use irys_database::{
     DatabaseProvider, block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid,
 };
@@ -292,7 +291,6 @@ impl BlockTree {
     /// * `epoch_replay_data` - Genesis state and historical epoch blocks for state reconstruction
     /// * `reth_service_actor` - Actor handle for sending fork choice updates to Reth
     /// * `db` - Database provider for querying block and transaction data
-    /// * `storage_submodules_config` - Storage configuration for epoch snapshot creation (only ever used with `map_storage_modules_to_partition_assignments()`, could probably be refactored out)
     /// * `config` - Full node configuration including consensus and epoch settings
     ///
     /// ## Returns
@@ -304,7 +302,6 @@ impl BlockTree {
         block_index_guard: BlockIndexReadGuard,
         epoch_replay_data: EpochReplayData,
         db: DatabaseProvider,
-        storage_submodules_config: &StorageSubmodulesConfig,
         config: Config,
     ) -> eyre::Result<Self> {
         let consensus_config = &config.consensus;
@@ -329,7 +326,6 @@ impl BlockTree {
         // Initialize epoch snapshot from genesis state to establish the baseline
         // for replaying historical epoch transitions up to our target block
         let mut epoch_snapshot = EpochSnapshot::new(
-            storage_submodules_config,
             epoch_replay_data.genesis_block_header,
             epoch_replay_data.genesis_commitments,
             &config,
@@ -1955,62 +1951,6 @@ mod tests {
             ..Default::default()
         });
         EmaSnapshot::genesis(&genesis_header)
-    }
-
-    /// A corrupt packing file must come back from restore as an error.
-    /// Genesis still builds. The packing read is the failure.
-    #[test]
-    fn corrupt_packing_file_is_a_restore_error() -> eyre::Result<()> {
-        use crate::{BlockIndex, BlockIndexReadGuard, EpochReplayData, PACKING_PARAMS_FILE_NAME};
-        use irys_database::DatabaseProviderTestExt as _;
-        use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::{BlockIndexItem, NodeConfig};
-        use std::path::PathBuf;
-
-        let tmp = TempDirBuilder::new()
-            .prefix("corrupt-packing-restore")
-            .build();
-        let mut node_config = NodeConfig::testing();
-        node_config.base_directory = tmp.path().to_path_buf();
-        let config = Config::new_with_random_peer_id(node_config);
-        let sub = PathBuf::from("sub");
-        let sub_dir = tmp.path().join(&sub);
-        std::fs::create_dir_all(&sub_dir)?;
-        std::fs::write(sub_dir.join(PACKING_PARAMS_FILE_NAME), b"not = toml [[[")?;
-        let submodules = StorageSubmodulesConfig {
-            is_using_hardcoded_paths: true,
-            submodule_paths: vec![sub],
-        };
-
-        let mut genesis = IrysBlockHeader::new_mock_header();
-        genesis.height = 0;
-        let db =
-            DatabaseProvider::for_testing(&tmp.path().join("index"), &tmp.path().join("cache"))?;
-        let index = BlockIndex::new_for_testing(db.clone());
-        index.push_item(
-            &BlockIndexItem {
-                block_hash: genesis.block_hash,
-                num_ledgers: 0,
-                ledgers: Vec::new(),
-            },
-            0,
-        )?;
-
-        let err = BlockTree::restore_from_db(
-            BlockIndexReadGuard::new(index),
-            EpochReplayData {
-                genesis_block_header: genesis,
-                genesis_commitments: Vec::new(),
-                epoch_blocks: Vec::new(),
-            },
-            db,
-            &submodules,
-            config,
-        )
-        .expect_err("a corrupt packing file must not abort restore");
-        let text = format!("{err:#}");
-        assert!(text.contains("packing params"), "{text}");
-        Ok(())
     }
 
     #[tokio::test]

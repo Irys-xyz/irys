@@ -1,10 +1,7 @@
-use std::path::PathBuf;
-
 use irys_chain::genesis_builder::{
     GenesisMinerEntry, GenesisMinerManifest, GenesisMinerManifestEntry,
     build_genesis_block_from_commitments, build_signed_genesis_block,
 };
-use irys_config::StorageSubmodulesConfig;
 use irys_domain::EpochSnapshot;
 use irys_types::{Config, IrysAddress, NodeConfig};
 use k256::ecdsa::SigningKey;
@@ -164,16 +161,6 @@ fn test_miners() -> Vec<GenesisMinerEntry> {
     entries
 }
 
-/// Build a StorageSubmodulesConfig with enough paths for the total pledge count.
-fn test_storage_submodules(total_pledges: usize) -> StorageSubmodulesConfig {
-    StorageSubmodulesConfig {
-        is_using_hardcoded_paths: true,
-        submodule_paths: (0..total_pledges)
-            .map(|i| PathBuf::from(format!("/tmp/test-sm-{i}")))
-            .collect(),
-    }
-}
-
 #[tokio::test]
 async fn build_signed_genesis_block_is_deterministic() {
     let cfg1 = test_config();
@@ -212,11 +199,9 @@ async fn partition_assignments_are_deterministic() {
     let output_1 = build_signed_genesis_block(&cfg1, &miners).await.unwrap();
     let output_2 = build_signed_genesis_block(&cfg2, &miners).await.unwrap();
 
-    let submodules = test_storage_submodules(total_pledges);
-
     // Create two EpochSnapshots from separate genesis builds to test cross-node determinism
-    let snap_1 = EpochSnapshot::new(&submodules, output_1.block, output_1.commitments, &cfg1);
-    let snap_2 = EpochSnapshot::new(&submodules, output_2.block, output_2.commitments, &cfg2);
+    let snap_1 = EpochSnapshot::new(output_1.block, output_1.commitments, &cfg1);
+    let snap_2 = EpochSnapshot::new(output_2.block, output_2.commitments, &cfg2);
 
     // Extract partition assignments from both snapshots.
     // After genesis init, some pledged capacity partitions are moved to data partitions

@@ -7,7 +7,7 @@ use crate::{
     chunk_ingress_service::ChunkIngressMessage,
     mempool_service::MempoolServiceMessage,
     metrics,
-    mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
+    mining_bus::BroadcastDifficultyUpdate,
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
@@ -17,13 +17,13 @@ use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
-    BlockState, BlockTree, BlockTreeReadGuard, ChainState, ReorgSplit, ReorgTips,
+    BlockState, BlockTree, BlockTreeReadGuard, ChainState, EpochSnapshot, ReorgSplit, ReorgTips,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
     forkchoice_markers::ForkChoiceMarkers,
 };
 use irys_types::{
-    BlockHash, Config, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
+    BlockHash, Config, H256, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
     SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
 use irys_vdf::{
@@ -211,8 +211,13 @@ struct TipMove {
     fcu_markers: ForkChoiceMarkers,
     /// Set when the move abandons blocks of the old canonical chain.
     reorg_event: Option<ReorgEvent>,
-    /// The first epoch block among the new canonical blocks.
-    epoch_block: Option<Arc<IrysBlockHeader>>,
+    /// The epoch blocks among the new canonical blocks, oldest first.
+    epoch_blocks: Vec<Arc<IrysBlockHeader>>,
+    /// Set on a reorg whose old fork has an epoch block and whose new fork has
+    /// none: the highest epoch height on the old fork. The storage modules
+    /// applied that epoch's assignments, so the new tip's assignments are sent
+    /// to supersede them.
+    orphaned_epoch_height: Option<u64>,
     /// The new canonical blocks after the fork point, oldest first.
     blocks_to_confirm: Vec<Arc<SealedBlock>>,
     /// The old tip's difficulty, which the difficulty broadcast compares against.
@@ -1264,7 +1269,7 @@ impl BlockTreeServiceInner {
         // equation, so it's always tip + `depth` that's kept around
         cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
-        let (epoch_block, reorg_event, blocks_to_confirm) = if is_reorg {
+        let (epoch_blocks, orphaned_epoch_height, reorg_event, blocks_to_confirm) = if is_reorg {
             // Handle blockchain reorganization
             let fork_block: Arc<IrysBlockHeader> = split.lca.header().clone();
             let fork_hash: BlockHash = fork_block.block_hash;
@@ -1323,13 +1328,24 @@ impl BlockTreeServiceInner {
             };
 
             // Was there a new epoch block found in the reorg
-            let new_epoch_block = event
-                .new_fork
-                .iter()
-                .find(|sb| self.is_epoch_block(sb.header()))
-                .map(|sb| Arc::clone(sb.header()));
+            let new_epoch_blocks = self.epoch_blocks_in_tip_move(&event.new_fork);
+            // A new fork epoch block sends its own events. Without one, an
+            // orphaned epoch block's assignments must be replaced.
+            let orphaned_epoch_height = if new_epoch_blocks.is_empty() {
+                self.epoch_blocks_in_tip_move(&event.old_fork)
+                    .iter()
+                    .map(|header| header.height)
+                    .max()
+            } else {
+                None
+            };
 
-            (new_epoch_block, Some(event), blocks_to_confirm)
+            (
+                new_epoch_blocks,
+                orphaned_epoch_height,
+                Some(event),
+                blocks_to_confirm,
+            )
         } else {
             // Handle normal chain extension
             debug!(
@@ -1344,19 +1360,17 @@ impl BlockTreeServiceInner {
             // tip, oldest first. Confirm each one and detect an epoch block among
             // them, as on a reorg.
             let blocks_to_confirm: Vec<Arc<SealedBlock>> = split.new_divergent;
-            let new_epoch_block = blocks_to_confirm
-                .iter()
-                .find(|sb| self.is_epoch_block(sb.header()))
-                .map(|sb| Arc::clone(sb.header()));
+            let new_epoch_blocks = self.epoch_blocks_in_tip_move(&blocks_to_confirm);
 
-            (new_epoch_block, None, blocks_to_confirm)
+            (new_epoch_blocks, None, None, blocks_to_confirm)
         };
 
         Ok(Some(TipMove {
             new_tip,
             fcu_markers,
             reorg_event,
-            epoch_block,
+            epoch_blocks,
+            orphaned_epoch_height,
             blocks_to_confirm,
             old_tip_diff,
             new_tip_epoch_snapshot,
@@ -1372,16 +1386,29 @@ impl BlockTreeServiceInner {
             new_tip,
             fcu_markers,
             reorg_event,
-            epoch_block,
+            epoch_blocks,
+            orphaned_epoch_height,
             blocks_to_confirm,
             old_tip_diff,
             new_tip_epoch_snapshot,
         } = tip_move;
 
         // Send epoch events which require a Read lock
-        if let Some(epoch_block) = epoch_block {
-            // Send the epoch events
-            self.send_epoch_events(&epoch_block)?;
+        if !epoch_blocks.is_empty() {
+            // Each epoch block's events, oldest first, as if the blocks had
+            // arrived one at a time: services end on the newest epoch.
+            for epoch_block in &epoch_blocks {
+                self.send_epoch_events(epoch_block)?;
+            }
+        } else if let Some(orphaned_epoch_height) = orphaned_epoch_height {
+            // Only the assignments: the canonical chain has no epoch block to
+            // expire partitions or prune the cache for.
+            debug!(
+                orphaned_epoch.height = orphaned_epoch_height,
+                epoch.height = new_tip_epoch_snapshot.epoch_height,
+                "reorg orphaned the only epoch block; resending the new tip's assignments"
+            );
+            self.send_partition_assignments(&new_tip_epoch_snapshot)?;
         }
 
         // Persist metadata atomically (same code path for both normal blocks and reorgs);
@@ -1836,6 +1863,24 @@ impl BlockTreeServiceInner {
             .is_multiple_of(self.config.consensus.epoch.num_blocks_in_epoch)
     }
 
+    /// The epoch blocks among the blocks a tip move adds, oldest first.
+    ///
+    /// On a real network a move holds at most one: it adds at most
+    /// `block_tree_depth` blocks (the tree holds no more, and a reorg whose
+    /// fork point would be pruned is refused, `validate_reorg_within_cache_window`),
+    /// and `Config::validate` requires `num_blocks_in_epoch > block_tree_depth`.
+    /// Test run modes skip that check and use short epochs, so a move there can
+    /// cross several boundaries; every epoch block is returned so each one's
+    /// events are sent.
+    fn epoch_blocks_in_tip_move(&self, added: &[Arc<SealedBlock>]) -> Vec<Arc<IrysBlockHeader>> {
+        added
+            .iter()
+            .map(|sb| sb.header())
+            .filter(|header| self.is_epoch_block(header))
+            .map(Arc::clone)
+            .collect()
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %epoch_block.block_hash(), block.height = epoch_block.height()))]
     fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Get the epoch snapshot
@@ -1852,20 +1897,8 @@ impl BlockTreeServiceInner {
                 )
             })?;
 
-        // Check for partitions expired at this epoch boundary
-        if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
-            let expired_partition_hashes: Vec<_> = expired_partition_infos
-                .iter()
-                .map(|i| i.partition_hash)
-                .collect();
-
-            // Let miners know about expired partitions
-            self.service_senders
-                .send_partitions_expiration(BroadcastPartitionsExpiration {
-                    partition_hashes: H256List(expired_partition_hashes),
-                    update_height: epoch_block.height,
-                });
-        }
+        // Expired partitions need no separate notice: this epoch's
+        // assignment update (sent below) moves them to capacity.
 
         // Prune the data-root cache on every epoch block, not only when partitions expire: the
         // prune height moves as Submit slots expire, and a run that hit the per-run eviction cap
@@ -1884,13 +1917,19 @@ impl BlockTreeServiceInner {
             );
         }
 
-        // Let the node know about any newly assigned partition hashes to local storage modules
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
+        self.send_partition_assignments(&epoch_snapshot)
+    }
+
+    /// Send this miner's assignments from `epoch_snapshot` to the storage
+    /// module service, which decides what each drive holds, judged on the
+    /// snapshot's epoch height.
+    fn send_partition_assignments(&self, epoch_snapshot: &EpochSnapshot) -> eyre::Result<()> {
         self.service_senders.storage_modules.send_traced(
-            StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                storage_module_infos: storage_module_infos.into(),
-                update_height: epoch_block.height,
-            },
+            StorageModuleServiceMessage::assignments_updated(
+                epoch_snapshot,
+                self.config.node_config.miner_address(),
+                !self.chain_sync_state.is_syncing(),
+            ),
         )?;
         Ok(())
     }
@@ -2697,7 +2736,7 @@ mod tests {
         let steps: Vec<H256> = (1..=c_step).map(H256::from_low_u64_be).collect();
         let mut tip = IrysBlockHeader::new_mock_header();
         tip.vdf_limiter_info.global_step_number = c_step;
-        tip.vdf_limiter_info.steps = H256List(steps.clone());
+        tip.vdf_limiter_info.steps = irys_types::H256List(steps.clone());
         tip.vdf_limiter_info.next_seed = next_seed;
         (tip, steps)
     }
@@ -3937,22 +3976,7 @@ mod tests {
         let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
         let pending_fork_start = h.add_child_block(&genesis, 5_200, true);
         let first_new_block = h.add_child_block(&old_tip, 5_200, true);
-        // Epoch block detection maps the epoch snapshot's storage modules, which needs
-        // a storage submodule config.
-        h.inner
-            .cache
-            .write()
-            .expect("cache lock for epoch snapshot")
-            .blocks
-            .get_mut(&first_new_block.block_hash)
-            .expect("first new block in cache")
-            .epoch_snapshot = Arc::new(irys_domain::EpochSnapshot {
-            storage_submodules_config: Some(irys_config::StorageSubmodulesConfig {
-                is_using_hardcoded_paths: false,
-                submodule_paths: vec![],
-            }),
-            ..Default::default()
-        });
+        set_epoch_snapshot(&mut h, first_new_block.block_hash, first_new_block.height);
         h.inner
             .on_block_validation_finished(first_new_block.block_hash, ValidationResult::Valid)
             .await
@@ -3994,23 +4018,220 @@ mod tests {
             "each new canonical block is confirmed, oldest first"
         );
 
-        let mut epoch_heights = vec![];
+        assert_eq!(
+            drain_assignment_epoch_heights(&mut h),
+            vec![first_new_block.height],
+            "the epoch block among the new canonical blocks is detected"
+        );
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
+    }
+
+    /// The snapshot epoch heights of the partition assignment updates the
+    /// storage modules received.
+    fn drain_assignment_epoch_heights(h: &mut DiscardHarness) -> Vec<u64> {
+        let mut heights = vec![];
         while let Ok(message) = h.storage_modules_rx.try_recv() {
             let (
-                StorageModuleServiceMessage::PartitionAssignmentsUpdated { update_height, .. },
+                StorageModuleServiceMessage::PartitionAssignmentsUpdated { epoch_height, .. },
                 _span,
             ) = message.into_parts()
             else {
                 panic!("block tree sends only partition assignment updates");
             };
-            epoch_heights.push(update_height);
+            heights.push(epoch_height);
+        }
+        heights
+    }
+
+    /// Give a cached block an epoch snapshot at `epoch_height`.
+    fn set_epoch_snapshot(h: &mut DiscardHarness, block_hash: BlockHash, epoch_height: u64) {
+        h.inner
+            .cache
+            .write()
+            .expect("cache lock for epoch snapshot")
+            .blocks
+            .get_mut(&block_hash)
+            .expect("block in cache")
+            .epoch_snapshot = Arc::new(irys_domain::EpochSnapshot {
+            epoch_height,
+            ..Default::default()
+        });
+    }
+
+    /// A reorg orphans the only epoch block on the old fork. The new fork is heavier
+    /// but does not reach the epoch height (a difficulty adjustment inside the fork
+    /// can make a shorter fork heavier). The storage modules applied the orphaned
+    /// epoch block's assignments, so the tip move must send the new tip's
+    /// assignments, which supersede those writes.
+    #[tokio::test]
+    async fn reorg_orphaning_the_only_epoch_block_resends_canonical_assignments() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> old_epoch_block (epoch block, height 2)
+        //         -> new_tip (height 1, heavier than old_epoch_block)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let old_epoch_block = h.add_child_block(&old_tip, 5_200, true);
+        set_epoch_snapshot(&mut h, old_epoch_block.block_hash, old_epoch_block.height);
+        h.inner
+            .on_block_validation_finished(old_epoch_block.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(h.tip(), old_epoch_block.block_hash);
+        assert_eq!(
+            drain_assignment_epoch_heights(&mut h),
+            vec![old_epoch_block.height],
+            "the storage modules apply the old fork's epoch block"
+        );
+
+        let new_tip = h.add_child_block(&genesis, 5_300, true);
+        // The new fork has no epoch block: its tip's snapshot is genesis's.
+        set_epoch_snapshot(&mut h, new_tip.block_hash, 0);
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the heavier fork"
+        );
+        let event = h
+            .reorg_rx
+            .try_recv()
+            .expect("the tip move abandons the old fork");
+        assert_eq!(
+            block_hashes(&event.old_fork),
+            vec![old_tip.block_hash, old_epoch_block.block_hash]
+        );
+
+        assert_eq!(
+            drain_assignment_epoch_heights(&mut h),
+            vec![0],
+            "a reorg that orphans the only epoch block must send the new tip's \
+             snapshot (its epoch height) once"
+        );
+    }
+
+    /// A reorg onto a fork that crosses two epoch boundaries (test configs
+    /// allow epochs shorter than the block tree) sends each epoch block's
+    /// assignments, oldest first, so the storage modules end on the newest
+    /// epoch, as if the blocks had arrived one at a time.
+    #[tokio::test]
+    async fn reorg_across_two_epoch_boundaries_sends_each_epoch_oldest_first() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (height 1, canonical)
+        //         -> a (1) -> first_epoch (2) -> c (3) -> second_epoch (4), heavier only at its tip
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let a = h.add_child_block(&genesis, 5_010, true);
+        let first_epoch = h.add_child_block(&a, 5_020, true);
+        let c = h.add_child_block(&first_epoch, 5_030, true);
+        let second_epoch = h.add_child_block(&c, 5_300, true);
+        set_epoch_snapshot(&mut h, first_epoch.block_hash, first_epoch.height);
+        set_epoch_snapshot(&mut h, second_epoch.block_hash, second_epoch.height);
+        // The lighter fork blocks are validated first; the tip stays put.
+        for block in [&a, &first_epoch, &c] {
+            h.inner
+                .on_block_validation_finished(block.block_hash, ValidationResult::Valid)
+                .await
+                .expect("validation result handled");
         }
         assert_eq!(
-            epoch_heights,
-            vec![first_new_block.height],
-            "the epoch block among the new canonical blocks is detected"
+            h.tip(),
+            old_tip.block_hash,
+            "the lighter fork does not move the tip"
         );
-        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
+        assert_eq!(
+            drain_assignment_epoch_heights(&mut h),
+            Vec::<u64>::new(),
+            "a noncanonical epoch block sends no assignments"
+        );
+
+        h.inner
+            .on_block_validation_finished(second_epoch.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            second_epoch.block_hash,
+            "the tip moves to the heavier fork"
+        );
+        let event = h
+            .reorg_rx
+            .try_recv()
+            .expect("the tip move abandons the old fork");
+        assert_eq!(block_hashes(&event.old_fork), vec![old_tip.block_hash]);
+        assert_eq!(
+            drain_assignment_epoch_heights(&mut h),
+            vec![first_epoch.height, second_epoch.height],
+            "each crossed epoch block's assignments are sent, oldest first"
+        );
+    }
+
+    /// A plain extension (no reorg) that adds two epoch blocks at once sends
+    /// each one's assignments, oldest first. Blocks that tie the tip's
+    /// cumulative difficulty are validated without becoming the tip, so the
+    /// heavier block after them moves the tip by three blocks.
+    #[tokio::test]
+    async fn extension_across_two_epoch_boundaries_sends_each_epoch_oldest_first() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+
+        // tip (height 1) -> first_epoch (2, tie) -> b (3, tie) -> second_epoch (4, heavier)
+        let tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let first_epoch = h.add_child_block(&tip, 5_100, true);
+        let b = h.add_child_block(&first_epoch, 5_100, true);
+        let second_epoch = h.add_child_block(&b, 5_300, true);
+        set_epoch_snapshot(&mut h, first_epoch.block_hash, first_epoch.height);
+        set_epoch_snapshot(&mut h, second_epoch.block_hash, second_epoch.height);
+        for block in [&first_epoch, &b] {
+            h.inner
+                .on_block_validation_finished(block.block_hash, ValidationResult::Valid)
+                .await
+                .expect("validation result handled");
+        }
+        assert_eq!(
+            h.tip(),
+            tip.block_hash,
+            "a cumulative difficulty tie keeps the tip"
+        );
+        assert_eq!(
+            drain_assignment_epoch_heights(&mut h),
+            Vec::<u64>::new(),
+            "a tied epoch block that is not the tip sends no assignments"
+        );
+
+        h.inner
+            .on_block_validation_finished(second_epoch.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            second_epoch.block_hash,
+            "the tip extends by three blocks"
+        );
+        assert!(
+            h.reorg_rx.try_recv().is_err(),
+            "an extension is not a reorg"
+        );
+        assert_eq!(
+            drain_assignment_epoch_heights(&mut h),
+            vec![first_epoch.height, second_epoch.height],
+            "each epoch block the extension adds sends its assignments, oldest first"
+        );
     }
 
     /// A tip extension whose fork point is below the post-prune cache window aborts

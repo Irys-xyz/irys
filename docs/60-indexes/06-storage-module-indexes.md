@@ -103,14 +103,62 @@ sparse, so the reserve runs, and on a large file that reserve can
 dominate the first open. `EOPNOTSUPP` leaves the file sparse. Any other
 `fallocate` error fails the open.
 
-When the partition hash in `packing_params.toml` matches the assignment
-and the ledger or the slot does not, open keeps or clears the stored
-bytes by the ledger the file already names. The same hash, ledger, and
-slot keeps the bytes. Capacity that gains a ledger keeps the bytes.
-Leaving a ledger (another ledger, another slot, or capacity) clears
-the index and rewrites the intervals to `Uninitialized`. The
-`chunks.dat` bytes stay until a later pack overwrites them. A refused
-open before that clear leaves the previous file in place.
+Startup reads every configured drive's `packing_params.toml` before it
+opens any. A missing file is a fresh, empty drive. A file that cannot be
+read or parsed, or that is foreign (a newer file version, another chain
+id, another packing address), stops startup with an error that names the
+drive path and the reason. No drive is skipped: fix or clear that drive,
+or remove its path from `.irys_submodules.toml`, and start again.
+
+Open never changes what a drive holds. Startup opens every drive parked
+(no assignment: the file, the labels and the index are untouched, and
+the drive mines nothing). The storage module service then applies the
+startup verdict from the first assignment update, through the same code
+as every later epoch. An open given an assignment the file does not
+record is refused, and so is a module whose submodule packing files do
+not all record the same partition, ledger and slot (a file that records
+none, or a missing one, beside a recorded one counts). A crash during a
+full wipe is still finished at open from its reset marker.
+
+The service keeps the stored bytes when the drive keeps its partition on
+the same ledger slot, and when capacity gains a ledger. Leaving a ledger
+(another ledger, another slot, or capacity) keeps the partition's
+entropy: entropy depends on the packing address, the partition hash and
+the chunk offset, not on the ledger or the slot. `Entropy` spans keep
+their bytes and checksum-only rows. Every other span is rewritten to
+`Uninitialized`, and the old slot's tx coverage, data-root placements
+and body jobs are dropped, before the file names the new slot. No reset
+marker is written: a crash before the file names the new slot restarts
+with the old slot recorded. The next startup verdict repeats the exit
+when its epoch still asks for another slot. When it asks for the
+recorded slot again, the drive keeps that slot, and what the interrupted
+exit already did stays done: the spans it rewrote stay `Uninitialized`
+and the rows it dropped are not restored (the data is packed and synced
+again). Only the `Uninitialized` spans are packed. A different partition
+clears the whole index and rewrites every interval to `Uninitialized`.
+The `chunks.dat` bytes stay until a later pack overwrites them.
+
+A drive is never moved off a ledger slot, or released, on an epoch older
+than the assignment its packing file records: the verdict waits for a
+later epoch. Gaining a slot is not held back the same way. When a reorg
+makes an older epoch canonical again and that epoch puts a capacity
+partition back on a ledger slot, the drive takes the slot at once: that
+destroys nothing (data is written over entropy only where data goes),
+and the canonical chain says the slot is this drive's. Every store the
+service makes, the startup verdict's included, records that epoch as the
+file's assigned height, so the guard keeps working after a restart.
+
+While the node runs, a drive I/O error on a path that changes what a
+drive holds (storing an assignment or the packing params, the v2 stamp,
+a release wipe, a full reset, the keep-entropy slot exit, a term-slot
+expiry) logs the module id, its path, the operation and the error, and
+aborts the process at once: nothing can write to a drive after it.
+Nothing is retried. The abort leaves the drive as a crash at that point
+would, and the next start brings it to a consistent state: a full
+wipe's reset marker is finished at open, and the startup verdict
+repeats or completes the slot exit. Chunk data paths (mining reads,
+packing writes, sync and serving reads, checksum checks) are not
+changed by this.
 
 Mining recall reads
 `chunks.dat` with `O_DIRECT` (`storage.recall_direct_io`, default true).

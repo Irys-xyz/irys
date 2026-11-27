@@ -3,10 +3,10 @@ use crate::metrics;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use crate::vdf_seed_source::DbVdfSeedSource;
 use actix_web::dev::Server;
-use eyre::Context as _;
+use eyre::{Context as _, OptionExt as _};
 use futures::FutureExt as _;
 use irys_actors::{
-    BlockValidationTracker, DataSyncService, StorageModuleService,
+    BlockValidationTracker, DataSyncService, StorageModuleService, StorageModuleServiceMessage,
     block_discovery::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
@@ -25,7 +25,6 @@ use irys_actors::{
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
-    packing_service::PackingRequest,
     partition_mining_service::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
@@ -42,9 +41,9 @@ use irys_database::db::{IrysDatabaseExt as _, RethDbWrapper};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider, ChunkType,
-    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
-    StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard,
+    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider, EpochReplayData,
+    ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList, StorageModule,
+    StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard, drive_verdict,
     reth_provider,
 };
 use irys_p2p::{
@@ -66,9 +65,9 @@ use irys_types::ToBase58 as _;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
-    IrysPeerId, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
-    PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun,
+    IrysPeerId, NodeConfig, NodeMode, OracleConfig, PeerNetworkSender, PeerNetworkServiceMessage,
+    RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle,
+    Traced, U256, VdfFreeRun,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
@@ -1123,29 +1122,6 @@ impl IrysNode {
             &node_config.reth.network.bind_port,
         );
 
-        // A node converted from a mining mode keeps whatever its existing
-        // submodules config describes, including partition assignments. It will
-        // not mine them, and the network cannot reassign a slot that is still
-        // pledged, so the capacity is stranded. Say so once at startup rather
-        // than leaving the operator to infer it from packing activity on a node
-        // they expected to go quiet.
-        if !node_mode.mines() {
-            let assigned = ctx
-                .storage_modules_guard
-                .read()
-                .iter()
-                .filter(|sm| sm.partition_assignment().is_some())
-                .count();
-            if assigned > 0 {
-                warn!(
-                    "node_mode {node_mode:?} does not mine, but {assigned} storage module(s) \
-                     still hold partition assignments. This node keeps packing them and keeps \
-                     their slots pledged without ever mining them. Submit unpledge commitments \
-                     for those partitions if you meant to release the capacity."
-                );
-            }
-        }
-
         // Subscribe before initial_sync so the receiver captures all block
         // events produced during (and after) sync — prevents a race where
         // events fire before we start listening.
@@ -1508,6 +1484,10 @@ impl IrysNode {
                     let err = e.wrap_err("init_services failed");
                     let reason = format!("{err:?}");
                     error!(error = ?err, "Failed to initialize services");
+                    // Tasks init_services already spawned (the supply state
+                    // backfill) hold child tokens of this one. Stop them, as
+                    // the normal shutdown does, before reporting the error.
+                    shutdown_token.cancel();
                     let _ = irys_node_ctx_tx.send(Err(err));
                     return ShutdownReason::FatalError(reason);
                 }
@@ -1823,7 +1803,6 @@ impl IrysNode {
             block_index_guard.clone(),
             replay_data,
             irys_db.clone(),
-            &storage_submodules_config,
             config.clone(),
         )?));
 
@@ -1986,7 +1965,11 @@ impl IrysNode {
                 ledger.total_chunks
             );
         }
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
+        let (storage_module_infos, chain_identity) = Self::drives_at_startup(
+            &config,
+            &storage_submodules_config.submodule_paths,
+            &block_index_guard,
+        )?;
         let logical_chunks = epoch_snapshot.partition_chunks();
 
         let storage_modules = Self::init_storage_modules(
@@ -1997,6 +1980,7 @@ impl IrysNode {
         )
         .await?;
         for module in storage_modules.read().unwrap().iter() {
+            module.set_chain_identity(chain_identity.genesis_hash);
             module.set_partition_chunks(logical_chunks)?;
             // Drives already carry a finalized resize the chain view has not
             // reached (DB restored or wiped): mine and pack the retained prefix
@@ -2174,6 +2158,38 @@ impl IrysNode {
             config.consensus.block_tree_depth,
             u64::from(config.consensus.block_migration_depth),
         );
+
+        // The storage module service applies every assignment change. Every
+        // module opened parked, so it applies the startup verdict now and
+        // startup waits until every drive's decision is applied: nothing that
+        // can move the tip, migrate chunks or prune the cache (gossip, p2p,
+        // sync, the API, mining) starts before the drives hold what the
+        // canonical epoch assigns. Startup is never in sync, so no file is
+        // stamped v2.
+        debug!("Starting StorageModuleService");
+        let storage_module_handle = StorageModuleService::spawn_service(
+            receivers.storage_modules,
+            storage_modules.clone(),
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            service_senders.clone(),
+            &config,
+            chain_identity,
+            runtime_handle.clone(),
+        );
+        let (startup_assignments, startup_applied) =
+            StorageModuleServiceMessage::assignments_updated(
+                &block_tree_guard.read().canonical_epoch_snapshot(),
+                config.node_config.miner_address(),
+                false,
+            )
+            .with_applied_ack();
+        service_senders
+            .storage_modules
+            .send_traced(startup_assignments)?;
+        startup_applied.await.map_err(|_| {
+            eyre::eyre!("storage module service stopped before applying the startup assignments")
+        })?;
 
         // In case if you're wondering why this channel is not in the service senders:
         // It's because ChainSyncService depends on the BlockPool, and moving it to actors will
@@ -2372,23 +2388,6 @@ impl IrysNode {
             block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
-
-        // Spawn the StorageModuleService to manage the life-cycle of storage modules
-        // This service:
-        // - Monitors partition assignments from the network
-        // - Initializes storage modules when they receive partition assignments
-        // - Handles the dynamic addition/removal of storage modules
-        // - Coordinates with the epoch service for runtime updates
-        debug!("Starting StorageModuleService");
-        let storage_module_handle = StorageModuleService::spawn_service(
-            receivers.storage_modules,
-            storage_modules.clone(),
-            block_index_guard.clone(),
-            block_tree_guard.clone(),
-            service_senders.clone(),
-            &config,
-            runtime_handle.clone(),
-        );
 
         // Production chunk fetcher is the HTTP chunk fetcher
         let max_peer_response_bytes = config.node_config.max_peer_response_bytes;
@@ -2664,50 +2663,8 @@ impl IrysNode {
             handles.push(handle);
         }
 
-        // request packing for uninitialized ranges of assigned storage modules
-        for sm in storage_modules_guard
-            .read()
-            .iter()
-            .filter(|sm| sm.partition_assignment().is_some())
-        {
-            let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
-            let sender = service_senders.packing_sender();
-            let sm = sm.clone();
-
-            debug!(
-                "SM {} has {} Uninitialized intervals",
-                &sm.id,
-                &uninitialized.len()
-            );
-            // spawn a thread per SM (as packing queues are per-partition)
-            // this is to prevent packing requests getting dropped
-            // note: once we support submodules, this will probably need to change
-            runtime_handle.spawn(async move {
-                for interval in uninitialized {
-                    let req = match PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
-                        Ok(req) => req,
-                        Err(e) => {
-                            tracing::warn!(
-                                storage_module.id = %sm.id,
-                                packing.interval = ?interval,
-                                "Skipping repacking request: {e:?}"
-                            );
-                            continue;
-                        }
-                    };
-                    if let Err(e) = sender.send(req).await {
-                        tracing::event!(
-                            target: "irys::packing",
-                            tracing::Level::ERROR,
-                            storage_module.id = %sm.id,
-                            packing.interval = ?interval,
-                            "Packing channel closed - {e}; failed to enqueue repacking request"
-                        );
-                        return; // assume this is unrecoverable
-                    }
-                }
-            });
-        }
+        // Modules open parked. The storage module service packs each
+        // module's Uninitialized spans when it applies the startup verdict.
         (controllers, handles)
     }
 
@@ -2861,6 +2818,23 @@ impl IrysNode {
             block_discovery_rx,
             runtime_handle,
         )
+    }
+
+    /// [`drive_verdict::read_startup_drives`] with the genesis hash from the
+    /// block index: one parked module per drive, and this node's chain
+    /// identity, whose genesis hash later writes stamp.
+    fn drives_at_startup(
+        config: &Config,
+        paths: &[std::path::PathBuf],
+        block_index_guard: &BlockIndexReadGuard,
+    ) -> eyre::Result<(Vec<StorageModuleInfo>, drive_verdict::ChainIdentity)> {
+        let genesis_hash = block_index_guard
+            .read()
+            .get_item(0)
+            .ok_or_eyre("block index has no genesis item")?
+            .block_hash;
+        let startup = drive_verdict::read_startup_drives(config, paths, genesis_hash)?;
+        Ok((startup.parked, startup.identity))
     }
 
     async fn init_storage_modules(

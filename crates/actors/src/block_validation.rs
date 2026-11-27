@@ -8209,7 +8209,6 @@ mod tests {
         );
     }
 
-    use irys_config::StorageSubmodulesConfig;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_database::add_genesis_commitments;
     use irys_domain::{
@@ -9174,19 +9173,8 @@ mod tests {
             .expect("test db setup");
         let block_index = BlockIndex::new_for_testing(db);
 
-        let storage_submodules_config = StorageSubmodulesConfig::load(
-            config.node_config.base_directory.clone(),
-            config.node_config.node_mode,
-        )
-        .expect("Expected to load storage submodules config");
-
         // Create an epoch snapshot for the genesis block
-        let epoch_snapshot = EpochSnapshot::new(
-            &storage_submodules_config,
-            genesis_block,
-            commitments,
-            &config,
-        );
+        let epoch_snapshot = EpochSnapshot::new(genesis_block, commitments, &config);
         info!("Genesis Epoch tasks complete.");
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
