@@ -2719,7 +2719,13 @@ impl StorageModule {
             params.partition_hash = hash;
             params.ledger = ledger;
             params.slot = slot;
-            match approved_epoch_height {
+            // Only an assignment the startup verdict handed to this open was
+            // approved at that epoch. A parked open (no assignment) that
+            // rebinds disagreeing submodule files to the first file's slot was
+            // not, so it claims no height.
+            let approved = approved_epoch_height
+                .filter(|_| storage_module_info.partition_assignment.is_some());
+            match approved {
                 // The startup verdict accepted this assignment at that epoch,
                 // so it is the height that installed it. Recording it keeps
                 // the older-epoch guard and a later release working; clearing
