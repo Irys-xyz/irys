@@ -1190,6 +1190,32 @@ impl PackingParams {
         }
     }
 
+    /// The file records exactly `assignment`'s partition, ledger and slot.
+    pub fn records(&self, assignment: &PartitionAssignment) -> bool {
+        (self.partition_hash, self.ledger, self.slot)
+            == (
+                Some(assignment.partition_hash),
+                assignment.ledger_id,
+                assignment.slot_index,
+            )
+    }
+
+    /// The file records a ledger slot that `assignment` does not keep (another
+    /// ledger, another slot, or capacity): taking it leaves that slot.
+    pub fn leaves_ledger_for(&self, assignment: &PartitionAssignment) -> bool {
+        self.ledger.is_some()
+            && (self.ledger, self.slot) != (assignment.ledger_id, assignment.slot_index)
+    }
+
+    /// Record `height` as the height of the stored assignment: the trusted
+    /// assigned height of a v2 file, and the legacy last-updated height.
+    pub fn record_height(&mut self, height: u64) {
+        self.last_updated_height = Some(height);
+        if self.is_v2() {
+            self.assigned_height = Some(height);
+        }
+    }
+
     /// Mark these params as a v2 assignment installed at `assigned_height`.
     /// `last_updated_height` is kept equal to it so old binaries read the same height.
     pub fn stamped(mut self, chain_id: u64, genesis_hash: H256, assigned_height: u64) -> Self {
@@ -1454,6 +1480,25 @@ pub fn stop_node_for_drive_fault(message: &str) -> ! {
     error!("{message}");
     write_fault_message(&mut std::io::stderr(), message);
     std::process::abort()
+}
+
+/// What [`StorageModule::hold`] did, and what its caller packs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Held {
+    /// The module keeps its partition on the same ledger slot (the file may
+    /// have been stamped v2). Nothing new to pack.
+    Kept,
+    /// A parked module took back the slot its file records, or gained a
+    /// ledger for its recorded capacity: pack every `Uninitialized` span.
+    Adopted,
+    /// The held capacity gained a ledger: pack only spans still waiting.
+    GainedLedger,
+    /// Left a ledger slot, keeping the entropy: the `Uninitialized` spans.
+    LeftSlot(Vec<Interval<PartitionChunkOffset>>),
+    /// Wiped for a new partition: pack this span.
+    Reset(Interval<PartitionChunkOffset>),
+    /// Released: wiped, and the file records no partition.
+    Released(Interval<PartitionChunkOffset>),
 }
 
 /// Checksum suspects, checksum repairs and packing retries, as one slot exit
@@ -2478,8 +2523,7 @@ impl StorageModule {
                 (&existing_params, storage_module_info.partition_assignment)
             {
                 ensure!(
-                    (params.partition_hash, params.ledger, params.slot)
-                        == (Some(pa.partition_hash), pa.ledger_id, pa.slot_index),
+                    params.records(&pa),
                     "storage module {}: packing params at {} record partition {:?} ledger {:?} slot {:?}, not the assignment to open with ({} ledger {:?} slot {:?}); open does not change what a drive holds",
                     storage_module_info.id,
                     params_path.display(),
@@ -3152,11 +3196,11 @@ impl StorageModule {
             return false;
         }
         let matches = self.recorded_uniform.load(Ordering::SeqCst)
-            && self.recorded_params.read().unwrap().is_some_and(|params| {
-                params.partition_hash == Some(assignment.partition_hash)
-                    && params.ledger == assignment.ledger_id
-                    && params.slot == assignment.slot_index
-            });
+            && self
+                .recorded_params
+                .read()
+                .unwrap()
+                .is_some_and(|params| params.records(&assignment));
         if matches {
             *current = Some(assignment);
         }
@@ -3222,12 +3266,7 @@ impl StorageModule {
                     params =
                         params.stamped(self.config.consensus.chain_id, genesis_hash, update_height);
                 }
-                None => {
-                    params.last_updated_height = Some(update_height);
-                    if params.is_v2() {
-                        params.assigned_height = Some(update_height);
-                    }
-                }
+                None => params.record_height(update_height),
             }
             // Keep the iterations this module was packed with. Fill them only
             // when the file never recorded them.
@@ -4473,10 +4512,117 @@ impl StorageModule {
         update_height: u64,
     ) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let mut assignment = self.partition_assignment.write().unwrap();
+        self.reset_locked(&mut assignment, next, update_height)
+    }
+
+    /// [`Self::reset_with_assignment`] under a held assignment write lock.
+    fn reset_locked(
+        &self,
+        assignment: &mut Option<PartitionAssignment>,
+        next: Option<PartitionAssignment>,
+        update_height: u64,
+    ) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let interval = self.wipe_for_reset(false)?;
-        self.store_assignment(&mut assignment, next, update_height)?;
+        self.store_assignment(assignment, next, update_height)?;
         self.drop_reset_marker()?;
         Ok(interval)
+    }
+
+    /// Make this module hold `next` (`None`: release it), under one write
+    /// lock, and say what the caller packs. The one place that picks the
+    /// transition from what the module holds: its in-memory assignment, or
+    /// what its file records when it is parked.
+    ///
+    /// - Same partition, same ledger slot: keep the bytes (and stamp the file
+    ///   v2 when `stamp_v2`).
+    /// - Parked, and the file records `next`: take it back without a reset.
+    /// - Capacity gaining a ledger: store it, keep the bytes.
+    /// - Same partition leaving a ledger slot: the keep-entropy slot exit.
+    /// - Another partition, or a file that records none: the full reset.
+    /// - `None`: the full reset, recording no partition.
+    ///
+    /// Each error names the operation it failed in.
+    pub fn hold(
+        &self,
+        next: Option<PartitionAssignment>,
+        height: u64,
+        stamp_v2: bool,
+    ) -> eyre::Result<Held> {
+        let mut assignment = self.partition_assignment.write().unwrap();
+        let Some(next) = next else {
+            let interval = self
+                .reset_locked(&mut assignment, None, height)
+                .wrap_err("wipe a released partition")?;
+            return Ok(Held::Released(interval));
+        };
+        let reset = |this: &Self, assignment: &mut Option<PartitionAssignment>| {
+            this.reset_locked(assignment, Some(next), height)
+                .wrap_err("wipe and install a new partition")
+                .map(Held::Reset)
+        };
+        let stamp = |this: &Self, assignment: &mut Option<PartitionAssignment>| {
+            this.store_assignment(assignment, Some(next), height)
+                .wrap_err("rewrite packing params as v2")
+        };
+        match *assignment {
+            Some(current) if current.partition_hash == next.partition_hash => {
+                if (current.ledger_id, current.slot_index) == (next.ledger_id, next.slot_index) {
+                    if stamp_v2 {
+                        stamp(self, &mut assignment)?;
+                    }
+                    Ok(Held::Kept)
+                } else if current.ledger_id.is_some() {
+                    self.leave_slot_locked(&mut assignment, next, height)
+                        .wrap_err("leave the ledger slot (keep-entropy reset)")
+                        .map(Held::LeftSlot)
+                } else {
+                    // Capacity gaining a ledger keeps the bytes.
+                    self.store_assignment(&mut assignment, Some(next), height)
+                        .wrap_err("store the capacity-to-ledger assignment")?;
+                    Ok(Held::GainedLedger)
+                }
+            }
+            // A released drive receiving another partition.
+            Some(_) => reset(self, &mut assignment),
+            None => {
+                let recorded = self
+                    .recorded_params
+                    .read()
+                    .unwrap()
+                    .filter(|params| params.partition_hash == Some(next.partition_hash));
+                match recorded {
+                    Some(params) if params.records(&next) => {
+                        // Take back the recorded slot without a reset or a
+                        // write. A submodule whose file records no partition
+                        // yet (its spans are Uninitialized) is bound by a
+                        // store instead, so a restart does not reset it.
+                        if self.recorded_uniform.load(Ordering::SeqCst) {
+                            *assignment = Some(next);
+                        } else {
+                            self.store_assignment(&mut assignment, Some(next), height)
+                                .wrap_err("store the held partition on every submodule")?;
+                        }
+                        if stamp_v2 {
+                            stamp(self, &mut assignment)?;
+                        }
+                        Ok(Held::Adopted)
+                    }
+                    Some(params) if params.ledger.is_none() => {
+                        // Capacity gaining a ledger keeps the bytes.
+                        self.store_assignment(&mut assignment, Some(next), height)
+                            .wrap_err("store the held partition's ledger slot")?;
+                        Ok(Held::Adopted)
+                    }
+                    // Leaving a ledger: the data belongs to the old slot,
+                    // the entropy to the partition.
+                    Some(_) => self
+                        .leave_slot_locked(&mut assignment, next, height)
+                        .wrap_err("leave the ledger slot (keep-entropy reset)")
+                        .map(Held::LeftSlot),
+                    None => reset(self, &mut assignment),
+                }
+            }
+        }
     }
 
     /// Reset to capacity when `expired_hash` is still assigned and every

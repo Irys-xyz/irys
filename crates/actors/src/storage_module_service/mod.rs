@@ -18,7 +18,7 @@ use crate::{packing_service::PackingRequest, services::ServiceSenders};
 use index_heal::{HealOutcome, INDEX_HEAL_RETRY_INTERVAL, IndexHealCtx, heal_ledger_data_indexes};
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, StorageModule,
+    BlockIndexReadGuard, BlockTreeReadGuard, Held, StorageModule,
     drive_verdict::{
         self, ChainIdentity, DriveAction, DriveDecision, DriveFile, DriveVerdict, VerdictInputs,
     },
@@ -650,8 +650,9 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Apply one drive's decision to its open module. A drive I/O error
-    /// while changing what the drive holds stops the node (see
+    /// Apply one drive's decision to its open module. The module picks the
+    /// transition ([`StorageModule::hold`]); the service packs what it says.
+    /// A drive I/O error stops the node (see
     /// [`StorageModule::expect_drive_io`]); there is no retry.
     fn apply_decision(
         &mut self,
@@ -659,11 +660,41 @@ impl StorageModuleServiceInner {
         decision: &DriveDecision,
         epoch_height: u64,
     ) {
-        match &decision.action {
-            DriveAction::Idle => self.idle_module(module),
-            DriveAction::Clear => self.clear_released(module, epoch_height),
-            DriveAction::Assign(assignment) => {
-                self.assign_module(module, *assignment, decision.stamp_v2, epoch_height)
+        let next = match &decision.action {
+            DriveAction::Idle => return self.idle_module(module),
+            DriveAction::Clear => None,
+            DriveAction::Assign(assignment) => Some(*assignment),
+        };
+        let held = module.expect_drive_io(
+            "apply the drive verdict",
+            module.hold(next, epoch_height, decision.stamp_v2),
+        );
+        match held {
+            Held::Kept => {}
+            Held::Adopted => self.enqueue_uninitialized(module),
+            // Entropy and Data stay. Send only a span the channel has not
+            // accepted that is still Uninitialized.
+            Held::GainedLedger => self.enqueue_deferred_uninitialized(module),
+            Held::LeftSlot(spans) => {
+                info!(
+                    storage_module.id = module.id,
+                    packing.spans = spans.len(),
+                    "storage module left its ledger slot; entropy kept, old slot data uninitialized"
+                );
+                // Spans the channel did not accept belong to the old slot.
+                // The exit turned what still needs packing into Uninitialized.
+                self.pending_ranges.remove(&module.id);
+                self.enqueue_uninitialized(module);
+            }
+            Held::Reset(range) => self.enqueue_packing(module, PartitionChunkRange(range)),
+            Held::Released(range) => {
+                // The module is unassigned. Do not pack a span the channel deferred.
+                self.pending_ranges.remove(&module.id);
+                info!(
+                    storage_module.id = module.id,
+                    packing.interval = ?range,
+                    "released storage module wiped; it records no partition now"
+                );
             }
         }
     }
@@ -683,117 +714,6 @@ impl StorageModuleServiceInner {
         self.pending_ranges.remove(&module.id);
     }
 
-    /// Released: wipe and record no partition. The drive is Empty.
-    fn clear_released(&mut self, module: &Arc<StorageModule>, epoch_height: u64) {
-        let range = self.reset_and_install(module, None, epoch_height);
-        // The module is unassigned. Do not pack a span the channel deferred.
-        self.pending_ranges.remove(&module.id);
-        info!(
-            storage_module.id = module.id,
-            packing.interval = ?range,
-            "released storage module wiped; it records no partition now"
-        );
-    }
-
-    /// Hold `next`. Keeps the bytes when the module already holds that
-    /// partition on the same slot, or as capacity gaining a ledger. Leaving a
-    /// ledger keeps the entropy and repacks only the old slot's data. A new
-    /// partition resets, installs and packs the whole span.
-    fn assign_module(
-        &mut self,
-        module: &Arc<StorageModule>,
-        next: PartitionAssignment,
-        stamp_v2: bool,
-        epoch_height: u64,
-    ) {
-        match module.partition_assignment() {
-            Some(current) if current.partition_hash == next.partition_hash => {
-                self.keep_or_move(module, current, next, stamp_v2, epoch_height);
-            }
-            // A released drive receiving another partition.
-            Some(_) => self.install_new(module, next, epoch_height),
-            None => {
-                let recorded = module
-                    .recorded_params()
-                    .filter(|params| params.partition_hash == Some(next.partition_hash));
-                match recorded {
-                    Some(params)
-                        if params.ledger == next.ledger_id && params.slot == next.slot_index =>
-                    {
-                        // An idle module takes back the partition its file
-                        // records, without a reset or a file write. Only its
-                        // Uninitialized spans are packed. A submodule whose
-                        // file records no partition yet (added while the
-                        // module was parked; its spans are Uninitialized)
-                        // is bound by storing the assignment instead, so a
-                        // restart does not reset what packing writes there.
-                        if !module.adopt_recorded(next) {
-                            module.expect_drive_io(
-                                "store the held partition on every submodule",
-                                module.assign_partition(next, epoch_height),
-                            );
-                        }
-                        self.enqueue_uninitialized(module);
-                        if stamp_v2 {
-                            self.stamp_v2(module, next, epoch_height);
-                        }
-                    }
-                    Some(params) if params.ledger.is_none() => {
-                        // Capacity gaining a ledger keeps the bytes.
-                        module.expect_drive_io(
-                            "store the held partition's ledger slot",
-                            module.assign_partition(next, epoch_height),
-                        );
-                        self.enqueue_uninitialized(module);
-                    }
-                    // Leaving a ledger: the data belongs to the old slot. The
-                    // entropy belongs to the partition.
-                    Some(_) => self.leave_slot(module, next, epoch_height),
-                    None => self.install_new(module, next, epoch_height),
-                }
-            }
-        }
-    }
-
-    /// Reset and install `next` under one write lock, then pack it.
-    fn install_new(
-        &mut self,
-        module: &Arc<StorageModule>,
-        next: PartitionAssignment,
-        epoch_height: u64,
-    ) {
-        let range = self.reset_and_install(module, Some(next), epoch_height);
-        self.enqueue_packing(module, range);
-    }
-
-    /// Leave a ledger slot and keep the partition. Entropy does not depend on
-    /// the ledger or slot, so only the old slot's data becomes
-    /// `Uninitialized` and only `Uninitialized` spans are packed, not the
-    /// whole partition.
-    fn leave_slot(
-        &mut self,
-        module: &Arc<StorageModule>,
-        next: PartitionAssignment,
-        epoch_height: u64,
-    ) {
-        let spans = module.expect_drive_io(
-            "leave the ledger slot (keep-entropy reset)",
-            module.reset_keep_entropy_with_assignment(next, epoch_height),
-        );
-        info!(
-            storage_module.id = module.id,
-            partition.hash = %next.partition_hash,
-            partition.ledger_id = ?next.ledger_id,
-            partition.slot_index = ?next.slot_index,
-            packing.spans = spans.len(),
-            "storage module left its ledger slot; entropy kept, old slot data uninitialized"
-        );
-        // Spans the channel did not accept belong to the old slot. The reset
-        // turned what still needs packing into `Uninitialized`.
-        self.pending_ranges.remove(&module.id);
-        self.enqueue_uninitialized(module);
-    }
-
     /// Send every Uninitialized span of `module`. A full channel keeps them.
     fn enqueue_uninitialized(&mut self, module: &Arc<StorageModule>) {
         let mut deferred = Vec::new();
@@ -806,75 +726,6 @@ impl StorageModuleServiceInner {
                 .or_default()
                 .extend(deferred);
         }
-    }
-
-    /// Rewrite an Ours drive's file as v2 (an in-sync epoch).
-    fn stamp_v2(
-        &self,
-        module: &Arc<StorageModule>,
-        assignment: PartitionAssignment,
-        epoch_height: u64,
-    ) {
-        module.expect_drive_io(
-            "rewrite packing params as v2",
-            module.assign_partition(assignment, epoch_height),
-        );
-        info!(
-            storage_module.id = module.id,
-            epoch.height = epoch_height,
-            "packing params rewritten as v2"
-        );
-    }
-
-    /// The module holds `next`'s partition in memory. A ledger or slot change
-    /// is applied; otherwise the file is stamped v2 when due.
-    fn keep_or_move(
-        &mut self,
-        module: &Arc<StorageModule>,
-        current: PartitionAssignment,
-        next: PartitionAssignment,
-        stamp_v2: bool,
-        epoch_height: u64,
-    ) {
-        if (current.ledger_id, current.slot_index) == (next.ledger_id, next.slot_index) {
-            if stamp_v2 {
-                self.stamp_v2(module, next, epoch_height);
-            }
-            return;
-        }
-        if current.ledger_id.is_some() {
-            // Leaving a ledger slot (ledger→capacity, or ledger→ledger). Clear
-            // the old slot's data and index and store the new assignment
-            // under one write lock; the partition's entropy stays.
-            self.leave_slot(module, next, epoch_height);
-            return;
-        }
-        // Capacity→ledger does not reset: Entropy and Data stay. Send only a
-        // span the channel has not accepted that is still Uninitialized.
-        module.expect_drive_io(
-            "store the capacity-to-ledger assignment",
-            module.assign_partition(next, epoch_height),
-        );
-        self.enqueue_deferred_uninitialized(module);
-    }
-
-    /// Reset and install `next` as one critical section: a full wipe behind
-    /// the reset marker, so a crash or a stop mid-way is finished by the next
-    /// open.
-    fn reset_and_install(
-        &self,
-        module: &Arc<StorageModule>,
-        next: Option<irys_types::partition::PartitionAssignment>,
-        epoch_height: u64,
-    ) -> PartitionChunkRange {
-        let operation = if next.is_some() {
-            "wipe and install a new partition"
-        } else {
-            "wipe a released partition"
-        };
-        PartitionChunkRange(
-            module.expect_drive_io(operation, module.reset_with_assignment(next, epoch_height)),
-        )
     }
 
     /// Send the deferred spans. A rollback or assignment repack sends only
@@ -1562,7 +1413,7 @@ mod assignment_reset_tests {
         let message = update_panics(&mut harness, capacity_update(hash, miner), 4).await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            message.contains("leave the ledger slot (keep-entropy reset) failed"),
+            message.contains("apply the drive verdict failed; stopping the node: leave the ledger slot (keep-entropy reset)"),
             "{message}"
         );
         assert!(
@@ -1745,7 +1596,9 @@ mod assignment_reset_tests {
             "{message}"
         );
         assert!(
-            message.contains("wipe a released partition failed; stopping the node"),
+            message.contains(
+                "apply the drive verdict failed; stopping the node: wipe a released partition"
+            ),
             "{message}"
         );
         assert!(
@@ -2118,7 +1971,7 @@ mod assignment_reset_tests {
         let message = update_panics(&mut harness, publish_update(hash, miner), 6).await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            message.contains("store the capacity-to-ledger assignment failed"),
+            message.contains("apply the drive verdict failed; stopping the node: store the capacity-to-ledger assignment"),
             "{message}"
         );
         assert_eq!(
@@ -3110,7 +2963,9 @@ mod assignment_reset_tests {
         .await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            message.contains("rewrite packing params as v2 failed; stopping the node"),
+            message.contains(
+                "apply the drive verdict failed; stopping the node: rewrite packing params as v2"
+            ),
             "{message}"
         );
         assert_eq!(

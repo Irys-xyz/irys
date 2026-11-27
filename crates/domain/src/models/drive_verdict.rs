@@ -236,11 +236,9 @@ fn waits_on_a_newer_record(
     p: &PackingParams,
     new: &PartitionAssignment,
 ) -> bool {
-    let leaving = p.ledger.is_some() && (p.ledger, p.slot) != (new.ledger_id, new.slot_index);
-    let recorded_newer = p
-        .trusted_assigned_height()
-        .is_some_and(|h| h > inputs.epoch_height);
-    leaving && recorded_newer
+    p.leaves_ledger_for(new)
+        && p.trusted_assigned_height()
+            .is_some_and(|h| h > inputs.epoch_height)
 }
 
 /// Assignments no drive holds, in placement order.
