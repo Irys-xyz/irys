@@ -4563,22 +4563,32 @@ impl StorageModule {
         // flag again once the module is settled.
         self.clear_chunk_crc_complete()?;
 
-        let spans = {
+        // Touching spans and doubtful offsets merge, so each run is cleared
+        // in grouped index updates rather than one commit per offset.
+        // `stale` is what was already `Uninitialized`: an earlier exit may
+        // have published its image and failed before its row clear.
+        let (spans, stale) = {
             let intervals = self.intervals.read().unwrap();
-            let mut spans: Vec<Interval<PartitionChunkOffset>> = intervals
-                .iter()
-                .filter(|(_, kind)| {
-                    !matches!(**kind, ChunkType::Entropy | ChunkType::Uninitialized)
-                })
-                .map(|(interval, _)| *interval)
-                .collect();
-            for offset in &doubtful {
-                if Self::live_label(&intervals, *offset) == Some(ChunkType::Entropy) {
-                    spans.push(ii(*offset, *offset));
+            let mut merged = IntervalMask::new();
+            for (interval, kind) in intervals.iter() {
+                if !matches!(*kind, ChunkType::Entropy | ChunkType::Uninitialized) {
+                    merged.insert_merge_touching_or_overlapping(*interval);
                 }
             }
-            spans.sort_by_key(Interval::start);
-            spans
+            for offset in &doubtful {
+                if Self::live_label(&intervals, *offset) == Some(ChunkType::Entropy) {
+                    merged.insert_merge_touching_or_overlapping(ii(*offset, *offset));
+                }
+            }
+            let stale: Vec<_> = self
+                .submodules
+                .iter()
+                .map(|(submodule_interval, _)| {
+                    Self::uninitialized_spans(&intervals, *submodule_interval)
+                })
+                .collect();
+            let spans: Vec<Interval<PartitionChunkOffset>> = merged.into_iter().collect();
+            (spans, stale)
         };
         // Queued and parked writes keep their fence until their offsets are
         // durably `Uninitialized`. A parked write's bytes are already on disk,
@@ -4598,15 +4608,12 @@ impl StorageModule {
         for span in &spans {
             self.clear_offset_index_in_range(span.start(), span.end())?;
         }
-        let image = recover_read(&self.intervals).clone();
-        // An earlier exit may have published its image and failed before its
-        // row clear; this exit's `spans` no longer lists those offsets. Drop
-        // any presence row still under an `Uninitialized` label. A span with
+        // Drop any presence row an earlier failed exit left under a `stale`
+        // label. The spans just cleared are not scanned again. A span with
         // no row does not commit, so this does not scan entropy rows.
-        for (submodule_interval, submodule) in self.submodules.iter() {
-            let uninitialized = Self::uninitialized_spans(&image, *submodule_interval);
-            if !uninitialized.is_empty() {
-                submodule.db.drop_presence_in_ranges(&uninitialized)?;
+        for ((_, submodule), stale) in self.submodules.iter().zip(&stale) {
+            if !stale.is_empty() {
+                submodule.db.drop_presence_in_ranges(stale)?;
             }
         }
         let chunk_size = self.config.consensus.chunk_size;
@@ -4628,14 +4635,11 @@ impl StorageModule {
 
         // Before finality the physical suffix remains available for a reorg,
         // but a new packing job must use the current logical partition size.
-        let last = PartitionChunkOffset::from(self.partition_chunks() as u32 - 1);
-        let spans = image
-            .iter()
-            .filter(|(_, kind)| **kind == ChunkType::Uninitialized)
-            .filter(|(interval, _)| interval.start() <= last)
-            .map(|(interval, _)| ii(interval.start(), interval.end().min(last)))
-            .collect();
-        Ok((spans, queued))
+        let uninitialized = {
+            let intervals = recover_read(&self.intervals);
+            self.intervals_matching(&intervals, ChunkType::Uninitialized)
+        };
+        Ok((self.clamp_spans_to_partition(uninitialized), queued))
     }
 
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
