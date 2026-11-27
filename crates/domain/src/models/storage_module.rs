@@ -1169,6 +1169,25 @@ pub struct PackingParams {
 pub const PACKING_PARAMS_VERSION: u32 = 2;
 
 impl PackingParams {
+    /// Why this file is not this node's to manage: a newer file version,
+    /// another chain id, or another packing address. Such a drive stops the
+    /// node; it is never skipped or rewritten.
+    pub fn foreign_reason(&self, chain_id: u64, miner: IrysAddress) -> Option<String> {
+        if self.version.is_some_and(|v| v > PACKING_PARAMS_VERSION) {
+            return Some(format!(
+                "newer file version {:?} (this node supports {PACKING_PARAMS_VERSION})",
+                self.version
+            ));
+        }
+        if self.chain_id.is_some_and(|c| c != chain_id) {
+            return Some(format!("other chain id {:?}", self.chain_id));
+        }
+        if self.packing_address != miner {
+            return Some(format!("other packing address {}", self.packing_address));
+        }
+        None
+    }
+
     /// True when the file declares version 2 or newer.
     pub fn is_v2(&self) -> bool {
         self.version.is_some_and(|v| v >= PACKING_PARAMS_VERSION)
@@ -1262,13 +1281,13 @@ impl PackingParams {
 
 pub static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 
-/// Load `packing_params.toml`. When iterations or chunk size are absent,
+/// `params` as read from `path`. When iterations or chunk size are absent,
 /// fill them from the current consensus and write the file back.
 fn ensure_recorded_packing_params(
     path: &Path,
+    mut params: PackingParams,
     consensus: &irys_types::ConsensusConfig,
 ) -> eyre::Result<PackingParams> {
-    let mut params = PackingParams::from_toml(path)?;
     if params.backfill_recorded_packing(consensus) {
         params.write_to_disk(path)?;
     }
@@ -1338,8 +1357,8 @@ fn refuse_labels_without_packing_params(params_path: &Path) -> eyre::Result<()> 
     Ok(())
 }
 
-/// Address, partition hash, and packing identity for an existing
-/// `packing_params.toml`. This does not create, resize, or rewrite anything.
+/// Ownership and packing identity for an existing `packing_params.toml`.
+/// This does not create, resize, or rewrite anything.
 ///
 /// `Ok(None)` is a fresh module: the file is not there yet, and the caller
 /// writes it. A file that omits iterations or chunk size is filled in memory
@@ -1348,7 +1367,6 @@ fn refuse_labels_without_packing_params(params_path: &Path) -> eyre::Result<()> 
 fn validate_existing_packing_params(
     params_path: &Path,
     config: &Config,
-    assignment: Option<PartitionAssignment>,
 ) -> eyre::Result<Option<PackingParams>> {
     if !params_path
         .try_exists()
@@ -1359,33 +1377,15 @@ fn validate_existing_packing_params(
     // A short or corrupt file is an open error. It must not abort the
     // process, and it must not follow a change to this directory.
     let params = PackingParams::from_toml(params_path)?;
-
-    // A file of a newer version is not this node's to rewrite: refuse it
-    // before any label, index row or file changes, on every submodule.
-    if let Some(version) = params.version.filter(|v| *v > PACKING_PARAMS_VERSION) {
-        eyre::bail!(
-            "packing params at {} record file version {version}, newer than this node supports ({PACKING_PARAMS_VERSION})",
-            params_path.display()
-        );
-    }
-
-    ensure!(
-        params.packing_address == config.node_config.miner_address(),
-        "Active mining address: {} does not match partition packing address {}",
+    // Not this node's to rewrite: refuse it before any label, index row or
+    // file changes, on every submodule. Startup runs the same check.
+    if let Some(why) = params.foreign_reason(
+        config.consensus.chain_id,
         config.node_config.miner_address(),
-        params.packing_address
-    );
-
-    // If disk has a partition hash that conflicts with the epoch snapshot,
-    // the submodule was packed against a different genesis.
-    if let (Some(ph), Some(pa)) = (params.partition_hash, assignment) {
-        ensure!(
-            ph == pa.partition_hash,
-            "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
-            This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
-            assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-            pa.partition_hash,
-            ph,
+    ) {
+        eyre::bail!(
+            "packing params at {} are not this node's: {why}",
+            params_path.display()
         );
     }
 
@@ -2274,9 +2274,6 @@ thread_local! {
     /// Test open returns `EFBIG` from the logical-size check and does not
     /// call `set_len`. Production still calls `set_len`.
     static CHUNKS_LEN_EFBIG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test open fails to read the packing params back after writing them.
-    static FAIL_OPEN_PARAMS_READBACK: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
     /// Runs once in a slot exit before the relabel reads the queued repairs.
     static BEFORE_KEEP_ENTROPY_RELABEL: std::cell::Cell<Option<fn(&StorageModule)>> =
         const { std::cell::Cell::new(None) };
@@ -2418,35 +2415,21 @@ impl StorageModule {
     /// fresh. The error names each file and what it records. Production
     /// modules have one submodule; a split store needs the operator.
     fn refuse_disagreeing_files(
-        storage_module_info: &StorageModuleInfo,
-        config: &Config,
+        module_id: usize,
+        files: &[(PathBuf, Option<PackingParams>)],
     ) -> eyre::Result<()> {
-        let mut records = Vec::new();
-        for (_, dir) in &storage_module_info.submodules {
-            let path = config
-                .node_config
-                .base_directory
-                .join(dir)
-                .join(PACKING_PARAMS_FILE_NAME);
-            let record = if path.exists() {
-                // A file that does not parse is refused by the open below.
-                let Ok(params) = PackingParams::from_toml(&path) else {
-                    continue;
-                };
-                Some((params.partition_hash, params.ledger, params.slot))
-            } else {
-                None
-            };
-            records.push((path, record));
-        }
-        let all_missing = records.iter().all(|(_, record)| record.is_none());
-        let first = records.first().map(|(_, record)| *record);
-        if all_missing || records.iter().all(|(_, record)| Some(*record) == first) {
+        let record =
+            |params: &Option<PackingParams>| params.map(|p| (p.partition_hash, p.ledger, p.slot));
+        let first = files.first().map(|(_, params)| record(params));
+        if files
+            .iter()
+            .all(|(_, params)| Some(record(params)) == first)
+        {
             return Ok(());
         }
-        let listed: Vec<String> = records
+        let listed: Vec<String> = files
             .iter()
-            .map(|(path, record)| match record {
+            .map(|(path, params)| match record(params) {
                 Some((hash, ledger, slot)) => format!(
                     "{} records partition {hash:?} ledger {ledger:?} slot {slot:?}",
                     path.display()
@@ -2455,8 +2438,7 @@ impl StorageModule {
             })
             .collect();
         eyre::bail!(
-            "storage module {}: its submodule packing params files disagree ({}); open does not reconcile them. Clear the submodules that do not belong to the partition this drive holds.",
-            storage_module_info.id,
+            "storage module {module_id}: its submodule packing params files disagree ({}); open does not reconcile them. Clear the submodules that do not belong to the partition this drive holds.",
             listed.join("; ")
         )
     }
@@ -2492,19 +2474,33 @@ impl StorageModule {
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
 
-        Self::refuse_disagreeing_files(storage_module_info, config)?;
+        // Each packing params file is read once, before `set_len`, index
+        // open, or the iterations backfill write: a refused file leaves every
+        // submodule directory byte-identical.
+        let files = storage_module_info
+            .submodules
+            .iter()
+            .map(|(_, dir)| {
+                let path = config
+                    .node_config
+                    .base_directory
+                    .join(dir)
+                    .join(PACKING_PARAMS_FILE_NAME);
+                let params = validate_existing_packing_params(&path, config)?;
+                Ok((path, params))
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        Self::refuse_disagreeing_files(storage_module_info.id, &files)?;
+        let mut initial_recorded = None;
 
         // Initialize the submodules from the StorageModuleInfo
-        for (submodule_interval, dir) in storage_module_info.submodules.clone() {
+        for ((submodule_interval, dir), (params_path, existing_params)) in storage_module_info
+            .submodules
+            .clone()
+            .into_iter()
+            .zip(files)
+        {
             let sub_base_path = config.node_config.base_directory.join(dir.clone());
-            let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
-            // Before `set_len`, index open, or the iterations backfill write.
-            // A mismatch leaves this directory byte-identical.
-            let existing_params = validate_existing_packing_params(
-                &params_path,
-                config,
-                storage_module_info.partition_assignment,
-            )?;
             // Open never changes what a drive holds: the storage module
             // service applies every transition. An assignment must be the one
             // the file records.
@@ -2585,29 +2581,34 @@ impl StorageModule {
             // not refuse it. Write the current miner and consensus. An
             // existing file stays as it is: open never changes what a drive
             // holds.
-            if existing_params.is_none() {
-                let mut params = PackingParams {
-                    packing_address: config.node_config.miner_address(),
-                    entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
-                    chunk_size: Some(config.consensus.chunk_size),
-                    ..Default::default()
-                };
-                if let Some(pa) = storage_module_info.partition_assignment {
-                    params.partition_hash = Some(pa.partition_hash);
-                    params.ledger = pa.ledger_id;
-                    params.slot = pa.slot_index;
+            let params = match existing_params {
+                Some(params) => {
+                    ensure_recorded_packing_params(&params_path, params, &config.consensus)
+                        .wrap_err_with(|| format!("packing params at {}", params_path.display()))?
                 }
-                params.write_to_disk(&params_path)?;
-            }
-
-            let params = ensure_recorded_packing_params(&params_path, &config.consensus)
-                .wrap_err_with(|| format!("packing params at {}", params_path.display()))?;
+                None => {
+                    let mut params = PackingParams {
+                        packing_address: config.node_config.miner_address(),
+                        entropy_packing_iterations: Some(
+                            config.consensus.entropy_packing_iterations,
+                        ),
+                        chunk_size: Some(config.consensus.chunk_size),
+                        ..Default::default()
+                    };
+                    if let Some(pa) = storage_module_info.partition_assignment {
+                        params.partition_hash = Some(pa.partition_hash);
+                        params.ledger = pa.ledger_id;
+                        params.slot = pa.slot_index;
+                    }
+                    params.write_to_disk(&params_path)?;
+                    params
+                }
+            };
+            // Validated above, or written from this node's config.
             let recorded = packing_record_from_params(&params, config.consensus.chain_id)?;
-            let expected = expected_packing_record(config);
-            if let Err(err) = packing_params_valid_for_module(&recorded, &expected) {
-                return Err(eyre!("{err} at {}", params_path.display()));
-            }
             let bound_partition = params.partition_hash;
+            // Submodule files agree, so the first one is the module's record.
+            initial_recorded.get_or_insert(params);
 
             let intervals_file_path = sub_base_path.join("intervals.json");
 
@@ -2671,38 +2672,9 @@ impl StorageModule {
         for (index, partition, packing) in pack_binds {
             index.bind_packing_identity(partition, &packing)?;
         }
-        // The service judges this drive from this in-memory copy. Open read
-        // and wrote this file moments ago, so a read error here is an I/O
-        // fault on the drive. That needs the operator: the open fails, and a
-        // failed storage module open stops node startup. Opening the module
-        // without its record would leave it mining its open-time slot while
-        // ignoring every later slot change or release.
-        let initial_recorded = {
-            let (_, dir) = storage_module_info
-                .submodules
-                .first()
-                .ok_or_eyre("a storage module needs at least one submodule")?;
-            let path = config
-                .node_config
-                .base_directory
-                .join(dir)
-                .join(PACKING_PARAMS_FILE_NAME);
-            let read = PackingParams::from_toml(&path);
-            #[cfg(test)]
-            let read = if FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.replace(false)) {
-                Err(eyre!("injected packing params read-back failure"))
-            } else {
-                read
-            };
-            read.wrap_err_with(|| {
-                format!(
-                    "storage module {}: packing params at {} could not be read back at open; \
-                     check the drive before restarting",
-                    storage_module_info.id,
-                    path.display()
-                )
-            })?
-        };
+        // The service judges this drive from this in-memory copy.
+        let initial_recorded =
+            initial_recorded.ok_or_eyre("a storage module needs at least one submodule")?;
 
         // Attempt to load a global set of intervals from the submodules
         let mut loaded_intervals: NoditMap<
@@ -11914,14 +11886,14 @@ mod tests {
                 Some(stored),
                 iterations,
                 true,
-                "does not match partition packing address",
+                "other packing address",
             ),
             ForeignModule::Partition => (
                 miner,
                 Some(assigned),
                 iterations,
                 false,
-                "Partition hash mismatch",
+                "open does not change what a drive holds",
             ),
             ForeignModule::Iterations => (
                 miner,
@@ -15631,10 +15603,7 @@ mod tests {
         let mut info = crc_hold_info(tmp.path());
         info.partition_assignment = Some(next);
         let err = StorageModule::new(&info, &config).expect_err("a newer file is refused");
-        assert!(
-            err.to_string().contains("newer than this node supports"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("newer file version"), "{err}");
         assert!(
             err.to_string().contains(&params_path.display().to_string()),
             "{err}"
@@ -18893,7 +18862,7 @@ mod tests {
         fs::write(&parent, b"x")?;
         let params_path = parent.join(PACKING_PARAMS_FILE_NAME);
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let err = validate_existing_packing_params(&params_path, &config, None)
+        let err = validate_existing_packing_params(&params_path, &config)
             .expect_err("a stat error must not look like a missing file");
         let message = format!("{err:#}");
         assert!(
@@ -22879,29 +22848,6 @@ mod tests {
         Ok(())
     }
 
-    /// A packing params file that cannot be read back right after open
-    /// wrote it is an I/O fault: the open fails, naming the module and the
-    /// file, so node startup stops for the operator. No module is returned to
-    /// mine its open-time slot without a record.
-    #[test]
-    fn open_fails_when_the_packing_params_cannot_be_read_back() -> eyre::Result<()> {
-        let hash = H256::repeat_byte(0x64);
-        let (_tmp, config, sub) = seed_assigned_entropy("open_readback_fails", hash)?;
-        FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.set(true));
-        let result = StorageModule::new(&module_info(&sub, None), &config);
-        FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.set(false));
-        let err = result.expect_err("a read-back failure fails the open");
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("could not be read back at open")
-                && text.contains("injected packing params read-back failure"),
-            "{text}"
-        );
-        // A later open with a readable file works.
-        StorageModule::new(&module_info(&sub, None), &config)?;
-        Ok(())
-    }
-
     /// The file records no partition, as after a release. An open that
     /// assigns one is a new partition: it wipes behind the reset marker.
     fn forget_recorded_partition(sub: &Path) -> eyre::Result<()> {
@@ -23308,7 +23254,12 @@ mod tests {
         assert!(!text.contains("chunk_size"), "{text}");
 
         let consensus = ConsensusConfig::testing();
-        let loaded = ensure_recorded_packing_params(&path, &consensus).unwrap();
+        let loaded = ensure_recorded_packing_params(
+            &path,
+            PackingParams::from_toml(&path).unwrap(),
+            &consensus,
+        )
+        .unwrap();
         assert_eq!(
             loaded.entropy_packing_iterations,
             Some(consensus.entropy_packing_iterations)
@@ -23331,7 +23282,7 @@ mod tests {
         );
         let again = PackingParams::from_toml(&path).unwrap();
         assert_eq!(again, loaded);
-        let second = ensure_recorded_packing_params(&path, &consensus).unwrap();
+        let second = ensure_recorded_packing_params(&path, again, &consensus).unwrap();
         assert_eq!(second, loaded);
     }
 
@@ -23793,7 +23744,8 @@ mod tests {
                 );
             };
             assert!(
-                err.to_string().contains("Partition hash mismatch"),
+                err.to_string()
+                    .contains("open does not change what a drive holds"),
                 "{engine:?}: {err}"
             );
             assert_eq!(

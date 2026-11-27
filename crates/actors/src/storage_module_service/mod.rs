@@ -20,7 +20,8 @@ use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, DriveFault, Held, StorageModule,
     drive_verdict::{
-        self, ChainIdentity, DriveAction, DriveDecision, DriveFile, DriveVerdict, VerdictInputs,
+        self, ChainIdentity, DriveAction, DriveDecision, DriveFile, DriveVerdict, Verdict,
+        VerdictInputs,
     },
     stop_node_for_drive_fault,
 };
@@ -529,20 +530,12 @@ impl StorageModuleServiceInner {
             in_sync,
             identity: &identity,
         };
-        // Every open drive passed the same check at startup, and every store
-        // records this node's miner and chain, so a foreign record here is a
-        // broken invariant.
-        let decisions = drive_verdict::decide(&inputs).map_err(|cause| DriveFault {
-            subject: "an open drive".to_owned(),
-            operation: "judge the drive verdict",
-            cause,
-        })?;
-        let unplaced = drive_verdict::unplaced(&inputs, &decisions);
-        self.log_changed_decisions(&ids, &decisions, &unplaced, &inputs, update_height);
+        let verdict = drive_verdict::decide(&inputs);
+        self.log_changed_decisions(&ids, &verdict, &inputs, update_height);
 
-        for decision in &decisions {
+        for decision in &verdict.decisions {
             let module = &modules[&ids[decision.id]];
-            self.apply_decision(module, decision, epoch_height)?;
+            self.apply_decision(module, decision, epoch_height).await?;
         }
 
         // After assignments settle: best-effort gap-scan + index backfill for every
@@ -561,12 +554,11 @@ impl StorageModuleServiceInner {
     fn log_changed_decisions(
         &mut self,
         ids: &[usize],
-        decisions: &[DriveDecision],
-        unplaced: &[PartitionAssignment],
+        verdict: &Verdict,
         inputs: &VerdictInputs<'_>,
         update_height: u64,
     ) {
-        for decision in decisions {
+        for decision in &verdict.decisions {
             let id = ids[decision.id];
             let now = (decision.verdict.clone(), decision.action.clone());
             if self.last_decisions.get(&id) == Some(&now) {
@@ -591,9 +583,9 @@ impl StorageModuleServiceInner {
             );
             self.last_decisions.insert(id, now);
         }
-        let hashes: Vec<H256> = unplaced.iter().map(|a| a.partition_hash).collect();
+        let hashes: Vec<H256> = verdict.unplaced.iter().map(|a| a.partition_hash).collect();
         if hashes != self.last_unplaced {
-            for assignment in unplaced {
+            for assignment in &verdict.unplaced {
                 warn!(
                     partition.hash = %assignment.partition_hash,
                     partition.ledger_id = ?assignment.ledger_id,
@@ -608,8 +600,9 @@ impl StorageModuleServiceInner {
     /// Apply one drive's decision to its open module. The module picks the
     /// transition ([`StorageModule::hold`]); the service packs what it says.
     /// A drive fault is returned as is: the message boundary stops the node
-    /// on it, and there is no retry.
-    fn apply_decision(
+    /// on it, and there is no retry. The transition (a wipe or slot exit
+    /// writes the whole drive) runs on the blocking pool.
+    async fn apply_decision(
         &mut self,
         module: &Arc<StorageModule>,
         decision: &DriveDecision,
@@ -623,7 +616,15 @@ impl StorageModuleServiceInner {
             DriveAction::Clear => None,
             DriveAction::Assign(assignment) => Some(*assignment),
         };
-        let held = module.hold(next, epoch_height, decision.stamp_v2)?;
+        let stamp_v2 = decision.stamp_v2;
+        let drive = Arc::clone(module);
+        let held =
+            match tokio::task::spawn_blocking(move || drive.hold(next, epoch_height, stamp_v2))
+                .await
+            {
+                Ok(held) => held?,
+                Err(join) => std::panic::resume_unwind(join.into_panic()),
+            };
         match held {
             Held::Kept => {}
             Held::Adopted => self.enqueue_uninitialized(module),

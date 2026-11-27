@@ -5,7 +5,7 @@
 //! holder wins and which free drive receives a new placement. So appending,
 //! removing or reordering drives cannot change which partition a drive keeps.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use irys_types::{
@@ -13,9 +13,7 @@ use irys_types::{
     partition_chunk_offset_ie,
 };
 
-use super::storage_module::{
-    PACKING_PARAMS_FILE_NAME, PACKING_PARAMS_VERSION, PackingParams, StorageModuleInfo,
-};
+use super::storage_module::{PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
 
 /// What was found at a drive's `packing_params.toml`. A file that cannot be
 /// read or parsed is not a drive state: it stops the node (see
@@ -146,32 +144,18 @@ impl DriveAction {
     }
 }
 
-/// Why a recorded file is not this node's to manage: a newer file version,
-/// another chain id, or another packing address. Such a drive stops the
-/// node; it is never skipped.
-fn is_foreign(p: &PackingParams, id: &ChainIdentity) -> Option<String> {
-    if p.version.is_some_and(|v| v > PACKING_PARAMS_VERSION) {
-        return Some(format!("newer file version {:?}", p.version));
-    }
-    if p.chain_id.is_some_and(|c| c != id.chain_id) {
-        return Some(format!("other chain id {:?}", p.chain_id));
-    }
-    if p.packing_address != id.miner {
-        return Some(format!("other packing address {}", p.packing_address));
-    }
-    None
-}
-
 /// An error naming the first drive whose recorded file is foreign (newer
 /// version, other chain id, other packing address). The node does not start
-/// with such a drive, and no drive is skipped.
+/// with such a drive, and no drive is skipped. Open runs the same check, and
+/// every runtime store records this node's miner and chain, so [`decide`]
+/// never sees a foreign file.
 pub fn refuse_foreign_drives(
     drives: &[(PathBuf, DriveFile)],
     identity: &ChainIdentity,
 ) -> eyre::Result<()> {
     for (path, file) in drives {
         if let DriveFile::Recorded(p) = file
-            && let Some(why) = is_foreign(p, identity)
+            && let Some(why) = p.foreign_reason(identity.chain_id, identity.miner)
         {
             eyre::bail!(
                 "drive {} is not this node's: {why} (packing params at {})",
@@ -221,7 +205,7 @@ fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
             && let Some(new) = by_hash.get(&h)
         {
             first.entry(h).or_insert(i);
-            if !waits_on_a_newer_record(inputs, p, new) {
+            if !(p.leaves_ledger_for(new) && recorded_newer(inputs, p)) {
                 eligible.entry(h).or_insert(i);
                 if (p.ledger, p.slot) == (new.ledger_id, new.slot_index) {
                     exact.entry(h).or_insert(i);
@@ -234,45 +218,32 @@ fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
     first
 }
 
-/// The drive records `new`'s partition on another ledger slot, installed
-/// after the epoch judged here: it waits for a later epoch.
+/// The file records an assignment installed after the epoch judged here.
 ///
-/// Only leaving a ledger slot waits. A drive that records capacity and is
-/// given a ledger slot by an older epoch takes it: a reorg made that epoch
-/// canonical again, the slot is this drive's on that chain, and gaining a
-/// slot destroys nothing (data is written over entropy only where data goes).
-/// Leaving would relabel and repack the slot's data, so it is held back.
-fn waits_on_a_newer_record(
-    inputs: &VerdictInputs<'_>,
-    p: &PackingParams,
-    new: &PartitionAssignment,
-) -> bool {
-    p.leaves_ledger_for(new)
-        && p.trusted_assigned_height()
-            .is_some_and(|h| h > inputs.epoch_height)
+/// A drive that records `new`'s partition on another ledger slot with such
+/// a record waits for a later epoch. Only leaving a ledger slot waits. A
+/// drive that records capacity and is given a ledger slot by an older epoch
+/// takes it: a reorg made that epoch canonical again, the slot is this
+/// drive's on that chain, and gaining a slot destroys nothing (data is
+/// written over entropy only where data goes). Leaving would relabel and
+/// repack the slot's data, so it is held back.
+fn recorded_newer(inputs: &VerdictInputs<'_>, p: &PackingParams) -> bool {
+    p.trusted_assigned_height()
+        .is_some_and(|h| h > inputs.epoch_height)
 }
 
-/// Assignments no drive holds, in placement order.
-fn unheld(inputs: &VerdictInputs<'_>) -> Vec<PartitionAssignment> {
-    let held = first_holders(inputs);
-    let mut v: Vec<_> = inputs
-        .assignments
-        .iter()
-        .filter(|a| !held.contains_key(&a.partition_hash))
-        .copied()
-        .collect();
-    v.sort_by_key(placement_key);
-    v
+/// Every drive's decision, in id order, and the assignments no drive holds
+/// or receives, in placement order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    pub decisions: Vec<DriveDecision>,
+    pub unplaced: Vec<PartitionAssignment>,
 }
 
 /// Decide, for every drive, what it keeps or receives. Exactly one decision per
-/// drive, in id order. Pure: no I/O, clocks or global state.
-///
-/// A drive whose file is foreign (newer version, other chain id, other
-/// packing address) is an error naming its path: the node does not run with
-/// a drive it cannot account for, and no drive is skipped.
-pub fn decide(inputs: &VerdictInputs<'_>) -> eyre::Result<Vec<DriveDecision>> {
-    refuse_foreign_drives(inputs.drives, inputs.identity)?;
+/// drive, in id order. Pure: no I/O, clocks or global state. Foreign drives
+/// are refused before this runs (see [`refuse_foreign_drives`]).
+pub fn decide(inputs: &VerdictInputs<'_>) -> Verdict {
     let holders = first_holders(inputs);
     let by_hash: HashMap<H256, PartitionAssignment> = inputs
         .assignments
@@ -280,7 +251,7 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> eyre::Result<Vec<DriveDecision>> {
         .map(|a| (a.partition_hash, *a))
         .collect();
 
-    let mut out: Vec<DriveDecision> = inputs
+    let mut decisions: Vec<DriveDecision> = inputs
         .drives
         .iter()
         .enumerate()
@@ -299,15 +270,27 @@ pub fn decide(inputs: &VerdictInputs<'_>) -> eyre::Result<Vec<DriveDecision>> {
         })
         .collect();
 
-    let mut queue = unheld(inputs).into_iter();
+    // Assignments no drive holds, in placement order: empty drives first,
+    // then released ones, receive them. What is left is unplaced.
+    let mut queue: Vec<_> = inputs
+        .assignments
+        .iter()
+        .filter(|a| !holders.contains_key(&a.partition_hash))
+        .copied()
+        .collect();
+    queue.sort_by_key(placement_key);
+    let mut queue = queue.into_iter();
     for want in [DriveVerdict::Empty, DriveVerdict::Released] {
-        for d in out.iter_mut().filter(|d| d.verdict == want) {
+        for d in decisions.iter_mut().filter(|d| d.verdict == want) {
             if let Some(a) = queue.next() {
                 d.action = DriveAction::Assign(a);
             }
         }
     }
-    Ok(out)
+    Verdict {
+        decisions,
+        unplaced: queue.collect(),
+    }
 }
 
 /// One drive's verdict, action and stamp flags.
@@ -342,15 +325,12 @@ fn classify(
     let Some(hash) = p.partition_hash else {
         return Classified::new(DriveVerdict::Empty, DriveAction::Idle);
     };
-    // The file records an assignment installed after the epoch judged here.
-    let recorded_newer = p
-        .trusted_assigned_height()
-        .is_some_and(|h| h > inputs.epoch_height);
+    let recorded_newer = recorded_newer(inputs, p);
     if let Some(&new) = by_hash.get(&hash) {
         if holders.get(&hash) != Some(&id) {
             return Classified::wait(WaitReason::DuplicateHolder(hash));
         }
-        if waits_on_a_newer_record(inputs, p, &new) {
+        if p.leaves_ledger_for(&new) && recorded_newer {
             return Classified::wait(WaitReason::RecordedNewerThanEpoch);
         }
         // A v1 file, a file of another genesis, or a v2 file with no trusted
@@ -379,24 +359,6 @@ fn classify(
         return Classified::wait(WaitReason::RecordedNewerThanEpoch);
     }
     Classified::new(DriveVerdict::Released, DriveAction::Clear)
-}
-
-/// Assignments that no drive holds or receives, in placement order.
-pub fn unplaced(
-    inputs: &VerdictInputs<'_>,
-    decisions: &[DriveDecision],
-) -> Vec<PartitionAssignment> {
-    let received: HashSet<H256> = decisions
-        .iter()
-        .filter_map(|d| match &d.action {
-            DriveAction::Assign(a) => Some(a.partition_hash),
-            _ => None,
-        })
-        .collect();
-    unheld(inputs)
-        .into_iter()
-        .filter(|a| !received.contains(&a.partition_hash))
-        .collect()
 }
 
 /// Reads each configured drive's `packing_params.toml`, in configured order
@@ -474,6 +436,7 @@ pub fn startup_storage_module_infos(
     let identity = ChainIdentity::new(config, genesis_hash);
     let assignments = snapshot.get_partition_assignments(identity.miner);
     let drives = drive_verdict_inputs_from_disk(config, &paths).expect("drive files are readable");
+    refuse_foreign_drives(&drives, &identity).expect("no drive is foreign");
     let decisions = decide(&VerdictInputs {
         drives: &drives,
         assignments: &assignments,
@@ -481,7 +444,7 @@ pub fn startup_storage_module_infos(
         in_sync: false,
         identity: &identity,
     })
-    .expect("no drive is foreign");
+    .decisions;
     let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
         .expect("num_chunks_in_partition fits u32");
     let mut infos = parked_storage_module_infos(&paths, num_chunks);
@@ -565,24 +528,8 @@ mod tests {
             in_sync: sync,
             identity: &id,
         };
-        let d = decide(&inputs).expect("no foreign drive");
-        let u = unplaced(&inputs, &d);
-        (d, u)
-    }
-    /// The error `decide` returns for these drives.
-    fn decide_err(drives: &[(PathBuf, DriveFile)], assignments: &[PartitionAssignment]) -> String {
-        let id = ident();
-        let inputs = VerdictInputs {
-            drives,
-            assignments,
-            epoch_height: 100,
-            in_sync: true,
-            identity: &id,
-        };
-        format!(
-            "{:#}",
-            decide(&inputs).expect_err("a foreign drive stops the node")
-        )
+        let verdict = decide(&inputs);
+        (verdict.decisions, verdict.unplaced)
     }
     fn assigned_hash(d: &DriveDecision) -> Option<H256> {
         match &d.action {
@@ -596,7 +543,6 @@ mod tests {
     /// is skipped.
     #[test]
     fn foreign_drive_is_an_error_naming_the_drive() {
-        let assigned = [pa(1, Some(DataLedger::Publish), Some(0))];
         let mut other_miner = v2(1, Some(DataLedger::Publish), Some(0), 10);
         other_miner.packing_address = IrysAddress::from([0xBB; 20]);
         let mut other_chain = v2(1, Some(DataLedger::Publish), Some(0), 10);
@@ -609,7 +555,11 @@ mod tests {
             (newer, "newer file version"),
         ] {
             let drives = [drive(0, DriveFile::Missing), drive(1, rec(params))];
-            let err = decide_err(&drives, &assigned);
+            let err = format!(
+                "{:#}",
+                refuse_foreign_drives(&drives, &ident())
+                    .expect_err("a foreign drive stops the node")
+            );
             assert!(err.contains("/d1"), "{err}");
             assert!(err.contains(why), "{err}");
         }
