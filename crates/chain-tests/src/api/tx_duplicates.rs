@@ -184,5 +184,6 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
             .collect::<Vec<&H256>>()
     );
 
+    node.stop().await;
     Ok(())
 }
