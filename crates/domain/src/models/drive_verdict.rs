@@ -226,10 +226,13 @@ fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
 /// takes it: a reorg made that epoch canonical again, the slot is this
 /// drive's on that chain, and gaining a slot destroys nothing (data is
 /// written over entropy only where data goes). Leaving would relabel and
-/// repack the slot's data, so it is held back.
+/// repack the slot's data, so it is held back. A height recorded on another
+/// genesis says nothing about this chain's epochs and never makes a drive
+/// wait.
 fn recorded_newer(inputs: &VerdictInputs<'_>, p: &PackingParams) -> bool {
-    p.trusted_assigned_height()
-        .is_some_and(|h| h > inputs.epoch_height)
+    p.genesis_hash == Some(inputs.identity.genesis_hash)
+        && p.trusted_assigned_height()
+            .is_some_and(|h| h > inputs.epoch_height)
 }
 
 /// Every drive's decision, in id order, and the assignments no drive holds
@@ -1036,6 +1039,19 @@ mod tests {
             err.contains(&format!("drive {}", linked.display())),
             "{err}"
         );
+    }
+
+    /// A newer assigned height recorded on another genesis does not hold a
+    /// drive back: it leaves its recorded slot for the assigned one.
+    #[test]
+    fn newer_height_of_another_genesis_does_not_wait() {
+        let mut other = v2(1, Some(DataLedger::Publish), Some(1), 150);
+        other.genesis_hash = Some(H256::from([0x11; 32]));
+        let a = [pa(1, Some(DataLedger::Publish), Some(0))];
+        let (d, u) = run(&[drive(0, rec(other))], &a, false);
+        assert_eq!(d[0].verdict, DriveVerdict::Ours);
+        assert_eq!(d[0].action, DriveAction::Assign(a[0]));
+        assert!(u.is_empty());
     }
 
     /// Startup opens every drive parked, with its path index as module id.
