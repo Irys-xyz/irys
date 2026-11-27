@@ -2159,6 +2159,38 @@ impl IrysNode {
             u64::from(config.consensus.block_migration_depth),
         );
 
+        // The storage module service applies every assignment change. Every
+        // module opened parked, so it applies the startup verdict now and
+        // startup waits until every drive's decision is applied: nothing that
+        // can move the tip, migrate chunks or prune the cache (gossip, p2p,
+        // sync, the API, mining) starts before the drives hold what the
+        // canonical epoch assigns. Startup is never in sync, so no file is
+        // stamped v2.
+        debug!("Starting StorageModuleService");
+        let storage_module_handle = StorageModuleService::spawn_service(
+            receivers.storage_modules,
+            storage_modules.clone(),
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            service_senders.clone(),
+            &config,
+            chain_identity,
+            runtime_handle.clone(),
+        );
+        let (startup_assignments, startup_applied) =
+            StorageModuleServiceMessage::assignments_updated(
+                &block_tree_guard.read().canonical_epoch_snapshot(),
+                config.node_config.miner_address(),
+                false,
+            )
+            .with_applied_ack();
+        service_senders
+            .storage_modules
+            .send_traced(startup_assignments)?;
+        startup_applied.await.map_err(|_| {
+            eyre::eyre!("storage module service stopped before applying the startup assignments")
+        })?;
+
         // In case if you're wondering why this channel is not in the service senders:
         // It's because ChainSyncService depends on the BlockPool, and moving it to actors will
         // create a circular dependency, since BlockPool also depends on actors. This can be
@@ -2356,35 +2388,6 @@ impl IrysNode {
             block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
-
-        // Spawn the StorageModuleService to manage the life-cycle of storage modules
-        // This service:
-        // - Monitors partition assignments from the network
-        // - Initializes storage modules when they receive partition assignments
-        // - Handles the dynamic addition/removal of storage modules
-        // - Coordinates with the epoch service for runtime updates
-        debug!("Starting StorageModuleService");
-        let storage_module_handle = StorageModuleService::spawn_service(
-            receivers.storage_modules,
-            storage_modules.clone(),
-            block_index_guard.clone(),
-            block_tree_guard.clone(),
-            service_senders.clone(),
-            &config,
-            chain_identity,
-            runtime_handle.clone(),
-        );
-        // Apply the startup verdict's destructive half now, not at the next
-        // epoch block: clear released drives, place partitions on empty or
-        // released drives, and exit ledgers. Startup is never in sync, so no
-        // file is stamped v2.
-        service_senders.storage_modules.send_traced(
-            StorageModuleServiceMessage::assignments_updated(
-                &block_tree_guard.read().canonical_epoch_snapshot(),
-                config.node_config.miner_address(),
-                false,
-            ),
-        )?;
 
         // Production chunk fetcher is the HTTP chunk fetcher
         let max_peer_response_bytes = config.node_config.max_peer_response_bytes;

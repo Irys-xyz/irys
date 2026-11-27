@@ -41,7 +41,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{Instrument as _, error, info, warn};
 
 // Messages that the StorageModuleService service supports
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum StorageModuleServiceMessage {
     /// The canonical epoch snapshot changed (an epoch block, a reorg that
     /// orphaned the only epoch block, or startup). The service runs
@@ -58,6 +58,9 @@ pub enum StorageModuleServiceMessage {
         /// stamped as v2 (a v1 file, another
         /// genesis, or no trusted assigned height).
         in_sync: bool,
+        /// Signalled once every drive's decision is applied (every `hold`
+        /// done), before the index heal. Startup waits on it.
+        applied: Option<tokio::sync::oneshot::Sender<()>>,
     },
     /// Rollback marked this span `Uninitialized` and the packing channel did
     /// not accept it. `tick` resends it while any offset is still
@@ -80,7 +83,29 @@ impl StorageModuleServiceMessage {
             assignments: Arc::new(snapshot.get_partition_assignments(miner)),
             epoch_height: snapshot.epoch_height,
             in_sync,
+            applied: None,
         }
+    }
+
+    /// This update, with a receiver that resolves once every drive's
+    /// decision is applied. Dropped unresolved if the service fails first.
+    pub fn with_applied_ack(self) -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let msg = match self {
+            Self::PartitionAssignmentsUpdated {
+                assignments,
+                epoch_height,
+                in_sync,
+                ..
+            } => Self::PartitionAssignmentsUpdated {
+                assignments,
+                epoch_height,
+                in_sync,
+                applied: Some(tx),
+            },
+            other => other,
+        };
+        (msg, rx)
     }
 }
 
@@ -298,9 +323,15 @@ impl StorageModuleServiceInner {
                 assignments,
                 epoch_height,
                 in_sync,
+                applied,
             } => {
-                self.handle_partition_assignments_update(assignments, epoch_height, in_sync)
-                    .await?
+                self.handle_partition_assignments_update(
+                    assignments,
+                    epoch_height,
+                    in_sync,
+                    applied,
+                )
+                .await?
             }
             // `on_message` handles this. `apply_assignment` must not see it.
             StorageModuleServiceMessage::RepackUninitialized { .. } => {}
@@ -521,6 +552,7 @@ impl StorageModuleServiceInner {
         assignments: Arc<Vec<PartitionAssignment>>,
         epoch_height: u64,
         in_sync: bool,
+        applied: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> eyre::Result<()> {
         let modules: BTreeMap<usize, Arc<StorageModule>> = {
             let modules_guard = self.storage_modules.read().unwrap();
@@ -546,6 +578,9 @@ impl StorageModuleServiceInner {
             self.apply_decision(module, decision, epoch_height).await?;
         }
         self.warn_if_assigned_without_mining(&modules);
+        if let Some(applied) = applied {
+            let _ = applied.send(());
+        }
 
         // After assignments settle: best-effort gap-scan + index backfill for every
         // local SM on a data ledger. Do not fail membership updates if heal hard-
@@ -1918,6 +1953,7 @@ mod assignment_reset_tests {
             assignments,
             epoch_height: height,
             in_sync: false,
+            applied: None,
         }
     }
 
@@ -2735,6 +2771,7 @@ mod assignment_reset_tests {
                 assignments: explicit_unassign(),
                 epoch_height: CANONICAL_EPOCH_HEIGHT,
                 in_sync: true,
+                applied: None,
             })
             .await
             .expect("orphaned-epoch resend");
@@ -2773,6 +2810,7 @@ mod assignment_reset_tests {
                 assignments: Arc::new(vec![held]),
                 epoch_height: 5,
                 in_sync: true,
+                applied: None,
             },
         )
         .await;
@@ -2944,6 +2982,7 @@ mod assignment_reset_tests {
                 assignments: publish_update(hash, miner),
                 epoch_height: 7,
                 in_sync: true,
+                applied: None,
             })
             .await
             .expect("in-sync epoch");
@@ -2981,6 +3020,7 @@ mod assignment_reset_tests {
                 assignments: capacity_update(hash, miner),
                 epoch_height: CANONICAL_EPOCH_HEIGHT,
                 in_sync: true,
+                applied: None,
             })
             .await
             .expect("orphaned-epoch resend");
