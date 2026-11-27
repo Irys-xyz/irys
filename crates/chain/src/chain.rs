@@ -2840,15 +2840,9 @@ impl IrysNode {
         )
     }
 
-    /// Reads every configured drive's packing params before any is opened
-    /// and returns one parked module per drive (no assignment: open never
-    /// changes what a drive holds) and this node's chain identity, whose
-    /// genesis hash later writes stamp.
-    /// A drive whose packing params cannot be read or parsed, or that is
-    /// foreign (newer version, other chain, other miner), fails startup with
-    /// an error naming it: no drive is skipped. The storage module service
-    /// applies the startup verdict from the first assignment update. Nothing
-    /// is written here.
+    /// [`drive_verdict::read_startup_drives`] with the genesis hash from the
+    /// block index: one parked module per drive, and this node's chain
+    /// identity, whose genesis hash later writes stamp.
     fn drives_at_startup(
         config: &Config,
         paths: &[std::path::PathBuf],
@@ -2859,17 +2853,8 @@ impl IrysNode {
             .get_item(0)
             .ok_or_eyre("block index has no genesis item")?
             .block_hash;
-        let identity = drive_verdict::ChainIdentity::new(config, genesis_hash);
-        let drives = drive_verdict::drive_verdict_inputs_from_disk(config, paths)?;
-        drive_verdict::refuse_foreign_drives(&drives, &identity)?;
-        // Existing module paths retain their physical layout; logical bounds are
-        // resolved separately and the finalized migration removes their suffix.
-        let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
-            .wrap_err("num_chunks_in_partition exceeds u32")?;
-        Ok((
-            drive_verdict::parked_storage_module_infos(paths, num_chunks),
-            identity,
-        ))
+        let startup = drive_verdict::read_startup_drives(config, paths, genesis_hash)?;
+        Ok((startup.parked, startup.identity))
     }
 
     async fn init_storage_modules(

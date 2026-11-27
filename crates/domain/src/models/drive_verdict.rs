@@ -416,40 +416,72 @@ pub fn parked_storage_module_infos(paths: &[PathBuf], num_chunks: u32) -> Vec<St
         .collect()
 }
 
-/// For tests without a running node or service: one module per configured
-/// drive in `paths` with the assignment the startup verdict gives it for
-/// `snapshot`'s assignments to this miner (`None` for a drive that waits,
-/// idles or is cleared). Open accepts such an assignment only for a fresh
-/// drive or one whose file already records it. Panics where startup would
-/// fail: an unreadable or foreign drive file.
+/// What startup knows before any module opens: this node's chain identity,
+/// every configured drive's packing params file, and one parked module per
+/// drive in `paths`.
+#[derive(Debug, Clone)]
+pub struct StartupDrives {
+    pub identity: ChainIdentity,
+    pub drives: Vec<(PathBuf, DriveFile)>,
+    pub parked: Vec<StorageModuleInfo>,
+}
+
+/// Reads every configured drive's packing params before any is opened. A
+/// drive whose file cannot be read or parsed, or that is foreign (newer
+/// version, other chain, other miner), is an error naming it: no drive is
+/// skipped. Each module opens parked (open never changes what a drive
+/// holds); the storage module service applies the startup verdict from the
+/// first assignment update. Nothing is written here.
+pub fn read_startup_drives(
+    config: &Config,
+    paths: &[PathBuf],
+    genesis_hash: H256,
+) -> eyre::Result<StartupDrives> {
+    let identity = ChainIdentity::new(config, genesis_hash);
+    let drives = drive_verdict_inputs_from_disk(config, paths)?;
+    refuse_foreign_drives(&drives, &identity)?;
+    // Existing module paths retain their physical layout; logical bounds are
+    // resolved separately and the finalized migration removes their suffix.
+    let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
+        .map_err(|_| eyre::eyre!("num_chunks_in_partition exceeds u32"))?;
+    Ok(StartupDrives {
+        identity,
+        drives,
+        parked: parked_storage_module_infos(paths, num_chunks),
+    })
+}
+
+/// For tests without a running node or service: [`read_startup_drives`],
+/// then the startup verdict for `snapshot`'s assignments to this miner
+/// applied to each parked module (`None` for a drive that waits, idles or is
+/// cleared). It judges with no genesis hash, so no unassigned v2 drive is
+/// provably released. Open accepts such an assignment only for a fresh drive
+/// or one whose file already records it. Panics where startup would fail.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn startup_storage_module_infos(
     snapshot: &crate::EpochSnapshot,
     paths: &[PathBuf],
-    genesis_hash: H256,
 ) -> Vec<StorageModuleInfo> {
-    let config = &snapshot.config;
-    let identity = ChainIdentity::new(config, genesis_hash);
+    let StartupDrives {
+        identity,
+        drives,
+        mut parked,
+    } = read_startup_drives(&snapshot.config, paths, H256::zero())
+        .expect("drive files are readable and this node's");
     let assignments = snapshot.get_partition_assignments(identity.miner);
-    let drives = drive_verdict_inputs_from_disk(config, paths).expect("drive files are readable");
-    refuse_foreign_drives(&drives, &identity).expect("no drive is foreign");
-    let decisions = decide(&VerdictInputs {
+    let verdict = decide(&VerdictInputs {
         drives: &drives,
         assignments: &assignments,
         epoch_height: snapshot.epoch_height,
         in_sync: false,
         identity: &identity,
-    })
-    .decisions;
-    let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
-        .expect("num_chunks_in_partition fits u32");
-    let mut infos = parked_storage_module_infos(paths, num_chunks);
-    for (info, decision) in infos.iter_mut().zip(&decisions) {
+    });
+    for (info, decision) in parked.iter_mut().zip(&verdict.decisions) {
         if let DriveAction::Assign(assignment) = decision.action {
             info.partition_assignment = Some(assignment);
         }
     }
-    infos
+    parked
 }
 
 #[cfg(test)]

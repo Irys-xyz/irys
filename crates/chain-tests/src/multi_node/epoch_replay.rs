@@ -148,7 +148,6 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
                 .read()
                 .canonical_epoch_snapshot(),
             &peer1_node.submodule_paths(),
-            H256::zero(),
         );
 
         assert!(peer_sm_infos_before[0].partition_assignment.is_some());
@@ -272,7 +271,6 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
             .read()
             .canonical_epoch_snapshot(),
         &restarted_node.submodule_paths(),
-        H256::zero(),
     );
 
     let peer_assignment_before = peer_sm_infos_before[0].partition_assignment.unwrap();
