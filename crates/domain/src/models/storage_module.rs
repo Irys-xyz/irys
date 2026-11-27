@@ -1482,6 +1482,20 @@ pub fn stop_node_for_drive_fault(message: &str) -> ! {
     std::process::abort()
 }
 
+/// A drive fault on a path that changes what a drive holds: an I/O error,
+/// or a broken drive-state invariant. It is not survived: the service's
+/// message boundary stops the node on it with [`stop_node_for_drive_fault`],
+/// which leaves the drive as a crash would.
+#[derive(Debug, thiserror::Error)]
+#[error("{subject}: {operation} failed: {cause:#}")]
+pub struct DriveFault {
+    /// What faulted, e.g. `storage module 3 (/mnt/sm-3)`.
+    pub subject: String,
+    /// What was being done.
+    pub operation: &'static str,
+    pub cause: eyre::Report,
+}
+
 /// What [`StorageModule::hold`] did, and what its caller packs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Held {
@@ -3296,13 +3310,19 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Unwrap a drive I/O result on a path that changes what this drive
-    /// holds (an assignment store, a reset, a slot exit). An error panics
-    /// with the module, its paths, the operation and the error, which stops
-    /// the node: the operator decided that a drive I/O error is not survived.
-    /// The panic leaves the drive exactly as a crash at that point would, and
-    /// the next open brings it to a consistent state (reset marker, the
-    /// idempotent slot exit, open-time reconciles).
+    /// A [`DriveFault`] of this module in `operation`.
+    pub fn drive_fault(&self, operation: &'static str, cause: eyre::Report) -> DriveFault {
+        DriveFault {
+            subject: format!("storage module {} ({})", self.id, self.display_paths()),
+            operation,
+            cause,
+        }
+    }
+
+    /// Unwrap a drive I/O result and stop the node on an error, with the
+    /// module, its paths, the operation and the error. Only the partition
+    /// mining service's expiry path still calls this; the storage module
+    /// service returns a [`DriveFault`] to its message boundary instead.
     pub fn expect_drive_io<T>(&self, operation: &str, result: eyre::Result<T>) -> T {
         result.unwrap_or_else(|err| {
             stop_node_for_drive_fault(&format!(
@@ -4547,22 +4567,22 @@ impl StorageModule {
         next: Option<PartitionAssignment>,
         height: u64,
         stamp_v2: bool,
-    ) -> eyre::Result<Held> {
+    ) -> Result<Held, DriveFault> {
         let mut assignment = self.partition_assignment.write().unwrap();
         let Some(next) = next else {
             let interval = self
                 .reset_locked(&mut assignment, None, height)
-                .wrap_err("wipe a released partition")?;
+                .map_err(|err| self.drive_fault("wipe a released partition", err))?;
             return Ok(Held::Released(interval));
         };
         let reset = |this: &Self, assignment: &mut Option<PartitionAssignment>| {
             this.reset_locked(assignment, Some(next), height)
-                .wrap_err("wipe and install a new partition")
+                .map_err(|err| this.drive_fault("wipe and install a new partition", err))
                 .map(Held::Reset)
         };
         let stamp = |this: &Self, assignment: &mut Option<PartitionAssignment>| {
             this.store_assignment(assignment, Some(next), height)
-                .wrap_err("rewrite packing params as v2")
+                .map_err(|err| this.drive_fault("rewrite packing params as v2", err))
         };
         match *assignment {
             Some(current) if current.partition_hash == next.partition_hash => {
@@ -4573,12 +4593,16 @@ impl StorageModule {
                     Ok(Held::Kept)
                 } else if current.ledger_id.is_some() {
                     self.leave_slot_locked(&mut assignment, next, height)
-                        .wrap_err("leave the ledger slot (keep-entropy reset)")
+                        .map_err(|err| {
+                            self.drive_fault("leave the ledger slot (keep-entropy reset)", err)
+                        })
                         .map(Held::LeftSlot)
                 } else {
                     // Capacity gaining a ledger keeps the bytes.
                     self.store_assignment(&mut assignment, Some(next), height)
-                        .wrap_err("store the capacity-to-ledger assignment")?;
+                        .map_err(|err| {
+                            self.drive_fault("store the capacity-to-ledger assignment", err)
+                        })?;
                     Ok(Held::GainedLedger)
                 }
             }
@@ -4600,7 +4624,12 @@ impl StorageModule {
                             *assignment = Some(next);
                         } else {
                             self.store_assignment(&mut assignment, Some(next), height)
-                                .wrap_err("store the held partition on every submodule")?;
+                                .map_err(|err| {
+                                    self.drive_fault(
+                                        "store the held partition on every submodule",
+                                        err,
+                                    )
+                                })?;
                         }
                         if stamp_v2 {
                             stamp(self, &mut assignment)?;
@@ -4610,14 +4639,18 @@ impl StorageModule {
                     Some(params) if params.ledger.is_none() => {
                         // Capacity gaining a ledger keeps the bytes.
                         self.store_assignment(&mut assignment, Some(next), height)
-                            .wrap_err("store the held partition's ledger slot")?;
+                            .map_err(|err| {
+                                self.drive_fault("store the held partition's ledger slot", err)
+                            })?;
                         Ok(Held::Adopted)
                     }
                     // Leaving a ledger: the data belongs to the old slot,
                     // the entropy to the partition.
                     Some(_) => self
                         .leave_slot_locked(&mut assignment, next, height)
-                        .wrap_err("leave the ledger slot (keep-entropy reset)")
+                        .map_err(|err| {
+                            self.drive_fault("leave the ledger slot (keep-entropy reset)", err)
+                        })
                         .map(Held::LeftSlot),
                     None => reset(self, &mut assignment),
                 }

@@ -18,7 +18,7 @@ use crate::{packing_service::PackingRequest, services::ServiceSenders};
 use index_heal::{HealOutcome, INDEX_HEAL_RETRY_INTERVAL, IndexHealCtx, heal_ledger_data_indexes};
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, Held, StorageModule,
+    BlockIndexReadGuard, BlockTreeReadGuard, DriveFault, Held, StorageModule,
     drive_verdict::{
         self, ChainIdentity, DriveAction, DriveDecision, DriveFile, DriveVerdict, VerdictInputs,
     },
@@ -352,10 +352,16 @@ impl StorageModuleServiceInner {
 
     /// Apply one assignment update. An update that cannot be applied yet
     /// (no genesis item in the block index) is stored and retried. A drive
-    /// I/O error panics inside and stops the node. Any other error aborts the
-    /// service.
+    /// fault stops the node here, the one place it is handled. Any other
+    /// error aborts the service.
     async fn apply_assignment(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
-        match self.handle_message(msg.clone()).await {
+        let result = self.handle_message(msg.clone()).await;
+        if let Err(err) = &result
+            && let Some(fault) = err.downcast_ref::<DriveFault>()
+        {
+            stop_node_for_drive_fault(&format!("{fault}; stopping the node"));
+        }
+        match result {
             Ok(()) => {
                 self.pending_assignment = None;
                 Ok(())
@@ -512,7 +518,7 @@ impl StorageModuleServiceInner {
     fn runtime_drives(
         &self,
         modules: &BTreeMap<usize, Arc<StorageModule>>,
-    ) -> (Vec<(PathBuf, DriveFile)>, Vec<usize>) {
+    ) -> Result<(Vec<(PathBuf, DriveFile)>, Vec<usize>), DriveFault> {
         let ids: Vec<usize> = modules.keys().copied().collect();
         let drives = ids
             .iter()
@@ -526,18 +532,16 @@ impl StorageModuleServiceInner {
                 let module = &modules[id];
                 // Open fails when the file cannot be read back, and every
                 // store updates the record, so an open module always has one.
-                let params = module.recorded_params().unwrap_or_else(|| {
-                    stop_node_for_drive_fault(&format!(
-                        "storage module {} ({}) has no recorded packing params; stopping the node",
-                        module.id,
-                        module.display_paths()
-                    ))
-                });
-                let file = DriveFile::Recorded(params);
-                (path, file)
+                let params = module.recorded_params().ok_or_else(|| {
+                    module.drive_fault(
+                        "read its recorded packing params",
+                        eyre::eyre!("open module has no recorded packing params"),
+                    )
+                })?;
+                Ok((path, DriveFile::Recorded(params)))
             })
-            .collect();
-        (drives, ids)
+            .collect::<Result<_, DriveFault>>()?;
+        Ok((drives, ids))
     }
 
     /// Runs the drive verdict over the open modules and applies it. Only what
@@ -566,7 +570,7 @@ impl StorageModuleServiceInner {
             genesis_hash: genesis.block_hash,
             miner: self.config.node_config.miner_address(),
         };
-        let (drives, ids) = self.runtime_drives(&modules);
+        let (drives, ids) = self.runtime_drives(&modules)?;
         let inputs = VerdictInputs {
             drives: &drives,
             assignments: &assignments,
@@ -577,17 +581,17 @@ impl StorageModuleServiceInner {
         // Every open drive passed the same check at startup, and every store
         // records this node's miner and chain, so a foreign record here is a
         // broken invariant.
-        let decisions = drive_verdict::decide(&inputs).unwrap_or_else(|err| {
-            stop_node_for_drive_fault(&format!(
-                "open drive failed the verdict; stopping the node: {err:#}"
-            ))
-        });
+        let decisions = drive_verdict::decide(&inputs).map_err(|cause| DriveFault {
+            subject: "an open drive".to_owned(),
+            operation: "judge the drive verdict",
+            cause,
+        })?;
         let unplaced = drive_verdict::unplaced(&inputs, &decisions);
         self.log_changed_decisions(&ids, &decisions, &unplaced, &inputs, update_height);
 
         for decision in &decisions {
             let module = &modules[&ids[decision.id]];
-            self.apply_decision(module, decision, epoch_height);
+            self.apply_decision(module, decision, epoch_height)?;
         }
 
         // After assignments settle: best-effort gap-scan + index backfill for every
@@ -652,23 +656,23 @@ impl StorageModuleServiceInner {
 
     /// Apply one drive's decision to its open module. The module picks the
     /// transition ([`StorageModule::hold`]); the service packs what it says.
-    /// A drive I/O error stops the node (see
-    /// [`StorageModule::expect_drive_io`]); there is no retry.
+    /// A drive fault is returned as is: the message boundary stops the node
+    /// on it, and there is no retry.
     fn apply_decision(
         &mut self,
         module: &Arc<StorageModule>,
         decision: &DriveDecision,
         epoch_height: u64,
-    ) {
+    ) -> Result<(), DriveFault> {
         let next = match &decision.action {
-            DriveAction::Idle => return self.idle_module(module),
+            DriveAction::Idle => {
+                self.idle_module(module);
+                return Ok(());
+            }
             DriveAction::Clear => None,
             DriveAction::Assign(assignment) => Some(*assignment),
         };
-        let held = module.expect_drive_io(
-            "apply the drive verdict",
-            module.hold(next, epoch_height, decision.stamp_v2),
-        );
+        let held = module.hold(next, epoch_height, decision.stamp_v2)?;
         match held {
             Held::Kept => {}
             Held::Adopted => self.enqueue_uninitialized(module),
@@ -697,6 +701,7 @@ impl StorageModuleServiceInner {
                 );
             }
         }
+        Ok(())
     }
 
     /// Idle: no assignment in memory, file and bytes untouched.
@@ -1401,7 +1406,7 @@ mod assignment_reset_tests {
     /// leaves it. A reopen that asks for the new slot repeats the exit: the
     /// entropy stays and the old data stays `Uninitialized`.
     #[tokio::test]
-    async fn slot_exit_store_failure_stops_the_node_and_reopen_repeats_it() {
+    async fn slot_exit_store_failure_is_a_drive_fault_and_reopen_repeats_it() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
@@ -1410,10 +1415,10 @@ mod assignment_reset_tests {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         let path = harness.path.clone();
         let saved = corrupt_packing_params(&path);
-        let message = update_panics(&mut harness, capacity_update(hash, miner), 4).await;
+        let message = update_fault(&mut harness, capacity_update(hash, miner), 4).await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            message.contains("apply the drive verdict failed; stopping the node: leave the ledger slot (keep-entropy reset)"),
+            message.contains("leave the ledger slot (keep-entropy reset) failed"),
             "{message}"
         );
         assert!(
@@ -1549,33 +1554,27 @@ mod assignment_reset_tests {
         );
     }
 
-    /// Apply `assignments` at `height` and return the message the update
-    /// panics with. A drive I/O error on an assignment path stops the node.
-    async fn update_panics(
+    /// Apply `assignments` at `height` and return the drive fault the update
+    /// returns. The message boundary stops the node on it; the handler under
+    /// it returns the fault, so a test checks it without stopping.
+    async fn update_fault(
         harness: &mut Harness,
         assignments: Arc<Vec<PartitionAssignment>>,
         height: u64,
     ) -> String {
-        message_panics(harness, update_msg(assignments, height)).await
+        message_fault(harness, update_msg(assignments, height)).await
     }
 
-    /// Apply `message` and return the message it panics with.
-    async fn message_panics(harness: &mut Harness, message: StorageModuleServiceMessage) -> String {
-        use futures::FutureExt as _;
-        irys_domain::panic_on_drive_fault_for_tests();
-        let payload = std::panic::AssertUnwindSafe(harness.inner.apply_assignment(message))
-            .catch_unwind()
+    /// Handle `message` and return the drive fault it returns, as text.
+    async fn message_fault(harness: &mut Harness, message: StorageModuleServiceMessage) -> String {
+        let err = harness
+            .inner
+            .handle_message(message)
             .await
-            .expect_err("the update stops the node");
-        payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| {
-                payload
-                    .downcast_ref::<&str>()
-                    .map(|text| (*text).to_owned())
-            })
-            .unwrap_or_default()
+            .expect_err("the update hits a drive fault");
+        err.downcast_ref::<DriveFault>()
+            .unwrap_or_else(|| panic!("not a drive fault: {err:#}"))
+            .to_string()
     }
 
     /// A drive error during a release wipe stops the node with the module,
@@ -1583,22 +1582,20 @@ mod assignment_reset_tests {
     /// lands before the reset marker, as a crash there would: a reopen keeps
     /// the assignment and the bytes.
     #[tokio::test]
-    async fn release_wipe_failure_stops_the_node() {
+    async fn release_wipe_failure_is_a_drive_fault() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
         write_synced_data(&harness.module, 0x66);
         harness.module.fail_next_reset_for_test();
-        let message = update_panics(&mut harness, explicit_unassign(), 4).await;
+        let message = update_fault(&mut harness, explicit_unassign(), 4).await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
             message.contains(&harness.path.display().to_string()),
             "{message}"
         );
         assert!(
-            message.contains(
-                "apply the drive verdict failed; stopping the node: wipe a released partition"
-            ),
+            message.contains("wipe a released partition failed"),
             "{message}"
         );
         assert!(
@@ -1959,7 +1956,7 @@ mod assignment_reset_tests {
     /// in-memory assignment and the file stay capacity, as a crash at that
     /// write leaves them, and a reopen keeps the bytes.
     #[tokio::test]
-    async fn capacity_to_ledger_write_error_stops_the_node() {
+    async fn capacity_to_ledger_write_error_is_a_drive_fault() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(None);
@@ -1968,10 +1965,10 @@ mod assignment_reset_tests {
         let restore = WritableDir(harness.path.clone());
         set_dir_mode(&harness.path, 0o555);
 
-        let message = update_panics(&mut harness, publish_update(hash, miner), 6).await;
+        let message = update_fault(&mut harness, publish_update(hash, miner), 6).await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            message.contains("apply the drive verdict failed; stopping the node: store the capacity-to-ledger assignment"),
+            message.contains("store the capacity-to-ledger assignment failed"),
             "{message}"
         );
         assert_eq!(
@@ -2943,7 +2940,7 @@ mod assignment_reset_tests {
     /// asks for cannot be written, which stops the node naming the module
     /// and the operation.
     #[tokio::test]
-    async fn v2_stamp_failure_stops_the_node() {
+    async fn v2_stamp_failure_is_a_drive_fault() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
@@ -2951,7 +2948,7 @@ mod assignment_reset_tests {
         let held = harness.module.partition_assignment().expect("assigned");
         let _corrupted = corrupt_packing_params(&harness.path);
 
-        let message = message_panics(
+        let message = message_fault(
             &mut harness,
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: Arc::new(vec![held]),
@@ -2963,9 +2960,7 @@ mod assignment_reset_tests {
         .await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
-            message.contains(
-                "apply the drive verdict failed; stopping the node: rewrite packing params as v2"
-            ),
+            message.contains("rewrite packing params as v2 failed"),
             "{message}"
         );
         assert_eq!(
@@ -3197,11 +3192,11 @@ mod assignment_reset_tests {
     /// the file cannot be read back, and every store updates them). A module
     /// without them stops the node, naming the module.
     #[tokio::test]
-    async fn module_without_recorded_params_stops_the_node() {
+    async fn module_without_recorded_params_is_a_drive_fault() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         harness.module.forget_recorded_params_for_test();
-        let message = update_panics(&mut harness, publish_update(hash, miner), 5).await;
+        let message = update_fault(&mut harness, publish_update(hash, miner), 5).await;
         assert!(message.contains("storage module 0"), "{message}");
         assert!(
             message.contains("has no recorded packing params"),
