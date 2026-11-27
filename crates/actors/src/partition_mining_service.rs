@@ -1038,7 +1038,7 @@ impl PartitionMiningService {
                     }
                 }
 
-                // Broadcast messages (seed/diff/expiration)
+                // Broadcast messages (seed/diff)
                 evt = self.broadcast_rx.recv() => {
                     match evt {
                         Some(arc_evt) => match arc_evt.as_ref() {

@@ -15174,7 +15174,7 @@ mod tests {
     /// finds the old data already relabelled and no old row.
     #[test]
     fn slot_exit_store_error_after_the_rename_reopens_consistent() -> eyre::Result<()> {
-        let (tmp, config, storage) = open_assigned_module("keep_entropy_renamed_park", 30)?;
+        let (tmp, config, storage) = open_assigned_module("keep_entropy_renamed_slot", 30)?;
         let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
         let next = publish_slot_one(&storage);
         storage.fail_next_sync_at(SyncFailurePoint::AssignmentFileWritten);
@@ -22449,9 +22449,8 @@ mod tests {
         }
     }
 
-    /// The same partition moved to capacity. A module that leaves its ledger is
-    /// wiped at open. Since an open without an assignment parks the module,
-    /// this is the open-time wipe the reset-marker tests drive.
+    /// The same partition moved to capacity: leaving the ledger slot is a
+    /// slot exit that keeps the entropy.
     fn leave_ledger(config: &Config, hash: H256) -> PartitionAssignment {
         PartitionAssignment {
             ledger_id: None,
@@ -23544,10 +23543,8 @@ mod tests {
         Ok(())
     }
 
-    /// An open with no assignment parks the module: the epoch mapping gives no
-    /// assignment to a module whose partition it cannot place (an old-format
-    /// file, or a partition from a newer epoch), and that partition may still
-    /// be the miner's. The packing file, labels and index stay. Opening again
+    /// An open with no assignment parks the module, as startup opens every
+    /// drive: the partition it holds may still be the miner's. The packing file, labels and index stay. Opening again
     /// with the same partition keeps them; a different partition is refused
     /// and changes nothing.
     #[test]

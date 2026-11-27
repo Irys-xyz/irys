@@ -540,20 +540,15 @@ impl EpochSnapshot {
         );
 
         // The list describes this epoch only. The snapshot is cloned from the previous
-        // epoch, so clear it, or the previous epoch's expiries are broadcast again.
+        // epoch, so clear it, or the previous epoch's expiries are reported again.
         if expired_partitions.is_empty() {
             self.expired_partition_infos = None;
             return;
         }
 
-        // NOTE: We used to do a broadcast here, now performed by the block_tree
-        // when the epoch block is fully validated.
-        // let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        // mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-        //     expired_hashes.clone(),
-        // )));
-
-        // Update expired data partitions assignments marking them as capacity partitions
+        // Expired partitions return to this miner's capacity set. The storage
+        // module service sees them as capacity in the next assignment update
+        // and leaves the ledger slot, keeping the entropy.
         for partition_info in expired_partitions.iter() {
             self.return_expired_partition_to_capacity(partition_info.partition_hash);
         }

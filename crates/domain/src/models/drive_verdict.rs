@@ -972,9 +972,6 @@ mod tests {
         assert!(err.contains("drive unreadable"), "{err}");
     }
 
-    /// Two drives record the same assigned partition. The one that must wait
-    /// (it leaves its recorded slot with a record newer than the epoch) does
-    /// not shadow the one that can take the assignment, in either order.
     /// Two eligible holders of one partition: the drive whose recorded slot
     /// already matches the assignment keeps it, whatever the config order.
     /// The other waits, so no drive leaves its slot and repacks for nothing.
@@ -1003,6 +1000,9 @@ mod tests {
         }
     }
 
+    /// Two drives record the same assigned partition. The one that must wait
+    /// (it leaves its recorded slot with a record newer than the epoch) does
+    /// not shadow the one that can take the assignment, in either order.
     #[test]
     fn eligible_duplicate_holder_wins_whatever_the_order() {
         let newer = rec(v2(1, Some(DataLedger::Publish), Some(1), 150));

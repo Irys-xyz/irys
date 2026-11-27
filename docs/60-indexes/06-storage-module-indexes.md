@@ -138,6 +138,16 @@ again). Only the `Uninitialized` spans are packed. A different partition
 clears the whole index and rewrites every interval to `Uninitialized`.
 The `chunks.dat` bytes stay until a later pack overwrites them.
 
+A drive is never moved off a ledger slot, or released, on an epoch older
+than the assignment its packing file records: the verdict waits for a
+later epoch. Gaining a slot is not held back the same way. When a reorg
+makes an older epoch canonical again and that epoch puts a capacity
+partition back on a ledger slot, the drive takes the slot at once: that
+destroys nothing (data is written over entropy only where data goes),
+and the canonical chain says the slot is this drive's. Every store the
+service makes, the startup verdict's included, records that epoch as the
+file's assigned height, so the guard keeps working after a restart.
+
 While the node runs, a drive I/O error on a path that changes what a
 drive holds (storing an assignment or the packing params, the v2 stamp,
 a release wipe, a full reset, the keep-entropy slot exit, a term-slot
@@ -484,15 +494,3 @@ directory.
 Both directories stay on disk. Free space must cover a second copy.
 Measure the live index with `du` before you start. Leave extra room for
 the RocksDB WAL. Verify reads both copies.
-
-A drive is never moved off a ledger slot, or released, on an epoch older
-than the assignment its packing file records: the verdict waits for a
-later epoch. Gaining a slot is not held back the same way. When a reorg
-makes an older epoch canonical again and that epoch puts a capacity
-partition back on a ledger slot, the drive takes the slot at once: that
-destroys nothing (data is written over entropy only where data goes),
-and the canonical chain says the slot is this drive's. An open that
-applies a slot change approved by the startup verdict records the
-verdict's epoch as the file's assigned height, as a runtime store does,
-so the guard keeps working after a restart.
-

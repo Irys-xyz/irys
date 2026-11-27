@@ -276,8 +276,8 @@ impl StorageModuleServiceInner {
         Ok(outcome)
     }
 
-    /// Assignment updates go through [`Self::apply_assignment`]. A repack must
-    /// not: that path stores the message and would replace a pending reset.
+    /// Assignment updates go through [`Self::apply_assignment`], which stops
+    /// the node on a drive fault. A repack only records its span.
     async fn on_message(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
         match msg {
             StorageModuleServiceMessage::RepackUninitialized { module_id, range } => {
@@ -1323,9 +1323,9 @@ mod assignment_reset_tests {
         assert!(!reset_marker(&reopened), "a slot exit writes no marker");
     }
 
-    /// A repeated assignment with no incomplete reset is not a wipe.
+    /// A repeated assignment is not a wipe.
     #[tokio::test]
-    async fn unchanged_assignment_without_an_incomplete_reset_keeps_its_bytes() {
+    async fn unchanged_assignment_keeps_its_bytes() {
         use irys_domain::storage_module::ChunkType;
 
         let mut harness = harness(Some(DataLedger::Publish.into()));
@@ -1862,7 +1862,7 @@ mod assignment_reset_tests {
         );
         assert!(
             harness.receivers.packing.try_recv().is_err(),
-            "capacity to ledger does not enqueue a reset pack"
+            "capacity to ledger enqueues no packing"
         );
     }
 
@@ -2461,10 +2461,10 @@ mod assignment_reset_tests {
         module.force_sync_pending_chunks().expect("sync span");
     }
 
-    /// Ledger→capacity while the channel is full, then capacity→ledger.
-    /// The reset span is still `Uninitialized` because the channel never
-    /// accepted it. The ledger slot must be packed.
-    async fn defer_capacity_reset(harness: &mut Harness) {
+    /// Ledger→capacity (a slot exit) while the channel is full. The old
+    /// slot's span is still `Uninitialized` because the channel never
+    /// accepted it.
+    async fn defer_slot_exit_pack(harness: &mut Harness) {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         fill_packing_channel(harness);
         apply_update(harness, capacity_update(hash, miner), 4).await;
@@ -2474,7 +2474,7 @@ mod assignment_reset_tests {
         );
         assert!(
             harness.inner.pending_ranges.contains_key(&0),
-            "a full channel keeps the reset span"
+            "a full channel keeps the slot-exit span"
         );
         let uninitialized = harness
             .module
@@ -2482,18 +2482,18 @@ mod assignment_reset_tests {
         assert_eq!(
             uninitialized.len(),
             1,
-            "reset publishes one uninitialized span"
+            "the slot exit publishes one uninitialized span"
         );
         assert_eq!(*uninitialized[0].start(), 0);
         assert_eq!(*uninitialized[0].end(), 9);
     }
 
     /// The channel is still full at the epoch boundary. After it drains, tick
-    /// sends the uninitialized span the capacity reset could not send.
+    /// sends the uninitialized span the slot exit could not send.
     #[tokio::test]
     async fn capacity_to_ledger_sends_a_deferred_uninitialized_span() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
-        defer_capacity_reset(&mut harness).await;
+        defer_slot_exit_pack(&mut harness).await;
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         apply_update(&mut harness, publish_update(hash, miner), 5).await;
         assert_eq!(
@@ -2512,7 +2512,7 @@ mod assignment_reset_tests {
             .receivers
             .packing
             .try_recv()
-            .expect("capacity to ledger must pack a reset span the channel never accepted");
+            .expect("capacity to ledger must pack a slot-exit span the channel never accepted");
         assert_full_partition_span(&request);
         assert!(!harness.inner.pending_ranges.contains_key(&0));
         assert!(harness.receivers.packing.try_recv().is_err());
@@ -2523,7 +2523,7 @@ mod assignment_reset_tests {
     #[tokio::test]
     async fn capacity_to_ledger_sends_a_deferred_span_when_the_channel_has_room() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
-        defer_capacity_reset(&mut harness).await;
+        defer_slot_exit_pack(&mut harness).await;
         let _fillers = drain_packing(&mut harness);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         apply_update(&mut harness, publish_update(hash, miner), 5).await;
@@ -2541,7 +2541,7 @@ mod assignment_reset_tests {
     #[tokio::test]
     async fn capacity_to_ledger_drops_a_deferred_span_that_is_entropy() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
-        defer_capacity_reset(&mut harness).await;
+        defer_slot_exit_pack(&mut harness).await;
         write_span(&harness.module, 0, 9, irys_domain::ChunkType::Entropy);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         apply_update(&mut harness, publish_update(hash, miner), 5).await;
@@ -2567,7 +2567,7 @@ mod assignment_reset_tests {
     #[tokio::test]
     async fn capacity_to_ledger_drops_a_deferred_span_that_is_data() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
-        defer_capacity_reset(&mut harness).await;
+        defer_slot_exit_pack(&mut harness).await;
         write_span(&harness.module, 0, 9, irys_domain::ChunkType::Data);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         apply_update(&mut harness, publish_update(hash, miner), 5).await;
@@ -2590,7 +2590,7 @@ mod assignment_reset_tests {
     #[tokio::test]
     async fn capacity_to_ledger_sends_only_the_uninitialized_suffix() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
-        defer_capacity_reset(&mut harness).await;
+        defer_slot_exit_pack(&mut harness).await;
         write_span(&harness.module, 0, 4, irys_domain::ChunkType::Data);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         apply_update(&mut harness, publish_update(hash, miner), 5).await;
@@ -2617,7 +2617,7 @@ mod assignment_reset_tests {
             queued
                 .iter()
                 .all(|request| *request.chunk_range().0.end() == 0),
-            "a reset span was accepted while the channel was full"
+            "a slot-exit span was accepted while the channel was full"
         );
     }
 
@@ -2629,7 +2629,7 @@ mod assignment_reset_tests {
             .receivers
             .packing
             .try_recv()
-            .expect("the reset span is sent once the channel has room");
+            .expect("the slot-exit span is sent once the channel has room");
         assert_full_partition_span(&request);
         assert!(!harness.inner.pending_ranges.contains_key(&0));
     }
@@ -2961,7 +2961,7 @@ mod assignment_reset_tests {
     /// A later update with the same ledger and slot must not drop a span the
     /// channel has not accepted yet.
     #[tokio::test]
-    async fn same_assignment_keeps_a_deferred_reset_pack() {
+    async fn same_assignment_keeps_a_deferred_slot_exit_pack() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         fill_packing_channel(&harness);
@@ -2976,7 +2976,7 @@ mod assignment_reset_tests {
 
     /// Unassign drops a span the channel did not accept. The module cannot pack.
     #[tokio::test]
-    async fn unassign_drops_a_deferred_reset_pack() {
+    async fn unassign_drops_a_deferred_slot_exit_pack() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         fill_packing_channel(&harness);
@@ -2994,7 +2994,7 @@ mod assignment_reset_tests {
     }
 
     #[tokio::test]
-    async fn closed_packing_channel_remembers_the_reset_pack() {
+    async fn closed_packing_channel_remembers_the_slot_exit_pack() {
         let mut harness = harness(Some(DataLedger::Publish.into()));
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
@@ -3013,7 +3013,7 @@ mod assignment_reset_tests {
         assert_eq!(
             pending.len(),
             1,
-            "a closed channel must remember the reset span"
+            "a closed channel must remember the slot-exit span"
         );
         assert_eq!(*pending[0].range.0.start(), 0);
         assert_eq!(*pending[0].range.0.end(), 9);
