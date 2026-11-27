@@ -988,7 +988,9 @@ async fn get_publish_txs_and_proofs(
             // marks the tx invalid in the same write, so a missing txid that
             // the mempool knows as invalid is expected. Any other missing
             // txid is a stale reference, and this debug assert makes tests
-            // that cause one hard-fail.
+            // that cause one hard-fail. Limit: a pruned txid whose scrub is
+            // lost (the worker returned an error) also passes while the txid
+            // stays in the mempool's bounded invalid-tx cache.
             if cfg!(debug_assertions) {
                 let mut unexplained = Vec::new();
                 for txid in &missing {
