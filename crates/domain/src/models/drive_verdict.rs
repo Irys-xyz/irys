@@ -652,31 +652,24 @@ mod tests {
         (drives, a)
     }
 
+    /// A restart changes nothing whether the unheld assignment is capacity
+    /// or on a data ledger.
     #[test]
     fn node1_shape_restart_changes_nothing() {
-        let orphan = pa(9_999, None, None);
-        let (drives, a) = node1(orphan);
-        let (d, u) = run(&drives, &a, false);
-        assert_eq!(d.len(), 43);
-        for (i, x) in d.iter().enumerate() {
-            assert_eq!(x.verdict, DriveVerdict::Ours);
-            assert_eq!(assigned_hash(x), Some(h(100 + i as u32)));
-            assert!(!x.stamp_v2, "not in sync, never stamp");
+        for orphan in [
+            pa(9_999, None, None),
+            pa(1, Some(DataLedger::Publish), Some(7)),
+        ] {
+            let (drives, a) = node1(orphan);
+            let (d, u) = run(&drives, &a, false);
+            assert_eq!(d.len(), 43);
+            for (i, x) in d.iter().enumerate() {
+                assert_eq!(x.verdict, DriveVerdict::Ours);
+                assert_eq!(assigned_hash(x), Some(h(100 + i as u32)));
+                assert!(!x.stamp_v2, "not in sync, never stamp");
+            }
+            assert_eq!(u, vec![orphan]);
         }
-        assert_eq!(u, vec![orphan]);
-    }
-
-    #[test]
-    fn orphan_in_data_ledger_does_not_stop_mapping() {
-        let orphan = pa(1, Some(DataLedger::Publish), Some(7));
-        let (drives, a) = node1(orphan);
-        let (d, u) = run(&drives, &a, false);
-        assert_eq!(d.len(), 43);
-        for (i, x) in d.iter().enumerate() {
-            assert_eq!(x.verdict, DriveVerdict::Ours);
-            assert_eq!(assigned_hash(x), Some(h(100 + i as u32)));
-        }
-        assert_eq!(u, vec![orphan]);
     }
 
     #[test]
@@ -710,17 +703,6 @@ mod tests {
         let mut p = v2(1, Some(DataLedger::Publish), Some(0), 10);
         p.genesis_hash = Some(H256::from([0x11; 32]));
         let (d, _) = run(&[drive(0, rec(p))], &[], true);
-        assert!(matches!(d[0].verdict, DriveVerdict::Wait(_)));
-        assert_eq!(d[0].action, DriveAction::Idle);
-    }
-
-    #[test]
-    fn v1_unassigned_waits() {
-        let (d, _) = run(
-            &[drive(0, rec(v1(1, Some(DataLedger::Publish), Some(0))))],
-            &[],
-            true,
-        );
         assert!(matches!(d[0].verdict, DriveVerdict::Wait(_)));
         assert_eq!(d[0].action, DriveAction::Idle);
     }

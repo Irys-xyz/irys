@@ -14739,12 +14739,6 @@ mod tests {
         Ok(())
     }
 
-    fn offset_meta_at(storage: &StorageModule, offset: u32) -> eyre::Result<Option<OffsetMeta>> {
-        let offset = PartitionChunkOffset::from(offset);
-        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
-        submodule.db.view(|tx| tx.get_offset_meta(offset))
-    }
-
     fn tx_rows_in(storage: &StorageModule, start: u32, end: u32) -> eyre::Result<usize> {
         let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(start))?;
         Ok(submodule
@@ -14780,7 +14774,7 @@ mod tests {
         for raw in 1..=3_u32 {
             assert_eq!(live_label(storage, raw), Some(ChunkType::Entropy));
             bytes.push(storage.read_chunk_internal(PartitionChunkOffset::from(raw))?);
-            let meta = offset_meta_at(storage, raw)?;
+            let meta = storage.offset_meta_for_test(PartitionChunkOffset::from(raw))?;
             assert!(
                 meta.as_ref().is_some_and(|meta| meta.crc.is_some()),
                 "entropy at {raw} has no checksum row"
@@ -14811,7 +14805,7 @@ mod tests {
                 entropy[index],
                 "{raw}"
             );
-            let meta = offset_meta_at(storage, raw)?;
+            let meta = storage.offset_meta_for_test(PartitionChunkOffset::from(raw))?;
             assert_eq!(
                 meta.as_ref().and_then(|meta| meta.crc),
                 metas[index].as_ref().and_then(|meta| meta.crc),
@@ -14819,7 +14813,12 @@ mod tests {
             );
             assert!(data_path_at(storage, raw)?.is_none(), "proof row at {raw}");
         }
-        assert!(offset_meta_at(storage, 0)?.is_none(), "offset row at 0");
+        assert!(
+            storage
+                .offset_meta_for_test(PartitionChunkOffset::from(0))?
+                .is_none(),
+            "offset row at 0"
+        );
         assert!(data_path_at(storage, 0)?.is_none(), "proof row at 0");
         assert_eq!(tx_rows_in(storage, 0, 3)?, 0, "the old tx coverage stayed");
         assert!(
@@ -14910,7 +14909,9 @@ mod tests {
                 assert_eq!(file_label(storage, *raw)?, Some(ChunkType::Entropy));
                 assert_eq!(&storage.read_chunk_internal(offset)?, bytes);
                 assert_eq!(
-                    offset_meta_at(storage, *raw)?.and_then(|meta| meta.crc),
+                    storage
+                        .offset_meta_for_test(PartitionChunkOffset::from(*raw))?
+                        .and_then(|meta| meta.crc),
                     meta.as_ref().and_then(|meta| meta.crc)
                 );
             }
@@ -14919,7 +14920,12 @@ mod tests {
         entropy.remove(1);
         metas.remove(1);
         check(&storage, &entropy, &metas)?;
-        assert!(offset_meta_at(&storage, 2)?.is_none(), "offset row at 2");
+        assert!(
+            storage
+                .offset_meta_for_test(PartitionChunkOffset::from(2))?
+                .is_none(),
+            "offset row at 2"
+        );
         assert!(data_path_at(&storage, 0)?.is_none());
         assert_eq!(tx_rows_in(&storage, 0, 3)?, 0);
         assert!(storage.collect_data_root_infos(data_root)?.0.is_empty());
@@ -15294,7 +15300,7 @@ mod tests {
             assert!(storage.write_chunk(PartitionChunkOffset::from(raw), vec![0xC4; 32], kind));
         }
         storage.force_sync_pending_chunks()?;
-        let row_before = offset_meta_at(&storage, 0)?;
+        let row_before = storage.offset_meta_for_test(PartitionChunkOffset::from(0))?;
         storage.fail_sync_after(SyncFailurePoint::BeforeIntervalImageCommit, 1);
         let err = storage
             .reset_keep_entropy_with_assignment(submit_slot(&config, hash, 1), 7)
@@ -15316,7 +15322,9 @@ mod tests {
         let reopened = two_submodules(tmp.path(), &config, Some(old))?;
         assert_eq!(live_label(&reopened, 0), Some(ChunkType::Data));
         assert_eq!(
-            offset_meta_at(&reopened, 0)?.map(|meta| meta.crc),
+            reopened
+                .offset_meta_for_test(PartitionChunkOffset::from(0))?
+                .map(|meta| meta.crc),
             row_before.map(|meta| meta.crc),
             "the presence row was dropped"
         );
@@ -15353,7 +15361,9 @@ mod tests {
             "the retry left the proof row"
         );
         assert!(
-            offset_meta_at(&storage, 0)?.is_none(),
+            storage
+                .offset_meta_for_test(PartitionChunkOffset::from(0))?
+                .is_none(),
             "the retry left the offset row"
         );
         assert_eq!(storage.partition_assignment(), Some(next));
@@ -22514,15 +22524,6 @@ mod tests {
         Config::new(node, config.peer_id())
     }
 
-    fn live_tx_rows(storage: &StorageModule) -> eyre::Result<usize> {
-        let offset = PartitionChunkOffset::from(0);
-        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
-        let rows = submodule
-            .db
-            .view(|tx| tx.tx_intervals_in_range(offset, offset))?;
-        Ok(rows.len())
-    }
-
     /// A packing refusal on the ledger-exit arm must not store the reset marker
     /// or touch the labels. The next open that still assigns the old hash
     /// keeps the entropy. A later ledger exit whose packing matches keeps the
@@ -22627,7 +22628,7 @@ mod tests {
                 "{engine:?}: a finished ledger exit left the marker"
             );
             assert_eq!(
-                live_tx_rows(&exited)?,
+                tx_rows_in(&exited, 0, 0)?,
                 0,
                 "{engine:?}: a finished ledger exit kept the old slot's tx row"
             );
@@ -22699,7 +22700,7 @@ mod tests {
             "the same chain id exits the ledger and keeps the entropy"
         );
         assert_eq!(
-            live_tx_rows(&exited)?,
+            tx_rows_in(&exited, 0, 0)?,
             0,
             "the same chain id exits the ledger and drops the old tx row"
         );
@@ -22787,7 +22788,7 @@ mod tests {
             )?;
             tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))
         })?;
-        eyre::ensure!(live_tx_rows(&storage)? == 1, "tx row was not stored");
+        eyre::ensure!(tx_rows_in(&storage, 0, 0)? == 1, "tx row was not stored");
         drop(storage);
         Ok(())
     }
@@ -22805,7 +22806,11 @@ mod tests {
             "{why}: the label was wiped"
         );
         assert_eq!(interval_label(sub, 0)?, Some(ChunkType::Data), "{why}");
-        assert_eq!(live_tx_rows(storage)?, 1, "{why}: the index row was wiped");
+        assert_eq!(
+            tx_rows_in(storage, 0, 0)?,
+            1,
+            "{why}: the index row was wiped"
+        );
         assert!(
             !storage
                 .get_submodule_for_offset(offset)?
@@ -22828,7 +22833,7 @@ mod tests {
             Some(ChunkType::Uninitialized),
             "{why}"
         );
-        assert_eq!(live_tx_rows(storage)?, 0, "{why}: the index row stayed");
+        assert_eq!(tx_rows_in(storage, 0, 0)?, 0, "{why}: the index row stayed");
         assert!(
             !storage
                 .get_submodule_for_offset(offset)?

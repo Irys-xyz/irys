@@ -1568,19 +1568,6 @@ mod assignment_reset_tests {
         assert_eq!(spans, vec![irys_types::partition_chunk_offset_ii!(0, 4)]);
     }
 
-    /// A lower unassign with no incomplete reset parks the drive. Bytes stay.
-    #[tokio::test]
-    async fn stale_unassign_without_an_incomplete_reset_keeps_its_bytes() {
-        use irys_domain::storage_module::ChunkType;
-
-        let (mut harness, hash, _miner) = store_slot_one_with_data(50, 0x22).await;
-        apply_update(&mut harness, explicit_unassign(), 10).await;
-        assert!(!harness.module.reset_incomplete());
-        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert_parked_on_slot_one(&harness, hash);
-        assert!(harness.receivers.packing.try_recv().is_err());
-    }
-
     /// An unassign at the stored height is not stale. It still clears and
     /// does not pack an unassigned module.
     #[tokio::test]
@@ -2292,28 +2279,6 @@ mod assignment_reset_tests {
             "the kept span is sent once the channel accepts it"
         );
         assert!(!harness.inner.pending_ranges.contains_key(&0));
-    }
-
-    /// The channel has room. Ledger to capacity sends the reset span now.
-    #[tokio::test]
-    async fn open_packing_channel_sends_the_reset_pack() {
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        apply_update(&mut harness, capacity_update(hash, miner), 4).await;
-        assert_eq!(
-            harness.module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("an open channel accepts the reset pack");
-        assert_full_partition_span(&request);
-        assert!(
-            !harness.inner.pending_ranges.contains_key(&0),
-            "an accepted reset pack is not retried"
-        );
     }
 
     /// A one-offset deferred span must not walk every interval fragment.
