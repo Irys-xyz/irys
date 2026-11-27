@@ -8528,14 +8528,12 @@ impl StorageModule {
             true,
         ) {
             self.restore_rollback_intervals(previous_map);
-            self.republish_restored_intervals();
             return Err(err);
         }
         // `Ok` is also a snapshot that did not replace the file. Do not
         // clear proofs over the previous image.
         if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish) {
             self.restore_rollback_intervals(previous_map);
-            self.republish_restored_intervals();
             eyre::bail!("rollback interval image was not published");
         }
         self.install_authoritative_mask(
@@ -8547,21 +8545,6 @@ impl StorageModule {
         Ok(())
     }
 
-    /// A failed publish can leave an earlier submodule's file committed as
-    /// `Uninitialized` while the live map is put back. Write every file from
-    /// the restored map, so a restart on the same assignment does not drop
-    /// labels and rows the module still holds. Best effort: a failure here
-    /// leaves `Uninitialized` on file, which open reconciles by dropping
-    /// those rows (data that must be synced again, never stale data).
-    fn republish_restored_intervals(&self) {
-        if let Err(err) = self.persist_intervals_authoritative(true) {
-            error!(
-                storage_module.id = self.id,
-                "interval files could not be restored after a failed publish; a restart drops the affected labels and rows: {err:#}"
-            );
-        }
-    }
-
     /// Put the pre-rollback map back and bump the publish generation again,
     /// in the same intervals-lock section. The generation never goes back:
     /// putting the old value back would let a later publish reach the value
@@ -8569,10 +8552,25 @@ impl StorageModule {
     /// store that image over the later publish. A writer that copied before
     /// the failed publish fails its check too; its dirty bits stay, so a
     /// later flush writes the restored map.
+    ///
+    /// A failed publish can leave an earlier submodule's file committed as
+    /// `Uninitialized`, so every file is then written from the restored map
+    /// and a restart on the same assignment does not drop labels and rows the
+    /// module still holds. Best effort: a failure there leaves
+    /// `Uninitialized` on file, which open reconciles by dropping those rows
+    /// (data that must be synced again, never stale data).
     fn restore_rollback_intervals(&self, previous_map: StorageIntervals) {
-        let mut guard = self.intervals.write().unwrap();
-        *guard = previous_map;
-        self.publish_generation.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut guard = self.intervals.write().unwrap();
+            *guard = previous_map;
+            self.publish_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Err(err) = self.persist_intervals_authoritative(true) {
+            error!(
+                storage_module.id = self.id,
+                "interval files could not be restored after a failed publish; a restart drops the affected labels and rows: {err:#}"
+            );
+        }
     }
 
     /// Drops any queued (not-yet-synced) chunk writes whose partition offset
