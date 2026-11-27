@@ -19,13 +19,6 @@ retries = 0
 filter = 'test(heavy_an_unassigned_uploader_holds_bodies_until_the_assignee_persists_them)'
 slow-timeout = { period = "120s", terminate-after = 3 }
 
-# Takes ~41 s on an idle machine (a minimum chunk age, then mining until the
-# cache reclaims, the proof reanchors and the restore sweep runs), so the
-# default 60 s limit times it out under CI load.
-[[profile.default.overrides]]
-filter = 'test(heavy_test_submit_ingress_proof_survives_cache_cap)'
-slow-timeout = { period = "90s", terminate-after = 2 }
-
 # serial tests
 [[profile.default.overrides]]
 filter = 'test(/.*serial_.*/)'
