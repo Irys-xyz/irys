@@ -36,7 +36,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::{Instrument as _, debug, error, info, warn};
+use tracing::{Instrument as _, error, info, warn};
 
 // Messages that the StorageModuleService service supports
 #[derive(Debug, Clone)]
@@ -91,10 +91,8 @@ pub struct StorageModuleServiceInner {
     shutdown: Shutdown,
     /// Last heal pass left unrepaired work — run periodic heal until clear.
     index_heal_needs_retry: bool,
-    /// Assignment update that could not be applied yet (the block index has
-    /// no genesis item). The next tick retries it. A drive I/O error is never
-    /// retried: it stops the node.
-    pending_assignment: Option<StorageModuleServiceMessage>,
+    /// This node's chain identity, from the genesis item startup read.
+    identity: ChainIdentity,
     /// Verdict and action last logged per module id. INFO is logged only for
     /// a change.
     last_decisions: HashMap<usize, (DriveVerdict, DriveAction)>,
@@ -146,20 +144,6 @@ impl HealScheduleProbe {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
-
-/// The update could not be applied yet for a reason that is not a drive
-/// error (the block index has no genesis item). Nothing was changed. The
-/// service stays up and retries the same update.
-#[derive(Debug)]
-struct UpdateNotApplied;
-
-impl std::fmt::Display for UpdateNotApplied {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("partition assignment update not applied yet")
-    }
-}
-
-impl std::error::Error for UpdateNotApplied {}
 
 /// Send one packing request without blocking.
 ///
@@ -217,10 +201,6 @@ struct PendingSpan {
     while_uninitialized: bool,
 }
 
-fn is_update_not_applied(err: &eyre::Report) -> bool {
-    err.downcast_ref::<UpdateNotApplied>().is_some()
-}
-
 impl std::fmt::Debug for StorageModuleServiceInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StorageModuleServiceInner")
@@ -237,6 +217,7 @@ impl StorageModuleServiceInner {
         block_tree: BlockTreeReadGuard,
         service_senders: ServiceSenders,
         config: Config,
+        identity: ChainIdentity,
         shutdown: Shutdown,
     ) -> Self {
         let submodules_config = match StorageSubmodulesConfig::load(
@@ -258,7 +239,7 @@ impl StorageModuleServiceInner {
             resize_task: None,
             resize_done: None,
             index_heal_needs_retry: true, // force heal until first pass reports clean
-            pending_assignment: None,
+            identity,
             last_decisions: HashMap::new(),
             last_unplaced: Vec::new(),
             pending_ranges: HashMap::new(),
@@ -350,29 +331,16 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Apply one assignment update. An update that cannot be applied yet
-    /// (no genesis item in the block index) is stored and retried. A drive
-    /// fault stops the node here, the one place it is handled. Any other
-    /// error aborts the service.
+    /// Apply one assignment update. A drive fault stops the node here, the
+    /// one place it is handled. Any other error aborts the service.
     async fn apply_assignment(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
-        let result = self.handle_message(msg.clone()).await;
+        let result = self.handle_message(msg).await;
         if let Err(err) = &result
             && let Some(fault) = err.downcast_ref::<DriveFault>()
         {
             stop_node_for_drive_fault(&format!("{fault}; stopping the node"));
         }
-        match result {
-            Ok(()) => {
-                self.pending_assignment = None;
-                Ok(())
-            }
-            Err(err) if is_update_not_applied(&err) => {
-                debug!("partition assignment update not applied yet; it will be retried: {err}");
-                self.pending_assignment = Some(msg);
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        result
     }
 
     fn spawn_disk_lanes(&self) -> DiskLaneSet {
@@ -518,7 +486,7 @@ impl StorageModuleServiceInner {
     fn runtime_drives(
         &self,
         modules: &BTreeMap<usize, Arc<StorageModule>>,
-    ) -> Result<(Vec<(PathBuf, DriveFile)>, Vec<usize>), DriveFault> {
+    ) -> (Vec<(PathBuf, DriveFile)>, Vec<usize>) {
         let ids: Vec<usize> = modules.keys().copied().collect();
         let drives = ids
             .iter()
@@ -529,19 +497,10 @@ impl StorageModuleServiceInner {
                     .get(*id)
                     .cloned()
                     .unwrap_or_default();
-                let module = &modules[id];
-                // Open fails when the file cannot be read back, and every
-                // store updates the record, so an open module always has one.
-                let params = module.recorded_params().ok_or_else(|| {
-                    module.drive_fault(
-                        "read its recorded packing params",
-                        eyre::eyre!("open module has no recorded packing params"),
-                    )
-                })?;
-                Ok((path, DriveFile::Recorded(params)))
+                (path, DriveFile::Recorded(modules[id].recorded_params()))
             })
-            .collect::<Result<_, DriveFault>>()?;
-        Ok((drives, ids))
+            .collect();
+        (drives, ids)
     }
 
     /// Runs the drive verdict over the open modules and applies it. Only what
@@ -561,16 +520,8 @@ impl StorageModuleServiceInner {
                 .map(|module| (module.id, module.clone()))
                 .collect()
         };
-        let Some(genesis) = self.block_index.read().get_item(0) else {
-            warn!("block index has no genesis item; the assignment update will be retried");
-            return Err(UpdateNotApplied.into());
-        };
-        let identity = ChainIdentity {
-            chain_id: self.config.consensus.chain_id,
-            genesis_hash: genesis.block_hash,
-            miner: self.config.node_config.miner_address(),
-        };
-        let (drives, ids) = self.runtime_drives(&modules)?;
+        let identity = self.identity;
+        let (drives, ids) = self.runtime_drives(&modules);
         let inputs = VerdictInputs {
             drives: &drives,
             assignments: &assignments,
@@ -908,6 +859,7 @@ impl StorageModuleService {
         block_tree: BlockTreeReadGuard,
         service_senders: ServiceSenders,
         config: &Config,
+        identity: ChainIdentity,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         tracing::info!("Spawning storage module service");
@@ -930,6 +882,7 @@ impl StorageModuleService {
                         block_tree,
                         service_senders,
                         config,
+                        identity,
                         shutdown_for_inner,
                     ),
                 };
@@ -997,9 +950,6 @@ impl StorageModuleService {
                     match msg {
                         Some(traced) => {
                             let (msg, parent_span) = traced.into_parts();
-                            // Do not drop a stored retry first. apply_assignment
-                            // clears it after the wipe finishes, or stores this
-                            // message when the wipe is still incomplete.
                             let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
                             self.inner.on_message(msg).instrument(span).await?;
                         }
@@ -1016,8 +966,8 @@ impl StorageModuleService {
                     self.periodic_index_heal().await;
                     // A pass that lasts one period returns with the next tick
                     // already due. This arm is ahead of the 1s arm, so another
-                    // pass would start first. CRC repair and a stored assignment
-                    // retry run only on that 1s arm. Wait one period from now.
+                    // pass would start first. CRC repair runs only on that 1s
+                    // arm. Wait one period from now.
                     if started.elapsed() >= INDEX_HEAL_RETRY_INTERVAL {
                         heal_interval.reset();
                     }
@@ -1027,18 +977,12 @@ impl StorageModuleService {
                     if let Some(probe) = &self.inner.heal_probe {
                         probe.record_fast_tick();
                     }
-                    if let Some(pending) = self.inner.pending_assignment.clone() {
-                        self.inner.apply_assignment(pending).await?;
-                    }
                     self.inner.tick().await;
                 }
             }
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        if let Some(pending) = self.inner.pending_assignment.clone() {
-            self.inner.apply_assignment(pending).await?;
-        }
         while let Ok(traced) = self.msg_rx.try_recv() {
             let (msg, parent_span) = traced.into_parts();
             let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
@@ -1116,43 +1060,8 @@ mod assignment_reset_tests {
         open_modules(1, ledger_id, configure)
     }
 
-    /// Genesis block hash the harness block index and modules agree on.
+    /// Genesis block hash the harness service and modules agree on.
     const GENESIS: H256 = H256::repeat_byte(0x9E);
-    /// Block-index tip the harness starts at: every epoch height a test uses
-    /// is at or below its finalized height.
-    const FINAL_TIP: u64 = 1_000_000;
-
-    /// Heights the harness block index holds an item for (besides its tip):
-    /// every epoch height a test sends an update at.
-    const INDEXED_HEIGHTS: u64 = 100;
-
-    /// The canonical epoch block hash at `height` in the harness block index.
-    fn epoch_hash(height: u64) -> H256 {
-        if height == 0 {
-            GENESIS
-        } else {
-            H256::from_low_u64_be(0xE_0000 + height)
-        }
-    }
-
-    /// Block index with the genesis item, the canonical block
-    /// ([`epoch_hash`]) at heights `1..=min(tip, INDEXED_HEIGHTS)`, and `tip`
-    /// as its latest height.
-    fn set_index_tip(block_index: &BlockIndexReadGuard, tip: u64) {
-        let index = block_index.read();
-        index.truncate_to_height(0).expect("truncate block index");
-        let item = |hash| irys_types::BlockIndexItem {
-            block_hash: hash,
-            ..Default::default()
-        };
-        index.push_item(&item(GENESIS), 0).expect("genesis item");
-        for height in (1..=tip.min(INDEXED_HEIGHTS)).chain((tip > INDEXED_HEIGHTS).then_some(tip)) {
-            index
-                .push_item(&item(epoch_hash(height)), height)
-                .expect("index item");
-        }
-    }
-
     /// Modules opened as startup opens them: chain identity set, and each
     /// file rewritten as v2 with assigned height 0, so an unassign is a
     /// release.
@@ -1220,17 +1129,18 @@ mod assignment_reset_tests {
         .expect("chain db");
         let block_index = BlockIndex::new_for_testing(db_env);
         let block_index_guard = BlockIndexReadGuard::new(block_index);
-        set_index_tip(&block_index_guard, FINAL_TIP);
         let block_tree = BlockTree::new(&new_mock_signed_header(), config.consensus.clone());
         let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let (service_senders, receivers) = ServiceSenders::new();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let identity = ChainIdentity::new(&config, GENESIS);
         let inner = StorageModuleServiceInner::new(
             Arc::new(RwLock::new(modules.clone())),
             block_index_guard,
             block_tree_guard,
             service_senders,
             config,
+            identity,
             shutdown_rx,
         );
         Harness {
@@ -1280,19 +1190,20 @@ mod assignment_reset_tests {
         )
         .expect("chain db");
         let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db_env));
-        set_index_tip(&block_index_guard, FINAL_TIP);
         let block_tree = BlockTree::new(&new_mock_signed_header(), config.consensus.clone());
         let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let (service_senders, receivers) = ServiceSenders::new();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let modules = vec![Arc::clone(&parked)];
         parked.set_chain_identity(GENESIS);
+        let identity = ChainIdentity::new(&config, GENESIS);
         let inner = StorageModuleServiceInner::new(
             Arc::new(RwLock::new(modules.clone())),
             block_index_guard,
             block_tree_guard,
             service_senders,
             config,
+            identity,
             shutdown_rx,
         );
         (
@@ -1421,10 +1332,6 @@ mod assignment_reset_tests {
             message.contains("leave the ledger slot (keep-entropy reset) failed"),
             "{message}"
         );
-        assert!(
-            harness.inner.pending_assignment.is_none(),
-            "nothing is retried"
-        );
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
 
         restore_packing_params(&path, &saved);
@@ -1454,7 +1361,7 @@ mod assignment_reset_tests {
             vec![irys_types::partition_chunk_offset_ii!(1, 9)],
             "the reopen keeps the entropy"
         );
-        let recorded = reopened.recorded_params().expect("recorded");
+        let recorded = reopened.recorded_params();
         assert_eq!(recorded.ledger, None, "the reopen stores capacity");
         assert!(!reset_marker(&reopened), "a slot exit writes no marker");
     }
@@ -1473,7 +1380,6 @@ mod assignment_reset_tests {
             .await
             .expect("same ledger and slot");
         assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
@@ -1598,10 +1504,6 @@ mod assignment_reset_tests {
             message.contains("wipe a released partition failed"),
             "{message}"
         );
-        assert!(
-            harness.inner.pending_assignment.is_none(),
-            "nothing is retried"
-        );
         assert!(!reset_marker(&harness.module));
         assert_reopen_chunk(harness, ChunkType::Data);
     }
@@ -1674,7 +1576,7 @@ mod assignment_reset_tests {
             harness.module.partition_assignment().is_none(),
             "a drive whose release is not provable is parked"
         );
-        let recorded = harness.module.recorded_params().expect("recorded");
+        let recorded = harness.module.recorded_params();
         assert_eq!(recorded.partition_hash, Some(hash));
         assert_eq!(recorded.slot, Some(1));
         assert_eq!(stored_height(&harness.path), Some(50));
@@ -1701,13 +1603,7 @@ mod assignment_reset_tests {
             vec![irys_types::partition_chunk_offset_ii!(5, 9)]
         );
         assert!(!reset_marker(&harness.module));
-        assert_eq!(
-            harness
-                .module
-                .recorded_params()
-                .and_then(|params| params.slot),
-            Some(2)
-        );
+        assert_eq!(harness.module.recorded_params().slot, Some(2));
         let spans: Vec<_> = drain_packing(&mut harness)
             .iter()
             .map(|request| request.chunk_range().0)
@@ -1723,7 +1619,6 @@ mod assignment_reset_tests {
         let (mut harness, hash, _miner) = store_slot_one_with_data(50, 0x22).await;
         apply_update(&mut harness, explicit_unassign(), 10).await;
         assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert_parked_on_slot_one(&harness, hash);
         assert!(harness.receivers.packing.try_recv().is_err());
@@ -1739,7 +1634,6 @@ mod assignment_reset_tests {
         apply_update(&mut harness, explicit_unassign(), 50).await;
         assert!(harness.module.partition_assignment().is_none());
         assert!(!harness.module.reset_incomplete());
-        assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
         assert!(harness.receivers.packing.try_recv().is_err());
     }
@@ -1976,10 +1870,6 @@ mod assignment_reset_tests {
             None,
             "a failed write leaves the in-memory assignment unchanged"
         );
-        assert!(
-            harness.inner.pending_assignment.is_none(),
-            "nothing is retried"
-        );
         drop(restore);
         assert_reopen_chunk(harness, ChunkType::Entropy);
     }
@@ -2017,7 +1907,6 @@ mod assignment_reset_tests {
             .apply_assignment(update_msg(publish_update(hash, miner), 7))
             .await
             .expect("capacity to ledger");
-        assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
             Some(DataLedger::Publish.into())
@@ -2378,29 +2267,6 @@ mod assignment_reset_tests {
                 .get_chunk_type(&PartitionChunkOffset::from(1)),
             Some(irys_domain::ChunkType::Data)
         );
-    }
-
-    /// A repack message must not clear a stored assignment retry.
-    #[tokio::test]
-    async fn recovery_repack_does_not_replace_a_pending_assignment() {
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        let pending = update_msg(Arc::new(vec![]), 7);
-        harness.inner.pending_assignment = Some(pending);
-        harness
-            .inner
-            .on_message(StorageModuleServiceMessage::RepackUninitialized {
-                module_id: 0,
-                range: recovery_span(),
-            })
-            .await
-            .expect("repack is not an assignment failure");
-        match harness.inner.pending_assignment {
-            Some(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                update_height: 7,
-                ..
-            }) => {}
-            other => panic!("repack replaced the stored assignment: {other:?}"),
-        }
     }
 
     /// A full channel keeps the span and says it is waiting. An open channel
@@ -2923,11 +2789,7 @@ mod assignment_reset_tests {
         apply_update(&mut harness, explicit_unassign(), 60).await;
         assert!(harness.module.partition_assignment().is_none());
         assert_eq!(
-            harness
-                .module
-                .recorded_params()
-                .expect("recorded")
-                .partition_hash,
+            harness.module.recorded_params().partition_hash,
             None,
             "a release is cleared"
         );
@@ -2970,10 +2832,6 @@ mod assignment_reset_tests {
         );
         assert_eq!(harness.module.partition_assignment(), Some(held));
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
-        assert!(
-            harness.inner.pending_assignment.is_none(),
-            "nothing is retried"
-        );
     }
 
     /// Startup opens every drive parked and the service applies the startup
@@ -2994,7 +2852,7 @@ mod assignment_reset_tests {
         );
 
         apply_update(&mut harness, publish_slot_update(hash, miner, 0), 2000).await;
-        let recorded = harness.module.recorded_params().expect("recorded");
+        let recorded = harness.module.recorded_params();
         assert_eq!(recorded.ledger, Some(DataLedger::Publish.into()));
         assert_eq!(recorded.trusted_assigned_height(), Some(2000));
         assert_eq!(
@@ -3017,7 +2875,7 @@ mod assignment_reset_tests {
             )),
             "an older epoch does not move the drive back"
         );
-        let recorded = harness.module.recorded_params().expect("recorded");
+        let recorded = harness.module.recorded_params();
         assert_eq!(recorded.ledger, Some(DataLedger::Publish.into()));
         assert_eq!(recorded.trusted_assigned_height(), Some(2000));
 
@@ -3028,10 +2886,7 @@ mod assignment_reset_tests {
         );
         assert!(harness.module.partition_assignment().is_none());
         assert_eq!(
-            harness
-                .module
-                .recorded_params()
-                .and_then(|p| p.partition_hash),
+            harness.module.recorded_params().partition_hash,
             None,
             "the released drive records no partition"
         );
@@ -3060,7 +2915,7 @@ mod assignment_reset_tests {
             "the partition's entropy is kept"
         );
         assert!(!reset_marker(&harness.module));
-        let recorded = harness.module.recorded_params().expect("recorded");
+        let recorded = harness.module.recorded_params();
         assert_eq!(recorded.ledger, None);
         assert_eq!(recorded.trusted_assigned_height(), Some(5));
         let requests = drain_packing(&mut harness);
@@ -3087,7 +2942,7 @@ mod assignment_reset_tests {
         assert!(harness.module.partition_assignment().is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
         assert!(!reset_marker(&harness.module));
-        let recorded = harness.module.recorded_params().expect("recorded");
+        let recorded = harness.module.recorded_params();
         assert_eq!(recorded.partition_hash, None);
         assert_eq!(recorded.ledger, None);
         assert!(recorded.is_v2());
@@ -3177,7 +3032,6 @@ mod assignment_reset_tests {
         assert!(!reset_marker(&harness.module));
         assert!(harness.receivers.packing.try_recv().is_err());
         assert_eq!(std::fs::read(&params_path).expect("file"), file_before);
-        assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(
             harness
                 .inner
@@ -3185,22 +3039,6 @@ mod assignment_reset_tests {
                 .get(&0)
                 .map(|(v, _)| v.reason()),
             Some("recorded state is newer than the epoch".to_owned())
-        );
-    }
-
-    /// An open module always has recorded packing params (open fails when
-    /// the file cannot be read back, and every store updates them). A module
-    /// without them stops the node, naming the module.
-    #[tokio::test]
-    async fn module_without_recorded_params_is_a_drive_fault() {
-        let mut harness = harness(Some(DataLedger::Publish.into()));
-        let (hash, miner) = assigned_hash_and_miner(&harness.module);
-        harness.module.forget_recorded_params_for_test();
-        let message = update_fault(&mut harness, publish_update(hash, miner), 5).await;
-        assert!(message.contains("storage module 0"), "{message}");
-        assert!(
-            message.contains("has no recorded packing params"),
-            "{message}"
         );
     }
 

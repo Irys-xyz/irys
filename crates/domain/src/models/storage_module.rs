@@ -900,7 +900,7 @@ pub struct StorageModule {
     pub partition_assignment: RwLock<Option<PartitionAssignment>>,
     /// In-memory copy of the first submodule's `packing_params.toml`. Set at
     /// open and by every write path.
-    recorded_params: RwLock<Option<PackingParams>>,
+    recorded_params: RwLock<PackingParams>,
     /// Genesis hash stamped into v2 params. Set once after open.
     genesis_hash: RwLock<Option<H256>>,
     /// Bumped under the assignment write lock at the start of
@@ -2677,31 +2677,31 @@ impl StorageModule {
         // failed storage module open stops node startup. Opening the module
         // without its record would leave it mining its open-time slot while
         // ignoring every later slot change or release.
-        let initial_recorded = match storage_module_info.submodules.first() {
-            Some((_, dir)) => {
-                let path = config
-                    .node_config
-                    .base_directory
-                    .join(dir)
-                    .join(PACKING_PARAMS_FILE_NAME);
-                let read = PackingParams::from_toml(&path);
-                #[cfg(test)]
-                let read = if FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.replace(false)) {
-                    Err(eyre!("injected packing params read-back failure"))
-                } else {
-                    read
-                };
-                let params = read.wrap_err_with(|| {
-                    format!(
-                        "storage module {}: packing params at {} could not be read back at open; \
-                         check the drive before restarting",
-                        storage_module_info.id,
-                        path.display()
-                    )
-                })?;
-                Some(params)
-            }
-            None => None,
+        let initial_recorded = {
+            let (_, dir) = storage_module_info
+                .submodules
+                .first()
+                .ok_or_eyre("a storage module needs at least one submodule")?;
+            let path = config
+                .node_config
+                .base_directory
+                .join(dir)
+                .join(PACKING_PARAMS_FILE_NAME);
+            let read = PackingParams::from_toml(&path);
+            #[cfg(test)]
+            let read = if FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.replace(false)) {
+                Err(eyre!("injected packing params read-back failure"))
+            } else {
+                read
+            };
+            read.wrap_err_with(|| {
+                format!(
+                    "storage module {}: packing params at {} could not be read back at open; \
+                     check the drive before restarting",
+                    storage_module_info.id,
+                    path.display()
+                )
+            })?
         };
 
         // Attempt to load a global set of intervals from the submodules
@@ -3054,7 +3054,7 @@ impl StorageModule {
     }
 
     /// In-memory copy of this module's `packing_params.toml`.
-    pub fn recorded_params(&self) -> Option<PackingParams> {
+    pub fn recorded_params(&self) -> PackingParams {
         *self.recorded_params.read().unwrap()
     }
 
@@ -3075,11 +3075,7 @@ impl StorageModule {
         if current.is_some() {
             return false;
         }
-        let matches = self
-            .recorded_params
-            .read()
-            .unwrap()
-            .is_some_and(|params| params.records(&assignment));
+        let matches = self.recorded_params.read().unwrap().records(&assignment);
         if matches {
             *current = Some(assignment);
         }
@@ -3154,7 +3150,7 @@ impl StorageModule {
             self.write_params_file(path, params)?;
         }
         if let Some((_, params)) = updated.first() {
-            *self.recorded_params.write().unwrap() = Some(*params);
+            *self.recorded_params.write().unwrap() = *params;
         }
         *assignment = next;
         if old_hash != new_hash {
@@ -3532,13 +3528,6 @@ impl StorageModule {
     /// `true` while `reset` has not finished in this process.
     pub fn reset_incomplete(&self) -> bool {
         self.reset_incomplete.load(Ordering::SeqCst)
-    }
-
-    /// Forget the in-memory copy of `packing_params.toml`, as when open
-    /// could not read the file back after its rebind.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn forget_recorded_params_for_test(&self) {
-        *self.recorded_params.write().unwrap() = None;
     }
 
     /// The next `reset` or keep-entropy slot exit returns an error before it
@@ -4469,10 +4458,7 @@ impl StorageModule {
             // A released drive receiving another partition.
             Some(_) => reset(self, &mut assignment),
             None => {
-                let recorded = self
-                    .recorded_params
-                    .read()
-                    .unwrap()
+                let recorded = Some(*self.recorded_params.read().unwrap())
                     .filter(|params| params.partition_hash == Some(next.partition_hash));
                 match recorded {
                     Some(params) if params.records(&next) => {
@@ -4589,11 +4575,7 @@ impl StorageModule {
         let mut assignment = self.partition_assignment.write().unwrap();
         let held = match *assignment {
             Some(current) => Some(current.partition_hash),
-            None => self
-                .recorded_params
-                .read()
-                .unwrap()
-                .and_then(|params| params.partition_hash),
+            None => self.recorded_params.read().unwrap().partition_hash,
         };
         ensure!(
             held == Some(next.partition_hash),
@@ -25356,18 +25338,18 @@ mod tests {
         )?;
         let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
         let on_disk = || PackingParams::from_toml(&params_path);
-        assert_eq!(storage.recorded_params(), Some(on_disk()?));
+        assert_eq!(storage.recorded_params(), on_disk()?);
 
         storage.set_chain_identity(H256::repeat_byte(0x77));
         storage.assign_partition(submit_slot(&config, hash, 1), 9)?;
-        let recorded = storage.recorded_params().expect("recorded");
+        let recorded = storage.recorded_params();
         assert_eq!(recorded, on_disk()?);
         assert_eq!(recorded.slot, Some(1));
         assert_eq!(recorded.trusted_assigned_height(), Some(9));
         assert_eq!(recorded.genesis_hash, Some(H256::repeat_byte(0x77)));
 
         storage.clear_assignment(11)?;
-        let recorded = storage.recorded_params().expect("recorded");
+        let recorded = storage.recorded_params();
         assert_eq!(recorded, on_disk()?);
         assert_eq!(recorded.partition_hash, None);
         assert_eq!(recorded.trusted_assigned_height(), Some(11));

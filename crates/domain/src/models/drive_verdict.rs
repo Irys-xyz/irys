@@ -34,6 +34,17 @@ pub struct ChainIdentity {
     pub miner: IrysAddress,
 }
 
+impl ChainIdentity {
+    /// This node's identity on the chain whose genesis block is `genesis_hash`.
+    pub fn new(config: &Config, genesis_hash: H256) -> Self {
+        Self {
+            chain_id: config.consensus.chain_id,
+            genesis_hash,
+            miner: config.node_config.miner_address(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct VerdictInputs<'a> {
     /// Configured order; index = module id.
@@ -460,11 +471,7 @@ pub fn startup_storage_module_infos(
         .as_ref()
         .map(|submodules| submodules.submodule_paths.clone())
         .unwrap_or_default();
-    let identity = ChainIdentity {
-        chain_id: config.consensus.chain_id,
-        genesis_hash,
-        miner: config.node_config.miner_address(),
-    };
+    let identity = ChainIdentity::new(config, genesis_hash);
     let assignments = snapshot.get_partition_assignments(identity.miner);
     let drives = drive_verdict_inputs_from_disk(config, &paths).expect("drive files are readable");
     let decisions = decide(&VerdictInputs {

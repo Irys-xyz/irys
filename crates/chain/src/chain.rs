@@ -43,7 +43,8 @@ use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider, EpochReplayData,
     ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList, StorageModule,
-    StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard, reth_provider,
+    StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard, drive_verdict,
+    reth_provider,
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GossipDataHandler,
@@ -1988,7 +1989,7 @@ impl IrysNode {
                 ledger.total_chunks
             );
         }
-        let (storage_module_infos, chain_genesis_hash) = Self::drives_at_startup(
+        let (storage_module_infos, chain_identity) = Self::drives_at_startup(
             &config,
             &storage_submodules_config.submodule_paths,
             &block_index_guard,
@@ -2003,7 +2004,7 @@ impl IrysNode {
         )
         .await?;
         for module in storage_modules.read().unwrap().iter() {
-            module.set_chain_identity(chain_genesis_hash);
+            module.set_chain_identity(chain_identity.genesis_hash);
             module.set_partition_chunks(logical_chunks)?;
             // Drives already carry a finalized resize the chain view has not
             // reached (DB restored or wiped): mine and pack the retained prefix
@@ -2394,6 +2395,7 @@ impl IrysNode {
             block_tree_guard.clone(),
             service_senders.clone(),
             &config,
+            chain_identity,
             runtime_handle.clone(),
         );
         // Apply the startup verdict's destructive half now, not at the next
@@ -2847,7 +2849,8 @@ impl IrysNode {
 
     /// Reads every configured drive's packing params before any is opened
     /// and returns one parked module per drive (no assignment: open never
-    /// changes what a drive holds) and the genesis hash later writes stamp.
+    /// changes what a drive holds) and this node's chain identity, whose
+    /// genesis hash later writes stamp.
     /// A drive whose packing params cannot be read or parsed, or that is
     /// foreign (newer version, other chain, other miner), fails startup with
     /// an error naming it: no drive is skipped. The storage module service
@@ -2857,19 +2860,13 @@ impl IrysNode {
         config: &Config,
         paths: &[std::path::PathBuf],
         block_index_guard: &BlockIndexReadGuard,
-    ) -> eyre::Result<(Vec<StorageModuleInfo>, H256)> {
-        use irys_domain::drive_verdict;
-
+    ) -> eyre::Result<(Vec<StorageModuleInfo>, drive_verdict::ChainIdentity)> {
         let genesis_hash = block_index_guard
             .read()
             .get_item(0)
             .ok_or_eyre("block index has no genesis item")?
             .block_hash;
-        let identity = drive_verdict::ChainIdentity {
-            chain_id: config.consensus.chain_id,
-            genesis_hash,
-            miner: config.node_config.miner_address(),
-        };
+        let identity = drive_verdict::ChainIdentity::new(config, genesis_hash);
         let drives = drive_verdict::drive_verdict_inputs_from_disk(config, paths)?;
         drive_verdict::refuse_foreign_drives(&drives, &identity)?;
         // Existing module paths retain their physical layout; logical bounds are
@@ -2878,7 +2875,7 @@ impl IrysNode {
             .wrap_err("num_chunks_in_partition exceeds u32")?;
         Ok((
             drive_verdict::parked_storage_module_infos(paths, num_chunks),
-            genesis_hash,
+            identity,
         ))
     }
 
