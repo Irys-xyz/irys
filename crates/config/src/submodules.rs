@@ -69,6 +69,25 @@ impl StorageSubmodulesConfig {
         Ok(config)
     }
 
+    /// Every submodule path resolved to where its data lives:
+    /// `instance_dir.join(path)`, with `instance_dir` made absolute against
+    /// the process's current directory. An absolute configured path stays
+    /// itself; a relative one names the directory under the node's base
+    /// directory that open has always used. Every consumer then sees the same
+    /// stable path.
+    fn resolved(mut self, instance_dir: &Path) -> eyre::Result<Self> {
+        let base = std::path::absolute(instance_dir).map_err(|err| {
+            eyre::eyre!(
+                "cannot resolve base directory {}: {err}",
+                instance_dir.display()
+            )
+        })?;
+        for path in &mut self.submodule_paths {
+            *path = base.join(&*path);
+        }
+        Ok(self)
+    }
+
     pub fn load_for_test(instance_dir: PathBuf, num_submodules: usize) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
@@ -97,9 +116,11 @@ impl StorageSubmodulesConfig {
         }
 
         // Tests don't enforce genesis minimum — pass Miner to skip the check.
-        Self::from_toml(config_path_local, NodeMode::Miner)
+        Self::from_toml(config_path_local, NodeMode::Miner)?.resolved(&instance_dir)
     }
 
+    /// Loads (or creates) the config in `instance_dir`, the node's base
+    /// directory, with every submodule path resolved (see [`Self::resolved`]).
     pub fn load(instance_dir: PathBuf, node_mode: NodeMode) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
@@ -131,7 +152,7 @@ impl StorageSubmodulesConfig {
         if config_path_local.exists() {
             let config = Self::from_toml(config_path_local, node_mode)?;
             if config.is_using_hardcoded_paths {
-                return Ok(config);
+                return config.resolved(&instance_dir);
             };
             let submodule_paths = &config.submodule_paths;
             for idx in 0..submodule_paths.len() {
@@ -156,7 +177,7 @@ impl StorageSubmodulesConfig {
                 }
             }
 
-            Ok(config)
+            config.resolved(&instance_dir)
         } else {
             tracing::info!("Creating default config at {:?}", config_path_local);
             let config = Self {
@@ -175,7 +196,7 @@ impl StorageSubmodulesConfig {
                 fs::create_dir_all(path).expect("to create submodule dir");
             }
 
-            Self::from_toml(config_path_local, node_mode)
+            Self::from_toml(config_path_local, node_mode)?.resolved(&instance_dir)
         }
     }
 }

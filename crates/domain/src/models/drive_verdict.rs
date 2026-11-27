@@ -362,22 +362,18 @@ fn classify(
 }
 
 /// Reads each configured drive's `packing_params.toml`, in configured order
-/// (index = module id). A relative path resolves against the base directory.
-/// No file is `Missing` (a fresh drive). A file that cannot be checked, read
+/// (index = module id). `paths` are resolved as the storage submodules
+/// config resolves them at load, the paths open reads and stores write. No
+/// file is `Missing` (a fresh drive). A file that cannot be checked, read
 /// or parsed is an error naming the drive: the node stops rather than skip a
 /// drive whose contents it cannot know. Never writes.
 pub fn drive_verdict_inputs_from_disk(
-    config: &Config,
     paths: &[PathBuf],
 ) -> eyre::Result<Vec<(PathBuf, DriveFile)>> {
     paths
         .iter()
         .map(|path| {
-            let file = config
-                .node_config
-                .base_directory
-                .join(path)
-                .join(PACKING_PARAMS_FILE_NAME);
+            let file = path.join(PACKING_PARAMS_FILE_NAME);
             // The entry itself, not its target: a dangling symlink is a
             // record that cannot be read, not a fresh drive.
             let found = match std::fs::symlink_metadata(&file) {
@@ -438,7 +434,7 @@ pub fn read_startup_drives(
     genesis_hash: H256,
 ) -> eyre::Result<StartupDrives> {
     let identity = ChainIdentity::new(config, genesis_hash);
-    let drives = drive_verdict_inputs_from_disk(config, paths)?;
+    let drives = drive_verdict_inputs_from_disk(paths)?;
     refuse_foreign_drives(&drives, &identity)?;
     // Existing module paths retain their physical layout; logical bounds are
     // resolved separately and the finalized migration removes their suffix.
@@ -906,50 +902,41 @@ mod tests {
         );
     }
 
-    /// Startup reads each drive's file without writing: no file is Missing,
-    /// and a relative path resolves against the base directory. A corrupt
+    /// Startup reads each drive's file without writing: no file is Missing.
+    /// A corrupt
     /// file is an error naming the drive and its file.
     #[test]
     fn inputs_from_disk_reads_missing_and_recorded_and_fails_on_corrupt() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("drive_inputs")
             .build();
-        let mut node_config = irys_types::NodeConfig::testing();
-        node_config.base_directory = tmp.path().to_path_buf();
-        let config = Config::new_with_random_peer_id(node_config);
-        let missing = PathBuf::from("missing");
-        let corrupt = PathBuf::from("corrupt");
+        let missing = tmp.path().join("missing");
+        let corrupt = tmp.path().join("corrupt");
         let held = tmp.path().join("held");
-        for dir in [
-            tmp.path().join(&missing),
-            tmp.path().join(&corrupt),
-            held.clone(),
-        ] {
+        for dir in [&missing, &corrupt, &held] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let corrupt_file = tmp.path().join(&corrupt).join(PACKING_PARAMS_FILE_NAME);
+        let corrupt_file = corrupt.join(PACKING_PARAMS_FILE_NAME);
         std::fs::write(&corrupt_file, b"not = toml [[[").unwrap();
         let params = v2(1, Some(DataLedger::Publish), Some(0), 10);
         let held_file = held.join(PACKING_PARAMS_FILE_NAME);
         params.write_to_disk(&held_file).unwrap();
         let held_bytes = std::fs::read(&held_file).unwrap();
 
-        let inputs = drive_verdict_inputs_from_disk(&config, &[missing.clone(), held.clone()])
+        let inputs = drive_verdict_inputs_from_disk(&[missing.clone(), held.clone()])
             .expect("readable drives");
         assert_eq!(inputs[0], (missing.clone(), DriveFile::Missing));
         assert_eq!(inputs[1], (held.clone(), DriveFile::Recorded(params)));
-        assert!(
-            !tmp.path()
-                .join(&missing)
-                .join(PACKING_PARAMS_FILE_NAME)
-                .exists()
-        );
+        assert!(!missing.join(PACKING_PARAMS_FILE_NAME).exists());
         assert_eq!(std::fs::read(&held_file).unwrap(), held_bytes);
 
-        let err = drive_verdict_inputs_from_disk(&config, &[missing, corrupt, held])
+        let err = drive_verdict_inputs_from_disk(&[missing, corrupt.clone(), held])
             .expect_err("a corrupt file stops the node");
         let err = format!("{err:#}");
-        assert!(err.contains("drive corrupt"), "{err}");
+        assert!(
+            err.contains(&format!("drive {}", corrupt.display())),
+            "{err}"
+        );
         assert!(err.contains(&corrupt_file.display().to_string()), "{err}");
     }
 
@@ -960,16 +947,15 @@ mod tests {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("drive_inputs_eio")
             .build();
-        let mut node_config = irys_types::NodeConfig::testing();
-        node_config.base_directory = tmp.path().to_path_buf();
-        let config = Config::new_with_random_peer_id(node_config);
-        let unreadable = PathBuf::from("unreadable");
-        std::fs::create_dir_all(tmp.path().join(&unreadable).join(PACKING_PARAMS_FILE_NAME))
-            .unwrap();
-        let err = drive_verdict_inputs_from_disk(&config, &[unreadable])
+        let unreadable = tmp.path().join("unreadable");
+        std::fs::create_dir_all(unreadable.join(PACKING_PARAMS_FILE_NAME)).unwrap();
+        let err = drive_verdict_inputs_from_disk(std::slice::from_ref(&unreadable))
             .expect_err("an unreadable file stops the node");
         let err = format!("{err:#}");
-        assert!(err.contains("drive unreadable"), "{err}");
+        assert!(
+            err.contains(&format!("drive {}", unreadable.display())),
+            "{err}"
+        );
     }
 
     /// Two eligible holders of one partition: the drive whose recorded slot
@@ -1036,20 +1022,20 @@ mod tests {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("drive_inputs_symlink")
             .build();
-        let mut node_config = irys_types::NodeConfig::testing();
-        node_config.base_directory = tmp.path().to_path_buf();
-        let config = Config::new_with_random_peer_id(node_config);
-        let linked = PathBuf::from("linked");
-        std::fs::create_dir_all(tmp.path().join(&linked)).unwrap();
+        let linked = tmp.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
         std::os::unix::fs::symlink(
             tmp.path().join("unmounted").join(PACKING_PARAMS_FILE_NAME),
-            tmp.path().join(&linked).join(PACKING_PARAMS_FILE_NAME),
+            linked.join(PACKING_PARAMS_FILE_NAME),
         )
         .unwrap();
-        let err = drive_verdict_inputs_from_disk(&config, &[linked])
+        let err = drive_verdict_inputs_from_disk(std::slice::from_ref(&linked))
             .expect_err("a dangling record is not a fresh drive");
         let err = format!("{err:#}");
-        assert!(err.contains("drive linked"), "{err}");
+        assert!(
+            err.contains(&format!("drive {}", linked.display())),
+            "{err}"
+        );
     }
 
     /// Startup opens every drive parked, with its path index as module id.

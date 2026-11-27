@@ -1281,6 +1281,15 @@ impl PackingParams {
 
 pub static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 
+/// Where a submodule directory named in a [`StorageModuleInfo`] lives:
+/// `base_directory.join(dir)`. The storage submodules config resolves its
+/// paths the same way when it is loaded, so for a configured drive this is
+/// the path itself. Open stores the result on [`StorageSubmodule::path`],
+/// and every later read or write of that submodule uses it.
+pub fn submodule_dir(config: &Config, dir: &Path) -> PathBuf {
+    config.node_config.base_directory.join(dir)
+}
+
 /// `params` as read from `path`. When iterations or chunk size are absent,
 /// fill them from the current consensus and write the file back.
 fn ensure_recorded_packing_params(
@@ -1404,7 +1413,8 @@ fn validate_existing_packing_params(
 pub struct StorageSubmodule {
     /// Submodule index. Callers open a read view or a write batch.
     pub db: SubmoduleIndex,
-    /// path to this Submodule
+    /// This submodule's directory, resolved once at open (see
+    /// [`submodule_dir`]). Every read or write of its files uses it.
     pub path: PathBuf,
     /// Persistent storage handle. The durability `sync_data` uses this file.
     /// With a bench split this is the write file, never the read-only recall
@@ -2466,11 +2476,7 @@ impl StorageModule {
             .submodules
             .iter()
             .map(|(_, dir)| {
-                let path = config
-                    .node_config
-                    .base_directory
-                    .join(dir)
-                    .join(PACKING_PARAMS_FILE_NAME);
+                let path = submodule_dir(config, dir).join(PACKING_PARAMS_FILE_NAME);
                 let params = validate_existing_packing_params(&path, config)?;
                 Ok((path, params))
             })
@@ -2485,7 +2491,7 @@ impl StorageModule {
             .into_iter()
             .zip(files)
         {
-            let sub_base_path = config.node_config.base_directory.join(dir.clone());
+            let sub_base_path = submodule_dir(config, &dir);
             // Open never changes what a drive holds: the storage module
             // service applies every transition. An assignment must be the one
             // the file records.
@@ -2609,7 +2615,7 @@ impl StorageModule {
                 .insert_strict(
                     submodule_interval,
                     StorageSubmodule {
-                        path: dir,
+                        path: sub_base_path.clone(),
                         file: chunks_file,
                         recall_direct: opened.recall_direct,
                         crc_complete: AtomicBool::new(submodule_db.chunk_crc_complete()?),
@@ -13658,8 +13664,7 @@ mod tests {
         Ok(())
     }
 
-    /// Assigned module. `store_assignment` writes `submodule.path`, and a
-    /// relative name misses this temp dir, so the submodule path is absolute.
+    /// Assigned module.
     fn open_assigned_presence(
         prefix: &str,
     ) -> eyre::Result<(
@@ -16948,8 +16953,6 @@ mod tests {
                     miner_address: irys_types::IrysAddress::from([0xAA; 20]),
                     partition_hash: H256::repeat_byte(0x11),
                 }),
-                // Absolute. `assign_partition` writes `packing_params.toml` at
-                // `submodule.path`, and a relative name would miss this temp dir.
                 submodules: vec![(
                     partition_chunk_offset_ii!(0, 3),
                     tmp_dir.path().join("hdd0"),
@@ -18792,8 +18795,6 @@ mod tests {
             ..NodeConfig::testing()
         };
         let config = Config::new_with_random_peer_id(node_config);
-        // Absolute. `store_assignment` writes `submodule.path`, not
-        // `base_directory.join`.
         let sub = tmp.path().join("sub");
         let storage = StorageModule::new(&one_span(3, sub.clone(), None), &config)?;
         let path = sub.join(PACKING_PARAMS_FILE_NAME);
@@ -20790,8 +20791,6 @@ mod tests {
         current.partition_hash = hash;
         current.miner_address = config.node_config.miner_address();
         current.ledger_id = Some(DataLedger::Publish.into());
-        // Absolute. `store_assignment` writes `packing_params.toml` at
-        // `submodule.path`, and a relative name would miss this temp dir.
         let sub = tmp.path().join("chunks");
         let storage = StorageModule::new(&one_span(3, sub.clone(), Some(current)), &config)?;
         let offset = PartitionChunkOffset::from(0);
