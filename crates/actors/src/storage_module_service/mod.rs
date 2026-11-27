@@ -1049,34 +1049,24 @@ mod assignment_reset_tests {
         inner: StorageModuleServiceInner,
         module: Arc<StorageModule>,
         path: std::path::PathBuf,
-        modules: Vec<Arc<StorageModule>>,
-        paths: Vec<std::path::PathBuf>,
     }
 
     fn harness(ledger_id: Option<u32>) -> Harness {
         open_harness(ledger_id, |_| {})
     }
 
-    fn open_harness(ledger_id: Option<u32>, configure: impl FnOnce(&mut NodeConfig)) -> Harness {
-        open_modules(1, ledger_id, configure)
-    }
-
-    /// Genesis block hash the harness service and modules agree on.
+    /// Genesis block hash the harness service and module agree on.
     const GENESIS: H256 = H256::repeat_byte(0x9E);
-    /// Modules opened as startup opens them: chain identity set, and each
+
+    /// A module opened as startup opens it (chain identity set), with its
     /// file rewritten as v2 with assigned height 0, so an unassign is a
     /// release.
-    fn open_modules(
-        module_count: usize,
-        ledger_id: Option<u32>,
-        configure: impl FnOnce(&mut NodeConfig),
-    ) -> Harness {
-        open_modules_with(module_count, ledger_id, configure, true)
+    fn open_harness(ledger_id: Option<u32>, configure: impl FnOnce(&mut NodeConfig)) -> Harness {
+        open_harness_with(ledger_id, configure, true)
     }
 
-    /// `stamp_v2 = false` keeps each module's file as open wrote it (v1).
-    fn open_modules_with(
-        module_count: usize,
+    /// `stamp_v2 = false` keeps the module's file as open wrote it (v1).
+    fn open_harness_with(
         ledger_id: Option<u32>,
         configure: impl FnOnce(&mut NodeConfig),
         stamp_v2: bool,
@@ -1091,52 +1081,61 @@ mod assignment_reset_tests {
             ..ConsensusConfig::testing()
         });
         configure(&mut node_config);
-        let submodules =
-            StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), module_count)
-                .expect("submodules");
+        let submodules = StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), 1)
+            .expect("submodules");
         let config = Config::new_with_random_peer_id(node_config);
-        let miner = config.node_config.miner_address();
-
-        let mut modules = Vec::with_capacity(module_count);
-        for id in 0..module_count {
-            let path = submodules.submodule_paths[id].clone();
-            let info = StorageModuleInfo {
-                id,
-                partition_assignment: Some(PartitionAssignment {
-                    partition_hash: H256::repeat_byte(0x21 + u8::try_from(id).expect("id")),
-                    miner_address: miner,
-                    ledger_id,
-                    slot_index: ledger_id.map(|_| id),
-                }),
-                submodules: vec![(partition_chunk_offset_ie!(0, 10), path)],
-            };
-            let module = StorageModule::new(&info, &config).expect("storage module");
-            module.set_chain_identity(GENESIS);
-            if stamp_v2 {
-                module
-                    .assign_partition(info.partition_assignment.expect("assigned"), 0)
-                    .expect("stamp v2");
-            }
-            modules.push(Arc::new(module));
+        let assignment = PartitionAssignment {
+            partition_hash: H256::repeat_byte(0x21),
+            miner_address: config.node_config.miner_address(),
+            ledger_id,
+            slot_index: ledger_id.map(|_| 0),
+        };
+        let path = submodules.submodule_paths[0].clone();
+        let module = open_module(&config, &path, Some(assignment));
+        if stamp_v2 {
+            module.assign_partition(assignment, 0).expect("stamp v2");
         }
-        let module = Arc::clone(&modules[0]);
-        let paths = submodules.submodule_paths;
-        let path = paths[0].clone();
+        service_harness(tmp, config, module, path)
+    }
 
-        let db_env = DatabaseProvider::for_testing(
-            &(tmp.path().join("chain-db")),
-            &(tmp.path().join("chain-db")).join("cache"),
-        )
-        .expect("chain db");
-        let block_index = BlockIndex::new_for_testing(db_env);
-        let block_index_guard = BlockIndexReadGuard::new(block_index);
+    /// Open the module at `path` and set its chain identity.
+    fn open_module(
+        config: &Config,
+        path: &std::path::Path,
+        partition_assignment: Option<PartitionAssignment>,
+    ) -> Arc<StorageModule> {
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment,
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.to_path_buf())],
+        };
+        let module = StorageModule::new(&info, config).expect("storage module");
+        module.set_chain_identity(GENESIS);
+        Arc::new(module)
+    }
+
+    /// A service over `module` alone, with an empty block index and tree.
+    fn service_harness(
+        tmp: irys_testing_utils::tempfile::TempDir,
+        config: Config,
+        module: Arc<StorageModule>,
+        path: std::path::PathBuf,
+    ) -> Harness {
+        // A reopened harness keeps the dropped one's database directory.
+        let db_dir = (0..)
+            .map(|n| tmp.path().join(format!("chain-db-{n}")))
+            .find(|dir| !dir.exists())
+            .expect("a free database directory");
+        let db_env =
+            DatabaseProvider::for_testing(&db_dir, &db_dir.join("cache")).expect("chain db");
+        let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db_env));
         let block_tree = BlockTree::new(&new_mock_signed_header(), config.consensus.clone());
         let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let (service_senders, receivers) = ServiceSenders::new();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let identity = ChainIdentity::new(&config, GENESIS);
         let inner = StorageModuleServiceInner::new(
-            Arc::new(RwLock::new(modules.clone())),
+            Arc::new(RwLock::new(vec![Arc::clone(&module)])),
             block_index_guard,
             block_tree_guard,
             service_senders,
@@ -1151,76 +1150,31 @@ mod assignment_reset_tests {
             inner,
             module,
             path,
-            modules,
-            paths,
         }
     }
 
     /// A capacity module with entropy at offset 0, closed and reopened without
-    /// an assignment: the module the epoch mapping parks because it cannot
-    /// place the partition it holds. Returns the held hash and the miner.
+    /// an assignment, as startup opens every drive. Returns the held hash and
+    /// the miner.
     fn parked_harness() -> (Harness, H256, irys_types::IrysAddress) {
         let held = harness(None);
         write_synced_entropy(&held.module);
         let (hash, miner) = assigned_hash_and_miner(&held.module);
-        let config = held.inner.config.clone();
-        let path = held.path.clone();
-        let paths = held.paths.clone();
-        let tmp = held._tmp;
-        drop(held.inner);
-        drop(held.module);
-        drop(held.modules);
+        let Harness {
+            _tmp: tmp,
+            inner,
+            module,
+            path,
+            ..
+        } = held;
+        let config = inner.config.clone();
+        drop(inner);
+        drop(module);
 
-        let parked = Arc::new(
-            StorageModule::new(
-                &StorageModuleInfo {
-                    id: 0,
-                    partition_assignment: None,
-                    submodules: vec![(partition_chunk_offset_ie!(0, 10), path.clone())],
-                },
-                &config,
-            )
-            .expect("parked open"),
-        );
+        let parked = open_module(&config, &path, None);
         assert!(parked.partition_assignment().is_none());
         assert_eq!(chunk_type(&parked), Some(irys_domain::ChunkType::Entropy));
-
-        let db_env = DatabaseProvider::for_testing(
-            &(tmp.path().join("chain-db-parked")),
-            &(tmp.path().join("chain-db-parked")).join("cache"),
-        )
-        .expect("chain db");
-        let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db_env));
-        let block_tree = BlockTree::new(&new_mock_signed_header(), config.consensus.clone());
-        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let (service_senders, receivers) = ServiceSenders::new();
-        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-        let modules = vec![Arc::clone(&parked)];
-        parked.set_chain_identity(GENESIS);
-        let identity = ChainIdentity::new(&config, GENESIS);
-        let inner = StorageModuleServiceInner::new(
-            Arc::new(RwLock::new(modules.clone())),
-            block_index_guard,
-            block_tree_guard,
-            service_senders,
-            config,
-            identity,
-            shutdown_rx,
-        );
-        (
-            Harness {
-                _tmp: tmp,
-                _shutdown_tx: shutdown_tx,
-                receivers,
-                inner,
-                module: parked,
-                path,
-                modules,
-                paths,
-            },
-            hash,
-            miner,
-        )
+        (service_harness(tmp, config, parked, path), hash, miner)
     }
 
     /// A parked module that is later assigned the partition it holds takes it
@@ -2806,7 +2760,7 @@ mod assignment_reset_tests {
     async fn v2_stamp_failure_is_a_drive_fault() {
         use irys_domain::storage_module::ChunkType;
 
-        let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
+        let mut harness = open_harness_with(Some(DataLedger::Publish.into()), |_| {}, false);
         write_synced_data(&harness.module, 0x61);
         let held = harness.module.partition_assignment().expect("assigned");
         let _corrupted = corrupt_packing_params(&harness.path);
@@ -2967,7 +2921,7 @@ mod assignment_reset_tests {
     async fn in_sync_epoch_stamps_v1_ours_drive() {
         use irys_domain::storage_module::ChunkType;
 
-        let mut harness = open_modules_with(1, Some(DataLedger::Publish.into()), |_| {}, false);
+        let mut harness = open_harness_with(Some(DataLedger::Publish.into()), |_| {}, false);
         write_synced_data(&harness.module, 0x65);
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         let params_path = harness.path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
