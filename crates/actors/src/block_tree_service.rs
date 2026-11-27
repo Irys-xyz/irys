@@ -7,7 +7,7 @@ use crate::{
     chunk_ingress_service::ChunkIngressMessage,
     mempool_service::MempoolServiceMessage,
     metrics,
-    mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
+    mining_bus::BroadcastDifficultyUpdate,
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
@@ -23,7 +23,7 @@ use irys_domain::{
     forkchoice_markers::ForkChoiceMarkers,
 };
 use irys_types::{
-    BlockHash, Config, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
+    BlockHash, Config, H256, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
     SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
 use irys_vdf::{
@@ -1897,20 +1897,8 @@ impl BlockTreeServiceInner {
                 )
             })?;
 
-        // Check for partitions expired at this epoch boundary
-        if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
-            let expired_partition_hashes: Vec<_> = expired_partition_infos
-                .iter()
-                .map(|i| i.partition_hash)
-                .collect();
-
-            // Let miners know about expired partitions
-            self.service_senders
-                .send_partitions_expiration(BroadcastPartitionsExpiration {
-                    partition_hashes: H256List(expired_partition_hashes),
-                    update_height: epoch_block.height,
-                });
-        }
+        // Expired partitions need no separate notice: this epoch's
+        // assignment update (sent below) moves them to capacity.
 
         // Prune the data-root cache on every epoch block, not only when partitions expire: the
         // prune height moves as Submit slots expire, and a run that hit the per-run eviction cap
@@ -2748,7 +2736,7 @@ mod tests {
         let steps: Vec<H256> = (1..=c_step).map(H256::from_low_u64_be).collect();
         let mut tip = IrysBlockHeader::new_mock_header();
         tip.vdf_limiter_info.global_step_number = c_step;
-        tip.vdf_limiter_info.steps = H256List(steps.clone());
+        tip.vdf_limiter_info.steps = irys_types::H256List(steps.clone());
         tip.vdf_limiter_info.next_seed = next_seed;
         (tip, steps)
     }

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use irys_types::{H256List, IrysBlockHeader, block_production::Seed};
 use irys_vdf::MiningBroadcaster;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tracing::{debug, info};
+use tracing::info;
 
 /// Tokio-native broadcast envelope for mining events.
 #[derive(Debug, Clone)]
@@ -18,18 +18,9 @@ pub struct BroadcastMiningSeed {
 pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
 
 #[derive(Debug, Clone)]
-pub struct BroadcastPartitionsExpiration {
-    pub partition_hashes: H256List,
-    /// Epoch height that owns this expiry. The miner stores the capacity
-    /// assignment at this height in the same critical section as the reset.
-    pub update_height: u64,
-}
-
-#[derive(Debug, Clone)]
 pub enum MiningBroadcastEvent {
     Seed(BroadcastMiningSeed),
     Difficulty(BroadcastDifficultyUpdate),
-    PartitionsExpiration(BroadcastPartitionsExpiration),
     /// The VDF seed buffer was re-anchored to canonical in place after a deep
     /// reorg. Carries no payload — the step numbers are unchanged, so miners
     /// only need to rebuild their recall-range rotation from the healed buffer.
@@ -105,13 +96,6 @@ impl MiningBus {
     /// Send a difficulty update to all subscribers.
     pub fn send_difficulty(&self, msg: BroadcastDifficultyUpdate) -> usize {
         self.send_event(Arc::new(MiningBroadcastEvent::Difficulty(msg)))
-    }
-
-    /// Send partition expiration notice to all subscribers.
-    #[tracing::instrument(level = "trace", skip_all, fields(partition.expired_count = msg.partition_hashes.len()))]
-    pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
-        debug!(custom.msg = ?msg.partition_hashes, "Broadcasting expiration, expired partition hashes");
-        self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
     }
 
     /// Notify subscribers that the VDF buffer was re-anchored to canonical.

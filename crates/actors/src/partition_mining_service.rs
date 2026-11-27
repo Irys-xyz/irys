@@ -982,10 +982,6 @@ impl PartitionMiningService {
             MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
                 self.state.update_difficulty(h.diff);
             }
-            // The storage module service is the only writer of a slot change:
-            // the same epoch's assignment update moves an expired slot to
-            // capacity. Mining reads the module's assignment on every seed.
-            MiningBroadcastEvent::PartitionsExpiration(_) => {}
             MiningBroadcastEvent::Reanchored => {
                 self.state.handle_reanchored();
             }
