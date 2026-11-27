@@ -15195,11 +15195,13 @@ mod tests {
         assert_eq!(recorded.slot, Some(1));
         storage.abandon_on_drop_for_test();
         drop(storage);
-        // Startup opens parked; the service's verdict then repeats the exit.
+        // Startup opens parked. The file already names the new slot, so the
+        // service's verdict adopts it as recorded.
         let mut info = crc_hold_info(tmp.path());
         info.partition_assignment = None;
         let storage = StorageModule::new(&info, &config)?;
-        storage.reset_keep_entropy_with_assignment(next, 8)?;
+        assert!(matches!(storage.hold(Some(next), 8, false)?, Held::Adopted));
+        assert_eq!(storage.partition_assignment(), Some(next));
         assert_slot_exited(&storage, &entropy, &metas, data_root, next)?;
         drop(storage);
         drop(tmp);
