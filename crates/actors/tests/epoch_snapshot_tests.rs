@@ -1,9 +1,3 @@
-use irys_actors::{
-    block_producer::BlockProducerCommand,
-    mining_bus::BroadcastPartitionsExpiration,
-    partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
-    services::ServiceSenders,
-};
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
     DatabaseProviderTestExt as _, add_genesis_commitments, add_test_commitments,
@@ -11,22 +5,19 @@ use irys_database::{
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::TempDirBuilder;
-use irys_types::PartitionChunkRange;
+use irys_types::Config;
 use irys_types::UnixTimestampMs;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
     partition::PartitionAssignment,
 };
-use irys_types::{Config, U256};
 use irys_types::{
     ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset, partition_chunk_offset_ie,
 };
 use irys_types::{H256List, NodeConfig};
-use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
-use std::{sync::atomic::AtomicBool, time::Duration};
+use std::sync::Arc;
 use tracing::{debug, error};
 
 #[tokio::test]
@@ -602,26 +593,21 @@ async fn capacity_projection_tests() {
 /*
 Summary:
 Verify that when a Submit ledger slot expires at an epoch boundary,
-miners reset their storage modules and a repacking request is enqueued
-for the full partition, and that ledger slot/partition assignments are
-updated consistently.
+the epoch snapshot moves the expired partition off its slot for the same
+miner, the storage module's slot exit then leaves the whole partition to
+repack, and ledger slot/partition assignments are updated consistently.
 
 High-level steps:
 1) Configure a minimal consensus and build an EpochSnapshot with initial
    Publish/Submit slots and capacity partitions. Map local
    StorageModuleInfos to StorageModule instances for the miner.
-2) Spawn a Tokio PartitionMiningService per storage module.
-   Subscribe to the MiningBus via ServiceSenders; publish events
-   using ServiceSenders send_* helpers. No Actix registry is involved.
-3) Wire a packing channel in ServiceSenders and forward the first
-   PackingRequest into a oneshot receiver for assertions.
-4) Drive epoch transitions by repeatedly calling perform_epoch_tasks
+2) Drive epoch transitions by repeatedly calling perform_epoch_tasks
    with synthetic epoch blocks (tweaking Submit ledger chunk totals as
-   needed). In each iteration, broadcast any expired partitions reported
-   by the snapshot to the miners.
-5) Assert:
-   - A PackingRequest arrives targeting the Submit partition and the
-     full partition range.
+   needed).
+3) Assert:
+   - The miner's assignments move the expired Submit partition off slot 0.
+     Applying that assignment (the storage module service's keep-entropy
+     slot exit) leaves the full partition range to repack.
    - Submit slot 0 is marked expired and emptied; new Submit slots are
      added and assigned; Publish still has one slot.
    - Partition assignments for Publish and Submit slots are internally
@@ -689,65 +675,6 @@ async fn partition_expiration_and_repacking_test() {
                 .unwrap(),
         );
         storage_modules.push(arc_module.clone());
-    }
-
-    // Create ServiceSenders for testing
-    let (service_senders, mut receivers) = ServiceSenders::new();
-    // Spawn a task that will await the first packing request from the internal receiver
-    let mut packing_rx = receivers.packing;
-
-    // Wire a Tokio packing handle that captures a single request via oneshot
-    let (_tx_packing, _rx_packing) =
-        tokio::sync::mpsc::channel::<irys_actors::packing_service::PackingRequest>(1);
-    let (pack_req_tx, pack_req_rx) =
-        tokio::sync::oneshot::channel::<irys_actors::packing_service::PackingRequest>();
-
-    tokio::spawn(async move {
-        if let Some(packing_req) = packing_rx.recv().await {
-            pack_req_tx.send(packing_req).expect("pack_req_rx dropped");
-        }
-    });
-
-    // Spawn a task to handle block producer commands
-    tokio::spawn(async move {
-        while let Some(traced_cmd) = receivers.block_producer.recv().await {
-            let (cmd, _parent_span) = traced_cmd.into_parts();
-            if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
-                // Return Ok(None) for the test
-                response
-                    .send(Ok(None))
-                    .expect("block producer response receiver dropped");
-            }
-        }
-    });
-
-    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
-        10,
-        0,
-        Arc::new(AtomicBool::new(false)),
-    ))));
-
-    let mut mining_service_handles = Vec::new();
-    let mut mining_service_controllers = Vec::new();
-
-    let should_mine = true;
-    for sm in &storage_modules {
-        let inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders.clone(),
-            sm.clone(),
-            should_mine,
-            vdf_steps_guard.clone(),
-            U256::zero(),
-            None,
-            None,
-        );
-
-        let (controller, handle) =
-            PartitionMiningService::spawn_service(inner, tokio::runtime::Handle::current());
-        debug!("starting miner partition hash {:?}", sm.partition_hash());
-        mining_service_controllers.push(controller);
-        mining_service_handles.push(handle);
     }
 
     let assign_submit_partition_hash = {
@@ -824,29 +751,10 @@ async fn partition_expiration_and_repacking_test() {
             panic!("Test failed: {:?}", err);
         }
 
-        // Simulate the partition expiry broadcast the service would normally do
-        let expired_partition_hashes: Vec<_> = epoch_snapshot
-            .expired_partition_infos
-            .as_ref()
-            .map_or(Vec::new(), |infos| {
-                infos.iter().map(|info| info.partition_hash).collect()
-            });
-
-        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration {
-            partition_hashes: H256List(expired_partition_hashes),
-            update_height: new_epoch_block.height,
-        });
-
         previous_epoch_block = Some(new_epoch_block.clone());
 
         debug!("{:#?}", epoch_snapshot.ledgers);
     }
-
-    // wait for packing request with a short timeout instead of busy-polling
-    let pack_req = tokio::time::timeout(Duration::from_secs(3), pack_req_rx)
-        .await
-        .expect("timed out waiting for packing request")
-        .expect("packing request sender dropped");
 
     // check a new slots is inserted with a partition assigned to it, and slot 0 expired and its partition was removed
     let (publish_partition, submit_partition, submit_partition2) = {
@@ -971,14 +879,28 @@ async fn partition_expiration_and_repacking_test() {
         };
     }
 
-    assert_eq!(
-        pack_req.storage_module().partition_hash(),
-        Some(submit_partition_hash),
-        "Partition hashes should be equal"
+    // The epoch's assignment update is the only writer of the slot change:
+    // the storage module service applies it as a keep-entropy slot exit.
+    let next = epoch_snapshot
+        .get_partition_assignments(config.node_config.miner_address())
+        .into_iter()
+        .find(|assignment| assignment.partition_hash == submit_partition_hash)
+        .expect("the expired partition stays with this miner");
+    assert_ne!(
+        (next.ledger_id, next.slot_index),
+        (Some(DataLedger::Submit.get_id()), Some(0)),
+        "the expired partition left Submit slot 0"
     );
+    let module = storage_modules
+        .iter()
+        .find(|sm| sm.partition_hash() == Some(submit_partition_hash))
+        .expect("a storage module holds the expired partition");
+    let spans = module
+        .reset_keep_entropy_with_assignment(next, new_epoch_block.height)
+        .expect("slot exit");
     assert_eq!(
-        *pack_req.chunk_range(),
-        PartitionChunkRange(partition_chunk_offset_ie!(0, chunk_count as u32)),
+        spans,
+        vec![partition_chunk_offset_ie!(0, chunk_count as u32)],
         "The whole partition should be repacked"
     );
 }

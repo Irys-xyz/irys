@@ -1455,22 +1455,14 @@ pub enum EntropyRejection {
     NotUninitialized(Option<ChunkType>),
 }
 
-/// Whether a drive fault on an assignment path panics instead of aborting.
-/// Off in production. Only tests turn it on, through
-/// [`panic_on_drive_fault_for_tests`]; a runtime switch, not a feature, so a
-/// workspace build that unifies `test-utils` into the node still aborts.
-static DRIVE_FAULT_PANICS: AtomicBool = AtomicBool::new(false);
-
 /// Stop the node for a drive fault on a path that changes what a drive holds
 /// (an I/O error, or a broken drive-state invariant). The process aborts at
 /// once, as a crash would: nothing (disk lane, chunk migration, data sync,
 /// packing, a module's drop flush) can write to a drive after it, and the
 /// next open recovers exactly as from a crash. The operator must look at the
-/// drive before restarting. Tests that turned panics on get a catchable panic.
+/// drive before restarting. Tests assert the [`DriveFault`] error instead of
+/// reaching this.
 pub fn stop_node_for_drive_fault(message: &str) -> ! {
-    if DRIVE_FAULT_PANICS.load(Ordering::SeqCst) {
-        panic!("{message}");
-    }
     error!("{message}");
     write_fault_message(&mut std::io::stderr(), message);
     std::process::abort()
@@ -1521,13 +1513,6 @@ type QueuedRepairs = (
 /// unwind before the abort, which would run drop flushes on the faulted drive.
 fn write_fault_message(out: &mut impl std::io::Write, message: &str) {
     let _ = writeln!(out, "{message}");
-}
-
-/// Make [`stop_node_for_drive_fault`] panic instead of aborting, so a test
-/// can catch it. Process-wide; never called by the node.
-#[cfg(any(test, feature = "test-utils"))]
-pub fn panic_on_drive_fault_for_tests() {
-    DRIVE_FAULT_PANICS.store(true, Ordering::SeqCst);
 }
 
 /// Defines how chunk data is processed and stored
@@ -3147,20 +3132,6 @@ impl StorageModule {
         }
     }
 
-    /// Unwrap a drive I/O result and stop the node on an error, with the
-    /// module, its paths, the operation and the error. Only the partition
-    /// mining service's expiry path still calls this; the storage module
-    /// service returns a [`DriveFault`] to its message boundary instead.
-    pub fn expect_drive_io<T>(&self, operation: &str, result: eyre::Result<T>) -> T {
-        result.unwrap_or_else(|err| {
-            stop_node_for_drive_fault(&format!(
-                "storage module {} ({}): {operation} failed; stopping the node: {err:#}",
-                self.id,
-                self.display_paths()
-            ))
-        })
-    }
-
     /// The submodule directories, joined for messages.
     pub fn display_paths(&self) -> String {
         self.submodules
@@ -3206,20 +3177,6 @@ impl StorageModule {
             Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => None,
         }
-    }
-
-    /// The assignment and the height it was stored at. The height is read
-    /// from `packing_params.toml` under the assignment lock, so it belongs
-    /// to this assignment. `None` when the file never recorded one.
-    pub fn partition_assignment_with_height(
-        &self,
-    ) -> eyre::Result<(Option<PartitionAssignment>, Option<u64>)> {
-        let pa = self.partition_assignment.read().unwrap();
-        let Some((_, submodule)) = self.submodules.iter().next() else {
-            return Ok((*pa, None));
-        };
-        let params = PackingParams::from_toml(submodule.path.join(PACKING_PARAMS_FILE_NAME))?;
-        Ok((*pa, params.last_updated_height))
     }
 
     pub fn last_pending_write(&self) -> Instant {
@@ -4464,62 +4421,6 @@ impl StorageModule {
         }
     }
 
-    /// Reset to capacity when `expired_hash` is still assigned and every
-    /// submodule file was stored before `notice_height`.
-    ///
-    /// The assignment write lock covers the read and the reset. A file stored
-    /// at or after the notice stays: that write is this epoch's ledger slot,
-    /// or the capacity assignment another writer already stored. A different
-    /// hash stays too. `Ok(None)` means the module was not reset. A read
-    /// error is `Err` and does not reset. The capacity assignment is stored
-    /// before the lock is released. `Err` leaves the in-memory assignment
-    /// unchanged, but not always the file: a store whose rename succeeded and
-    /// whose directory sync then failed leaves the file naming capacity. The
-    /// caller stops the node on `Err`. The next open is consistent either
-    /// way: the `Uninitialized` image and the row clears ran before the store,
-    /// so a file on the old slot repeats the exit and a file on capacity opens
-    /// with the old data already relabelled.
-    ///
-    /// The reset keeps the partition's entropy, as
-    /// [`Self::reset_keep_entropy_with_assignment`] does. `Ok(Some(spans))`
-    /// lists the `Uninitialized` spans left to pack.
-    pub fn reset_expired_to_capacity(
-        &self,
-        expired_hash: PartitionHash,
-        notice_height: u64,
-    ) -> eyre::Result<Option<Vec<Interval<PartitionChunkOffset>>>> {
-        let mut assignment = self.partition_assignment.write().unwrap();
-        let Some(current) = *assignment else {
-            return Ok(None);
-        };
-        if current.partition_hash != expired_hash {
-            return Ok(None);
-        }
-        // Read every file before `reset`. One unreadable file must not clear
-        // the index. The lock keeps a storage-task install from landing
-        // between this read and the capacity store.
-        let stored = self.read_submodule_packing_params()?;
-        let still_expired = stored.iter().all(|params| {
-            params.partition_hash == Some(expired_hash)
-                && params
-                    .last_updated_height
-                    .is_none_or(|height| height < notice_height)
-        });
-        if !still_expired {
-            return Ok(None);
-        }
-        let capacity = PartitionAssignment {
-            partition_hash: expired_hash,
-            miner_address: current.miner_address,
-            ledger_id: None,
-            slot_index: None,
-        };
-        // The partition stays, so its entropy stays. Only the expired slot's
-        // data is uninitialized and repacked.
-        let spans = self.leave_slot_locked(&mut assignment, capacity, notice_height)?;
-        Ok(Some(spans))
-    }
-
     /// Leave a ledger slot and keep the partition: ledger to capacity, or
     /// ledger to another ledger or slot. Entropy depends on the packing
     /// address, the partition hash and the chunk offset, not on the ledger or
@@ -4735,21 +4636,6 @@ impl StorageModule {
             .map(|(interval, _)| ii(interval.start(), interval.end().min(last)))
             .collect();
         Ok((spans, queued))
-    }
-
-    /// Packing params for every submodule. The caller holds the assignment
-    /// write lock. An empty module or one bad file fails the read.
-    fn read_submodule_packing_params(&self) -> eyre::Result<Vec<PackingParams>> {
-        let mut stored = Vec::new();
-        for (_, submodule) in self.submodules.iter() {
-            stored.push(PackingParams::from_toml(
-                submodule.path.join(PACKING_PARAMS_FILE_NAME),
-            )?);
-        }
-        if stored.is_empty() {
-            eyre::bail!("storage module has no submodule");
-        }
-        Ok(stored)
     }
 
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
@@ -15156,15 +15042,13 @@ mod tests {
         let (tmp, _config, storage) = open_assigned_module("keep_entropy_expiry", 30)?;
         let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
         let held = storage.partition_assignment().expect("assigned");
-        let spans = storage
-            .reset_expired_to_capacity(held.partition_hash, 100)?
-            .expect("the slot expired");
-        assert_eq!(spans, vec![partition_chunk_offset_ii!(0, 0)]);
         let capacity = PartitionAssignment {
             ledger_id: None,
             slot_index: None,
             ..held
         };
+        let spans = storage.reset_keep_entropy_with_assignment(capacity, 100)?;
+        assert_eq!(spans, vec![partition_chunk_offset_ii!(0, 0)]);
         assert_slot_exited(&storage, &entropy, &metas, data_root, capacity)?;
         drop(storage);
         drop(tmp);
@@ -15324,9 +15208,12 @@ mod tests {
         storage.requeue_packing_range(partition_chunk_offset_ii!(0, 0));
         AFTER_KEEP_ENTROPY_RELABEL.with(|hook| hook.set(Some(queue_during_exit)));
         let held = storage.partition_assignment().expect("assigned");
-        let spans = storage
-            .reset_expired_to_capacity(held.partition_hash, 100)?
-            .expect("expired");
+        let capacity = PartitionAssignment {
+            ledger_id: None,
+            slot_index: None,
+            ..held
+        };
+        let spans = storage.reset_keep_entropy_with_assignment(capacity, 100)?;
         assert!(
             span_covers(&spans, 1),
             "the earlier repair is in the exit's spans: {spans:?}"
@@ -20947,10 +20834,10 @@ mod tests {
         Ok(())
     }
 
-    /// Expiry reads the file, uninitializes the expired slot's data, then
-    /// stores capacity. A store error after that writes no marker and leaves
-    /// the file naming the old slot, so a reopen repeats the slot exit. The
-    /// retry still moves to capacity.
+    /// Expiry uninitializes the expired slot's data, then stores capacity. A
+    /// store error after that writes no marker and leaves the file naming the
+    /// old slot, so a reopen repeats the slot exit. The retry still moves to
+    /// capacity.
     #[test]
     fn failed_expiry_store_keeps_the_old_slot_recorded() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new()
@@ -20969,9 +20856,14 @@ mod tests {
         assert!(storage.write_chunk(offset, vec![0x22; 32], ChunkType::Data));
         storage.force_sync_pending_chunks()?;
         storage.fail_next_sync_at(SyncFailurePoint::AssignmentStore);
+        let capacity = PartitionAssignment {
+            ledger_id: None,
+            slot_index: None,
+            ..current
+        };
 
         let err = storage
-            .reset_expired_to_capacity(hash, 9)
+            .reset_keep_entropy_with_assignment(capacity, 9)
             .expect_err("the capacity store is the injected failure");
         assert!(err.to_string().contains("AssignmentStore"), "{err}");
         assert!(!storage.reset_incomplete(), "a slot exit sets no wipe flag");
@@ -20993,9 +20885,7 @@ mod tests {
             Some(ChunkType::Uninitialized)
         );
 
-        let finished = storage
-            .reset_expired_to_capacity(hash, 9)?
-            .expect("the same expiry still resets once the store can finish");
+        let finished = storage.reset_keep_entropy_with_assignment(capacity, 9)?;
         assert_eq!(finished, vec![partition_chunk_offset_ii!(0, 3)]);
         assert!(!storage.reset_incomplete());
         let (_, submodule) = storage.get_submodule_for_offset(offset)?;

@@ -1,10 +1,7 @@
 use crate::{
     block_producer::BlockProducerCommand,
     metrics,
-    mining_bus::{
-        BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastPartitionsExpiration,
-        MiningBroadcastEvent,
-    },
+    mining_bus::{BroadcastDifficultyUpdate, BroadcastMiningSeed, MiningBroadcastEvent},
     services::ServiceSenders,
 };
 use eyre::WrapErr as _;
@@ -16,15 +13,14 @@ use irys_storage::ii;
 use irys_types::partition_resize::PartitionGeometry;
 use irys_types::{
     Base64, BlockHash, ChunkDataPath, Config, DataLedger, H256List, PartitionChunkOffset,
-    PartitionChunkRange, ProofDeserialize as _, SendTraced as _, TokioServiceHandle, U256,
+    ProofDeserialize as _, SendTraced as _, TokioServiceHandle, U256,
     block_production::{Seed, SolutionContext, TxPathJob, TxPathSource},
     get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
-use nodit::Interval;
 use openssl::sha;
 use reth::tasks::shutdown::Shutdown;
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{Instrument as _, debug, error, info, warn};
 
@@ -68,10 +64,6 @@ pub struct PartitionMiningServiceInner {
     tx_path_db: Option<DatabaseProvider>,
     /// Header prefetch pool. `None` in tests that never derive.
     tx_path_pool: Option<TxPathPool>,
-    /// Capacity spans whose reset is stored and whose packing send did not
-    /// land. Retried until the channel accepts them. Offsets that are no
-    /// longer uninitialized are not sent.
-    deferred_expiry_packs: Vec<PartitionChunkRange>,
     /// Path lookups this miner issued. Proves a non-winning recall does not
     /// open the index.
     #[cfg(test)]
@@ -207,7 +199,6 @@ impl PartitionMiningServiceInner {
             steps_guard,
             tx_path_db,
             tx_path_pool: tx_path_pool.map(TxPathPool),
-            deferred_expiry_packs: Vec::new(),
             #[cfg(test)]
             data_path_lookups: std::sync::atomic::AtomicU64::new(0),
         }
@@ -279,120 +270,6 @@ impl PartitionMiningServiceInner {
         // A broadcast for a block other than the validated tip must not outlive
         // the tip's own target: re-pair difficulty with the tip on the next step.
         self.last_tip = None;
-    }
-
-    /// Move an expired ledger slot to capacity, keeping its entropy, and pack
-    /// the old data spans. A drive I/O error stops the node (see
-    /// [`StorageModule::expect_drive_io`]); there is no retry.
-    #[tracing::instrument(level = "trace", skip_all)]
-    fn handle_partitions_expiration(&mut self, expired: &H256List, update_height: u64) {
-        let Some(partition_hash) = self.storage_module.partition_hash() else {
-            return;
-        };
-        if !expired.0.contains(&partition_hash) {
-            return;
-        }
-        // The assignment update is the last writer for a ledger slot. This
-        // notice also names a hash that the same epoch backfilled onto a new
-        // slot. The storage task can install that slot before this task reads
-        // the notice. Resetting then would store capacity over it.
-        if self.ledger_slot_stored_since(update_height) {
-            debug!(
-                storage_module.partition_hash = ?partition_hash,
-                "Partition expiry notice left the ledger assignment in place"
-            );
-            return;
-        }
-        // The read above can be stale. `expire_to_capacity` reads the hash
-        // and the height again under the assignment write lock.
-        match self.expire_to_capacity(partition_hash, update_height) {
-            Some(spans) => {
-                debug!(
-                    storage_module.partition_hash = ?partition_hash,
-                    storage_module.packing_spans = ?spans,
-                    "Expiring partition hash"
-                );
-                self.enqueue_expiry_packing(spans.into_iter().map(PartitionChunkRange));
-            }
-            None => debug!(
-                storage_module.partition_hash = ?partition_hash,
-                "Partition expiry left the current assignment in place"
-            ),
-        }
-    }
-
-    /// Send spans a full or closed channel kept. Clip each span to offsets
-    /// that are still uninitialized, so data written since the reset is not
-    /// packed over.
-    fn retry_deferred_expiry_packs(&mut self) {
-        let waiting = std::mem::take(&mut self.deferred_expiry_packs);
-        for range in waiting {
-            for span in self
-                .storage_module
-                .uninitialized_spans_overlapping(range.0)
-                .into_iter()
-                .map(PartitionChunkRange)
-            {
-                self.send_or_defer_expiry_pack(span);
-            }
-        }
-    }
-
-    /// The module is on a ledger slot stored at or after the expiry height.
-    /// That is the epoch's new slot: the assignment update clears its index
-    /// and this service must not replace it with capacity. A slot stored
-    /// earlier is the one expiring, and is reset.
-    fn ledger_slot_stored_since(&self, update_height: u64) -> bool {
-        match self.storage_module.partition_assignment_with_height() {
-            Ok((Some(assignment), Some(height))) => {
-                assignment.ledger_id.is_some() && height >= update_height
-            }
-            Ok(_) => false,
-            // Not a decision to reset. The locked call reads the file again
-            // and stops the node when that read fails too.
-            Err(err) => {
-                debug!("expiry check could not read packing params: {err}");
-                false
-            }
-        }
-    }
-
-    /// Reset to capacity under the assignment write lock when `expired_hash`
-    /// is still stored from before the notice. `None` when that hash was
-    /// replaced or the slot was stored at or after the notice. The reset
-    /// keeps the partition's entropy; `Some` lists the spans to pack.
-    fn expire_to_capacity(
-        &self,
-        expired_hash: irys_types::H256,
-        update_height: u64,
-    ) -> Option<Vec<Interval<PartitionChunkOffset>>> {
-        self.storage_module.expect_drive_io(
-            "expire the ledger slot to capacity",
-            self.storage_module
-                .reset_expired_to_capacity(expired_hash, update_height),
-        )
-    }
-
-    /// Pack `ranges`. A full or closed channel keeps each span. A new expiry
-    /// replaces spans the channel has not accepted: the reset relabelled them.
-    fn enqueue_expiry_packing(&mut self, ranges: impl IntoIterator<Item = PartitionChunkRange>) {
-        self.deferred_expiry_packs.clear();
-        for range in ranges {
-            self.send_or_defer_expiry_pack(range);
-        }
-    }
-
-    fn send_or_defer_expiry_pack(&mut self, range: PartitionChunkRange) {
-        if matches!(
-            crate::storage_module_service::send_packing_request(
-                &self.service_senders.packing_sender,
-                &self.storage_module,
-                range,
-            ),
-            crate::storage_module_service::PackSend::Deferred
-        ) {
-            self.deferred_expiry_packs.push(range);
-        }
     }
 
     /// React to an in-place VDF re-anchor after a deep reorg. The seed buffer's
@@ -1103,18 +980,13 @@ impl PartitionMiningService {
     fn apply_broadcast(&mut self, evt: &MiningBroadcastEvent) {
         match evt {
             MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
-                self.state.retry_deferred_expiry_packs();
                 self.state.update_difficulty(h.diff);
             }
-            MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration {
-                partition_hashes,
-                update_height,
-            }) => {
-                self.state
-                    .handle_partitions_expiration(partition_hashes, *update_height);
-            }
+            // The storage module service is the only writer of a slot change:
+            // the same epoch's assignment update moves an expired slot to
+            // capacity. Mining reads the module's assignment on every seed.
+            MiningBroadcastEvent::PartitionsExpiration(_) => {}
             MiningBroadcastEvent::Reanchored => {
-                self.state.retry_deferred_expiry_packs();
                 self.state.handle_reanchored();
             }
             MiningBroadcastEvent::Seed(_) => {
@@ -1129,10 +1001,7 @@ impl PartitionMiningService {
         let mut batch = vec![first];
         while let Ok(queued) = self.broadcast_rx.try_recv() {
             match queued.as_ref() {
-                MiningBroadcastEvent::Seed(_) => {
-                    self.state.retry_deferred_expiry_packs();
-                    batch.push(queued);
-                }
+                MiningBroadcastEvent::Seed(_) => batch.push(queued),
                 // A reanchor rewrites the seed values the queued seeds carry.
                 // Only seeds broadcast after the reanchor match the healed
                 // buffer, so the collected batch is stale.
@@ -1152,10 +1021,6 @@ impl PartitionMiningService {
         // needs the tip's geometry, not the legacy default.
         self.state.refresh_mining_context();
         self.state.check_startup_derive().await;
-        // Monotonic. A stalled runtime retries once, then waits again.
-        let mut expiry_retry = tokio::time::interval(Duration::from_secs(5));
-        expiry_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        expiry_retry.tick().await;
         loop {
             tokio::select! {
                 // Shutdown
@@ -1185,7 +1050,6 @@ impl PartitionMiningService {
                             // them: the drain keeps only the newest ranges
                             // and mines them first.
                             MiningBroadcastEvent::Seed(_) => {
-                                self.state.retry_deferred_expiry_packs();
                                 self.drain_and_mine(Arc::clone(&arc_evt));
                             }
                             other => self.apply_broadcast(other),
@@ -1196,10 +1060,6 @@ impl PartitionMiningService {
                         }
                     }
                 }
-
-                _ = expiry_retry.tick(), if !self.state.deferred_expiry_packs.is_empty() => {
-                    self.state.retry_deferred_expiry_packs();
-                }
             }
         }
         info!("Partition mining service stopped");
@@ -1209,9 +1069,8 @@ impl PartitionMiningService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packing_service::PackingRequest;
     use irys_database::DatabaseProviderTestExt as _;
-    use irys_domain::{PACKING_PARAMS_FILE_NAME, StorageModuleInfo};
+    use irys_domain::StorageModuleInfo;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         ConsensusConfig, ConsensusOptions, DataLedger, DataTransactionLedger, H256, H256List,
@@ -1222,540 +1081,6 @@ mod tests {
     use nodit::interval::ii;
     use std::sync::RwLock;
     use std::sync::atomic::AtomicBool;
-
-    /// One capacity or ledger module (10 chunks, recall range 2) and the
-    /// absolute submodule path an expiry reset writes `packing_params.toml` into.
-    fn open_expiry_module(
-        hash_byte: u8,
-        ledger: Option<(DataLedger, usize)>,
-    ) -> (
-        irys_testing_utils::utils::tempfile::TempDir,
-        Config,
-        Arc<StorageModule>,
-        H256,
-    ) {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(hash_byte);
-        let (ledger_id, slot_index) = match ledger {
-            Some((ledger, slot)) => (Some(ledger.into()), Some(slot)),
-            None => (None, None),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash,
-                miner_address: config.node_config.miner_address(),
-                ledger_id,
-                slot_index,
-            }),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
-        (tmp_dir, config, storage_module, partition_hash)
-    }
-
-    fn expiry_service(
-        config: &Config,
-        storage_module: Arc<StorageModule>,
-    ) -> (
-        PartitionMiningServiceInner,
-        crate::services::ServiceReceivers,
-    ) {
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, receivers) = ServiceSenders::new();
-        let inner = PartitionMiningServiceInner::new(
-            config,
-            service_senders,
-            storage_module,
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
-        (inner, receivers)
-    }
-
-    fn write_synced_data(storage: &StorageModule, byte: u8) {
-        assert!(storage.write_chunk(
-            PartitionChunkOffset::from(0),
-            vec![byte; 32],
-            ChunkType::Data,
-        ));
-        storage.force_sync_pending_chunks().expect("sync data");
-    }
-
-    /// A drive error during the expiry reset stops the node: there is no
-    /// retry. The panic names the module and the operation.
-    #[test]
-    #[should_panic(expected = "expire the ledger slot to capacity failed; stopping the node")]
-    fn failed_expiry_reset_stops_the_node() {
-        irys_domain::panic_on_drive_fault_for_tests();
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x77, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        let (mut inner, _receivers) = expiry_service(&config, Arc::clone(&storage_module));
-        storage_module.fail_next_reset_for_test();
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 11);
-    }
-
-    /// A packing file that cannot be read during an expiry stops the node
-    /// before the index or the assignment change.
-    #[test]
-    fn unreadable_packing_params_on_expiry_stops_the_node_unchanged() {
-        irys_domain::panic_on_drive_fault_for_tests();
-        let (tmp_dir, config, storage_module, partition_hash) =
-            open_expiry_module(0x82, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the expiring slot");
-        let offset = PartitionChunkOffset::from(0);
-        write_synced_data(&storage_module, 0x61);
-        let params_path = tmp_dir.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
-        std::fs::write(&params_path, b"not toml\n").expect("corrupt packing params");
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-
-        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-        }))
-        .expect_err("an unreadable packing file stops the node");
-        let message = panicked
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_default();
-        assert!(message.contains("storage module 0"), "{message}");
-        assert!(
-            message.contains("expire the ledger slot to capacity"),
-            "{message}"
-        );
-        assert_eq!(
-            storage_module.get_chunk_type(&offset),
-            Some(ChunkType::Data),
-            "the index changed before the stop"
-        );
-        assert_eq!(
-            storage_module.partition_assignment().expect("assigned"),
-            submit
-        );
-        assert!(receivers.packing.try_recv().is_err());
-    }
-
-    /// The storage task can install the epoch's new ledger before this task
-    /// reads the expiry notice. The notice must not replace that ledger with
-    /// capacity, and it must not clear the index the assignment update owns.
-    #[test]
-    fn expiry_notice_keeps_a_ledger_installed_before_it() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x77, Some((DataLedger::Submit, 0)));
-        let miner = config.node_config.miner_address();
-        let offset = PartitionChunkOffset::from(0);
-        write_synced_data(&storage_module, 0x11);
-        assert_eq!(
-            storage_module.get_chunk_type(&offset),
-            Some(ChunkType::Data)
-        );
-        storage_module
-            .assign_partition(
-                PartitionAssignment {
-                    partition_hash,
-                    miner_address: miner,
-                    ledger_id: Some(DataLedger::Publish.into()),
-                    slot_index: Some(1),
-                },
-                20,
-            )
-            .expect("install the reassignment");
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-
-        let assignment = storage_module.partition_assignment().expect("assigned");
-        assert_eq!(assignment.partition_hash, partition_hash);
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(1));
-        assert_eq!(
-            storage_module.get_chunk_type(&offset),
-            Some(ChunkType::Data),
-            "the expiry notice must not clear the index of the new ledger"
-        );
-        assert!(receivers.packing.try_recv().is_err());
-    }
-
-    /// A ledger slot stored before the notice is the slot that expired. The
-    /// notice moves it to capacity, keeps the partition's entropy, and packs
-    /// only the expired slot's data span.
-    #[test]
-    fn expiry_notice_resets_a_ledger_stored_before_it() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x78, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        for offset in 2..10_u32 {
-            assert!(storage_module.write_chunk(
-                PartitionChunkOffset::from(offset),
-                vec![0xE7_u8; 32],
-                ChunkType::Entropy,
-            ));
-        }
-        write_synced_data(&storage_module, 0x11);
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-
-        let assignment = storage_module.partition_assignment().expect("assigned");
-        assert_eq!(assignment.partition_hash, partition_hash);
-        assert_eq!(assignment.ledger_id, None);
-        assert_eq!(assignment.slot_index, None);
-        assert_eq!(
-            storage_module.get_intervals(ChunkType::Entropy),
-            vec![irys_types::partition_chunk_offset_ii!(2, 9)],
-            "the partition's entropy is kept"
-        );
-        let request = receivers
-            .packing
-            .try_recv()
-            .expect("the data span is packed");
-        assert_eq!(*request.chunk_range().0.start(), 0);
-        assert_eq!(*request.chunk_range().0.end(), 1);
-        assert!(
-            receivers.packing.try_recv().is_err(),
-            "the entropy is not packed again"
-        );
-    }
-
-    fn fill_expiry_packing_channel(inner: &PartitionMiningServiceInner) {
-        use tokio::sync::mpsc::error::TrySendError;
-        let sender = inner.service_senders.packing_sender();
-        let range = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 0));
-        loop {
-            let request =
-                PackingRequest::new(Arc::clone(&inner.storage_module), range).expect("assigned");
-            match sender.try_send(request) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => break,
-                Err(TrySendError::Closed(_)) => panic!("packing channel closed while filling"),
-            }
-        }
-    }
-
-    fn count_full_expiry_spans(receivers: &mut crate::services::ServiceReceivers) -> usize {
-        let mut full = 0_usize;
-        while let Ok(request) = receivers.packing.try_recv() {
-            if *request.chunk_range().0.start() == 0 && *request.chunk_range().0.end() == 9 {
-                full += 1;
-            }
-        }
-        full
-    }
-
-    /// The channel has room. Expiry stores capacity and sends the span once.
-    /// A later retry does not send it again.
-    #[test]
-    fn open_channel_expiry_sends_the_span_once() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x81, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-
-        assert_eq!(
-            storage_module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert_eq!(count_full_expiry_spans(&mut receivers), 1);
-        inner.retry_deferred_expiry_packs();
-        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
-    }
-
-    /// The channel is full when expiry stores capacity. The span stays queued
-    /// and is sent once the channel can take it.
-    #[test]
-    #[tracing_test::traced_test]
-    fn full_channel_expiry_sends_the_kept_span_after_room() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x82, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-        fill_expiry_packing_channel(&inner);
-
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-
-        assert_eq!(
-            storage_module.partition_assignment().unwrap().ledger_id,
-            None,
-            "the capacity assignment is stored before the send"
-        );
-        assert_eq!(
-            count_full_expiry_spans(&mut receivers),
-            0,
-            "a saturated channel does not accept the expiry span"
-        );
-        assert!(
-            logs_contain("Deferring packing request until the channel accepts it"),
-            "a saturated channel keeps the span"
-        );
-        assert!(
-            !logs_contain("Dropping packing request"),
-            "a kept span is not logged as dropped"
-        );
-
-        inner.retry_deferred_expiry_packs();
-        assert_eq!(
-            count_full_expiry_spans(&mut receivers),
-            1,
-            "the kept span is sent once the channel is empty"
-        );
-        inner.retry_deferred_expiry_packs();
-        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
-    }
-
-    /// Data written after the reset, before the deferred send, is not packed.
-    #[test]
-    fn full_channel_expiry_does_not_pack_a_span_that_became_data() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x83, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-        fill_expiry_packing_channel(&inner);
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
-
-        for offset in 0..10_u32 {
-            assert!(storage_module.write_chunk(
-                PartitionChunkOffset::from(offset),
-                vec![0xD4_u8; 32],
-                ChunkType::Data,
-            ));
-        }
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
-
-        inner.retry_deferred_expiry_packs();
-        assert!(
-            receivers.packing.try_recv().is_err(),
-            "data that landed before the deferred send is not packed"
-        );
-    }
-
-    /// Only the offsets that are still uninitialized are packed on the retry.
-    #[test]
-    fn full_channel_expiry_packs_only_the_offsets_still_uninitialized() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x84, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-        fill_expiry_packing_channel(&inner);
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
-
-        assert!(storage_module.write_chunk(
-            PartitionChunkOffset::from(0),
-            vec![0xD4_u8; 32],
-            ChunkType::Data,
-        ));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
-
-        inner.retry_deferred_expiry_packs();
-        let request = receivers
-            .packing
-            .try_recv()
-            .expect("the uninitialized tail is packed");
-        assert_eq!(*request.chunk_range().0.start(), 1);
-        assert_eq!(*request.chunk_range().0.end(), 9);
-        assert!(receivers.packing.try_recv().is_err());
-    }
-
-    /// A closed packing channel keeps the span. A later retry still holds it.
-    #[test]
-    fn closed_channel_expiry_keeps_the_span() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x85, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        let (mut inner, receivers) = expiry_service(&config, Arc::clone(&storage_module));
-        drop(receivers);
-
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-
-        assert_eq!(
-            storage_module.partition_assignment().unwrap().ledger_id,
-            None
-        );
-        assert_eq!(inner.deferred_expiry_packs.len(), 1);
-        inner.retry_deferred_expiry_packs();
-        assert_eq!(inner.deferred_expiry_packs.len(), 1);
-    }
-
-    /// A later reset replaces a span the channel has not accepted. The retry
-    /// sends that new span, not the one from the previous reset.
-    #[test]
-    fn later_expiry_replaces_a_deferred_span() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x86, Some((DataLedger::Submit, 0)));
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the slot before the notice");
-        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
-        fill_expiry_packing_channel(&inner);
-
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
-        assert_eq!(inner.deferred_expiry_packs.len(), 1);
-
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 30);
-        assert_eq!(
-            inner.deferred_expiry_packs.len(),
-            1,
-            "the later reset replaces the span the channel did not take"
-        );
-        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
-
-        inner.retry_deferred_expiry_packs();
-        assert!(inner.deferred_expiry_packs.is_empty());
-        assert_eq!(
-            count_full_expiry_spans(&mut receivers),
-            1,
-            "the retry sends the span from the later reset, once"
-        );
-        inner.retry_deferred_expiry_packs();
-        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
-    }
-
-    /// The height check can see the expiring slot and then drop its lock.
-    /// The storage task can store this epoch's ledger before the capacity
-    /// reset runs. That reset must see the new slot and leave it in place.
-    #[test]
-    fn expire_to_capacity_keeps_a_ledger_stored_after_the_height_check() {
-        let (_tmp, config, storage_module, partition_hash) =
-            open_expiry_module(0x79, Some((DataLedger::Submit, 0)));
-        let miner = config.node_config.miner_address();
-        let submit = storage_module.partition_assignment().expect("assigned");
-        storage_module
-            .assign_partition(submit, 10)
-            .expect("store the expiring slot");
-        let (inner, _receivers) = expiry_service(&config, Arc::clone(&storage_module));
-        // The notice sampled this slot. The sample says "reset".
-        assert!(!inner.ledger_slot_stored_since(20));
-
-        storage_module
-            .assign_partition(
-                PartitionAssignment {
-                    partition_hash,
-                    miner_address: miner,
-                    ledger_id: Some(DataLedger::Publish.into()),
-                    slot_index: Some(1),
-                },
-                20,
-            )
-            .expect("install the epoch ledger");
-        let offset = PartitionChunkOffset::from(0);
-        write_synced_data(&storage_module, 0x21);
-
-        assert!(
-            inner.expire_to_capacity(partition_hash, 20).is_none(),
-            "the capacity reset must not run"
-        );
-
-        let assignment = storage_module.partition_assignment().expect("assigned");
-        assert_eq!(assignment.partition_hash, partition_hash);
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(1));
-        assert_eq!(
-            storage_module.get_chunk_type(&offset),
-            Some(ChunkType::Data),
-            "a ledger stored after the height check must keep its index"
-        );
-        let (_assignment, height) = storage_module
-            .partition_assignment_with_height()
-            .expect("packing params");
-        assert_eq!(height, Some(20));
-    }
-
-    /// Expiry named hash H. The storage task then assigned a different hash,
-    /// still stored below the notice. The reset must not replace that
-    /// assignment or stamp the expiry height onto it.
-    #[test]
-    fn expire_to_capacity_leaves_a_hash_the_notice_did_not_name() {
-        let (_tmp, config, storage_module, expired_hash) =
-            open_expiry_module(0x7a, Some((DataLedger::Submit, 0)));
-        let miner = config.node_config.miner_address();
-        let other_hash = H256::repeat_byte(0x7b);
-        storage_module
-            .assign_partition(
-                PartitionAssignment {
-                    partition_hash: other_hash,
-                    miner_address: miner,
-                    ledger_id: Some(DataLedger::Publish.into()),
-                    slot_index: Some(1),
-                },
-                15,
-            )
-            .expect("assign a different hash below the notice");
-        let offset = PartitionChunkOffset::from(0);
-        write_synced_data(&storage_module, 0x31);
-        let (inner, _receivers) = expiry_service(&config, Arc::clone(&storage_module));
-
-        assert!(
-            inner.expire_to_capacity(expired_hash, 40).is_none(),
-            "a different hash must not be reset"
-        );
-
-        let assignment = storage_module.partition_assignment().expect("assigned");
-        assert_eq!(assignment.partition_hash, other_hash);
-        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
-        assert_eq!(assignment.slot_index, Some(1));
-        assert_eq!(
-            storage_module.get_chunk_type(&offset),
-            Some(ChunkType::Data)
-        );
-        let (_assignment, height) = storage_module
-            .partition_assignment_with_height()
-            .expect("packing params");
-        assert_eq!(height, Some(15));
-    }
 
     fn open_recall_miner(
         recall_range: u64,
