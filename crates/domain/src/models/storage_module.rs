@@ -2433,7 +2433,7 @@ impl StorageModule {
             })
             .collect();
         eyre::bail!(
-            "storage module {module_id}: its submodule packing params files disagree ({}); open does not reconcile them. Clear the submodules that do not belong to the partition this drive holds.",
+            "storage module {module_id}: its submodule packing params files disagree ({}); open does not reconcile them. Restore mutually consistent submodule metadata (packing params, intervals and index) from a known-good state, or clear the whole module to discard and repack it; clearing only one submodule leaves the others' labels and rows out of step.",
             listed.join("; ")
         )
     }
