@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795548138917,
+  "lastUpdate": 1795793252048,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -24343,6 +24343,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "08d19215824932d99ed6221ab6b0de93402145e9",
+          "message": "fix: four flaky CI test failures (#1850)\n\n* test(rocks): wait for both ingress proofs before the slot 1 PoA check\n\nThe nonzero-slot test expects both txs to be promoted in one Publish block.\nProof generation starts at inclusion, and each proof is logged before it is\nstored. A block mined in that gap promotes only one tx, so slot 1 holds the\nfirst tx of its block and the tx_index check fails. Wait, without mining, until\nboth proofs are stored.\n\n* fix(shutdown): do not poll a finished ServiceSet shutdown again\n\nWhen a service exits, the node lifecycle waits on the ServiceSet until its\nshutdown future completes, and then calls graceful_shutdown on the same set.\nThe set kept the finished future, so the second wait polled it again and\npanicked with \"async fn resumed after completion\". The lifecycle task then\nstopped and node shutdown hung. Reset the set to an empty one when the shutdown\nfuture completes.\n\n* fix(tx-selector): accept pruned txids that wait for the txid_set scrub\n\nThe mempool prune removes a tx and marks it invalid in one write. The cache\nservice removes the txid from CachedDataRoot.txid_set later, on its own thread.\nA block produced between the two steps sees a publish candidate that is in\nneither the mempool nor the DB, and the debug assert stopped block production.\n\nRelease builds already skip such a txid. The debug assert now fires only for a\nmissing txid that the mempool does not know as invalid. A new test prunes a tx\nwithout the scrub and runs tx selection.\n\n* test(block-stream): stop each node before the test returns\n\nThese tests returned with the node still running. The process could then exit\nwhile a storage module was syncing to RocksDB, and RocksDB aborted with\n\"pthread lock: Invalid argument\".\n\n* test: stop the node in three more tests before they return\n\nThese tests returned with the node still running, the same defect as the\nblock_stream tests. The process can exit while a storage module syncs to\nRocksDB.\n\n* docs(tx-selector): state the limit of the stale-txid debug assert",
+          "timestamp": "2026-11-27T15:01:11Z",
+          "tree_id": "1e4c29a5cebbb7598a3d5cc9e5e2e503bd6e7d54",
+          "url": "https://github.com/Irys-xyz/irys/commit/08d19215824932d99ed6221ab6b0de93402145e9"
+        },
+        "date": 1795793250496,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012452,
+            "range": "± 0.000373",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119926,
+            "range": "± 0.00272",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.216643,
+            "range": "± 0.018296",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.223856,
+            "range": "± 0.345077",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.068996,
+            "range": "± 0.000977",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 689.404052,
+            "range": "± 21.597113",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 940.514571,
+            "range": "± 54.241772",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120074,
+            "range": "± 0.001912",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1206.635101,
+            "range": "± 10.155081",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1586.179088,
+            "range": "± 11.21203",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027823,
+            "range": "± 0.000988",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 138.013354,
+            "range": "± 1.139077",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 181.698411,
+            "range": "± 1.401046",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
