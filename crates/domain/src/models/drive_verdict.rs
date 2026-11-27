@@ -12,7 +12,6 @@ use irys_types::{
     Config, DataLedger, H256, IrysAddress, PartitionChunkOffset, partition::PartitionAssignment,
     partition_chunk_offset_ie,
 };
-use tracing::{info, warn};
 
 use super::storage_module::{
     PACKING_PARAMS_FILE_NAME, PACKING_PARAMS_VERSION, PackingParams, StorageModuleInfo,
@@ -152,6 +151,27 @@ fn is_foreign(p: &PackingParams, id: &ChainIdentity) -> Option<String> {
     None
 }
 
+/// An error naming the first drive whose recorded file is foreign (newer
+/// version, other chain id, other packing address). The node does not start
+/// with such a drive, and no drive is skipped.
+pub fn refuse_foreign_drives(
+    drives: &[(PathBuf, DriveFile)],
+    identity: &ChainIdentity,
+) -> eyre::Result<()> {
+    for (path, file) in drives {
+        if let DriveFile::Recorded(p) = file
+            && let Some(why) = is_foreign(p, identity)
+        {
+            eyre::bail!(
+                "drive {} is not this node's: {why} (packing params at {})",
+                path.display(),
+                path.join(PACKING_PARAMS_FILE_NAME).display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Ledger priority for placement: known ledgers in id order (Publish, Submit,
 /// OneYear, ThirtyDay), then other ids, then capacity.
 fn placement_key(a: &PartitionAssignment) -> (u32, H256) {
@@ -243,17 +263,7 @@ fn unheld(inputs: &VerdictInputs<'_>) -> Vec<PartitionAssignment> {
 /// packing address) is an error naming its path: the node does not run with
 /// a drive it cannot account for, and no drive is skipped.
 pub fn decide(inputs: &VerdictInputs<'_>) -> eyre::Result<Vec<DriveDecision>> {
-    for (path, file) in inputs.drives {
-        if let DriveFile::Recorded(p) = file
-            && let Some(why) = is_foreign(p, inputs.identity)
-        {
-            eyre::bail!(
-                "drive {} is not this node's: {why} (packing params at {})",
-                path.display(),
-                path.join(PACKING_PARAMS_FILE_NAME).display()
-            );
-        }
-    }
+    refuse_foreign_drives(inputs.drives, inputs.identity)?;
     let holders = first_holders(inputs);
     let by_hash: HashMap<H256, PartitionAssignment> = inputs
         .assignments
@@ -419,50 +429,28 @@ pub fn drive_verdict_inputs_from_disk(
         .collect()
 }
 
-/// The assignment a drive is opened (or kept) with, or `None` when it is
-/// opened idle. Opening never replaces a recorded partition: `Assign` applies
-/// only to a drive that records no partition or records that same hash. A
-/// Released drive that receives a new partition, and a `Clear` drive, open
-/// idle; the storage module service wipes and reassigns them.
-fn applied_assignment(decision: &DriveDecision, file: &DriveFile) -> Option<PartitionAssignment> {
-    let DriveAction::Assign(assignment) = decision.action else {
-        return None;
-    };
-    let recorded = match file {
-        DriveFile::Recorded(params) => params.partition_hash,
-        DriveFile::Missing => None,
-    };
-    recorded
-        .is_none_or(|hash| hash == assignment.partition_hash)
-        .then_some(assignment)
-}
-
-/// One [`StorageModuleInfo`] per configured drive, in id order: every drive
-/// is opened, and a module id is its configured path index.
-pub fn storage_module_infos(
-    drives: &[(PathBuf, DriveFile)],
-    decisions: &[DriveDecision],
-    num_chunks: u32,
-) -> Vec<StorageModuleInfo> {
-    decisions
+/// One parked [`StorageModuleInfo`] per configured drive, in id order: every
+/// drive is opened with no assignment, so open never changes what a drive
+/// holds, and a module id is its configured path index. The storage module
+/// service applies the startup verdict from the first assignment update.
+pub fn parked_storage_module_infos(paths: &[PathBuf], num_chunks: u32) -> Vec<StorageModuleInfo> {
+    paths
         .iter()
-        .map(|decision| StorageModuleInfo {
-            id: decision.id,
-            partition_assignment: applied_assignment(decision, &drives[decision.id].1),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, num_chunks),
-                decision.path.clone(),
-            )],
+        .enumerate()
+        .map(|(id, path)| StorageModuleInfo {
+            id,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path.clone())],
         })
         .collect()
 }
 
-/// The modules startup would open for `snapshot`'s assignments to this
-/// miner, reading the configured drives' files: [`decide`] then
-/// [`storage_module_infos`]. Startup is never in sync. For tests that open
-/// drives without a running node; a node applies verdicts at startup
-/// (`chain.rs`) and in the storage module service. Panics where startup
-/// would fail: an unreadable or foreign drive file.
+/// For tests without a running node or service: one module per configured
+/// drive with the assignment the startup verdict gives it for `snapshot`'s
+/// assignments to this miner (`None` for a drive that waits, idles or is
+/// cleared). Open accepts such an assignment only for a fresh drive or one
+/// whose file already records it. Panics where startup would fail: an
+/// unreadable or foreign drive file.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn startup_storage_module_infos(
     snapshot: &crate::EpochSnapshot,
@@ -491,67 +479,13 @@ pub fn startup_storage_module_infos(
     .expect("no drive is foreign");
     let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
         .expect("num_chunks_in_partition fits u32");
-    storage_module_infos(&drives, &decisions, num_chunks)
-}
-
-/// Logs one INFO line per drive (id, path, verdict, action, recorded and
-/// applied partition, reason), a WARN for each drive left waiting, and a WARN
-/// for each assignment no drive holds or receives.
-pub fn log_decisions(
-    inputs: &VerdictInputs<'_>,
-    decisions: &[DriveDecision],
-    infos: &[StorageModuleInfo],
-) {
-    for decision in decisions {
-        let file = &inputs.drives[decision.id].1;
-        let recorded = match file {
-            DriveFile::Recorded(params) => params.partition_hash,
-            DriveFile::Missing => None,
-        };
-        let applied = infos
-            .iter()
-            .find(|info| info.id == decision.id)
-            .and_then(|info| info.partition_assignment);
-        let (verdict, reason) = (decision.verdict.name(), decision.verdict.reason());
-        let reason = reason.as_str();
-        let action = match &decision.action {
-            DriveAction::Idle => "idle",
-            DriveAction::Assign(_) if applied.is_none() => "idle until the service reassigns",
-            DriveAction::Assign(_) => "assign",
-            DriveAction::Clear => "idle until the service clears",
-        };
-        info!(
-            storage_module.id = decision.id,
-            storage_module.path = %decision.path.display(),
-            drive.verdict = verdict,
-            drive.action = action,
-            partition.recorded = ?recorded,
-            partition.hash = ?applied.map(|pa| pa.partition_hash),
-            partition.ledger_id = ?applied.and_then(|pa| pa.ledger_id),
-            partition.slot_index = ?applied.and_then(|pa| pa.slot_index),
-            drive.reason = reason,
-            epoch.height = inputs.epoch_height,
-            "drive verdict"
-        );
-        match &decision.verdict {
-            DriveVerdict::Wait(why) => warn!(
-                storage_module.id = decision.id,
-                storage_module.path = %decision.path.display(),
-                partition.recorded = ?recorded,
-                drive.reason = %why,
-                "drive is opened idle and left untouched"
-            ),
-            DriveVerdict::Ours | DriveVerdict::Empty | DriveVerdict::Released => {}
+    let mut infos = parked_storage_module_infos(&paths, num_chunks);
+    for (info, decision) in infos.iter_mut().zip(&decisions) {
+        if let DriveAction::Assign(assignment) = decision.action {
+            info.partition_assignment = Some(assignment);
         }
     }
-    for assignment in unplaced(inputs, decisions) {
-        warn!(
-            partition.hash = %assignment.partition_hash,
-            partition.ledger_id = ?assignment.ledger_id,
-            partition.slot_index = ?assignment.slot_index,
-            "no configured drive holds or receives this assigned partition"
-        );
-    }
+    infos
 }
 
 #[cfg(test)]
@@ -1153,47 +1087,20 @@ mod tests {
         assert!(err.contains("drive linked"), "{err}");
     }
 
-    /// Every drive is opened and ids are path indexes. Open never replaces a
-    /// recorded partition: a Released drive that receives a new partition
-    /// opens idle, as does a Clear drive.
+    /// Startup opens every drive parked, with its path index as module id.
     #[test]
-    fn infos_open_every_drive_and_never_replace_a_recorded_partition() {
-        let drives = [
-            drive(0, rec(v2(9, Some(DataLedger::Submit), Some(3), 200))),
-            drive(1, rec(v2(1, Some(DataLedger::Publish), Some(0), 10))),
-            drive(2, DriveFile::Missing),
-            drive(3, rec(v2(7, None, None, 10))),
-            drive(4, rec(v2(8, None, None, 10))),
-        ];
-        let assignments = [
-            pa(1, Some(DataLedger::Publish), Some(0)),
-            pa(2, None, None),
-            pa(3, None, None),
-        ];
-        let (d, _) = run(&drives, &assignments, false);
-        assert_eq!(d[3].verdict, DriveVerdict::Released);
-        assert_eq!(assigned_hash(&d[3]), Some(h(3)));
-        assert_eq!(d[4].action, DriveAction::Clear);
-
-        let infos = storage_module_infos(&drives, &d, 10);
-        let got: Vec<(usize, Option<H256>, PathBuf)> = infos
+    fn startup_opens_every_drive_parked() {
+        let paths = [PathBuf::from("/d0"), PathBuf::from("/d1")];
+        let infos = parked_storage_module_infos(&paths, 10);
+        let got: Vec<(usize, Option<PartitionAssignment>, PathBuf)> = infos
             .iter()
-            .map(|i| {
-                (
-                    i.id,
-                    i.partition_assignment.map(|a| a.partition_hash),
-                    i.submodules[0].1.clone(),
-                )
-            })
+            .map(|i| (i.id, i.partition_assignment, i.submodules[0].1.clone()))
             .collect();
         assert_eq!(
             got,
             vec![
                 (0, None, PathBuf::from("/d0")),
-                (1, Some(h(1)), PathBuf::from("/d1")),
-                (2, Some(h(2)), PathBuf::from("/d2")),
-                (3, None, PathBuf::from("/d3")),
-                (4, None, PathBuf::from("/d4")),
+                (1, None, PathBuf::from("/d1")),
             ]
         );
     }

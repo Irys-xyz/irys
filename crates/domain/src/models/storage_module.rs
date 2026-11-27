@@ -2221,19 +2221,11 @@ thread_local! {
     /// Test open returns `EFBIG` from the logical-size check and does not
     /// call `set_len`. Production still calls `set_len`.
     static CHUNKS_LEN_EFBIG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test open fails after the reset marker is durable and before
-    /// `crc_complete` is cleared. Production writes both, marker first.
-    static FAIL_AFTER_OPEN_RESET_MARKER: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
     /// Test open fails to read the packing params back after writing them.
     static FAIL_OPEN_PARAMS_READBACK: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     /// Test open fails the per-submodule re-read in the uniform-record check.
     static FAIL_OPEN_UNIFORM_READBACK: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-    /// Test open fails after a slot exit rewrote a submodule's interval file
-    /// and before its coverage drop and the packing params rebind.
-    static FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     /// Runs once in a slot exit before the relabel reads the queued repairs.
     static BEFORE_KEEP_ENTROPY_RELABEL: std::cell::Cell<Option<fn(&StorageModule)>> =
@@ -2314,35 +2306,14 @@ fn recover_read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 impl StorageModule {
     /// Initializes a new StorageModule. The submodule index is RocksDB v1.
     ///
-    /// A slot change applied here records no trusted assigned height: this
-    /// caller did not say which epoch approved it. Startup uses
-    /// [`Self::new_approved`].
+    /// Open never changes what a drive holds. An assignment is accepted for
+    /// a drive whose file is missing (a fresh drive) or already records
+    /// exactly that assignment; any other is refused. Startup opens every
+    /// drive parked, and the storage module service applies the verdict.
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
         Self::open(
             storage_module_info,
             config,
-            None,
-            #[cfg(feature = "bench")]
-            None,
-            #[cfg(feature = "bench")]
-            None,
-        )
-    }
-
-    /// Open with an assignment the startup drive verdict approved against the
-    /// epoch at `approved_epoch_height`. A slot change applied at open records
-    /// that height as the file's assigned height, as a runtime store records
-    /// the epoch that installed the slot. The older-epoch guard and a later
-    /// release then work as for any other stored assignment.
-    pub fn new_approved(
-        storage_module_info: &StorageModuleInfo,
-        config: &Config,
-        approved_epoch_height: u64,
-    ) -> eyre::Result<Self> {
-        Self::open(
-            storage_module_info,
-            config,
-            Some(approved_epoch_height),
             #[cfg(feature = "bench")]
             None,
             #[cfg(feature = "bench")]
@@ -2364,7 +2335,7 @@ impl StorageModule {
         split: Arc<SplitBacking>,
         index: BenchIndex,
     ) -> eyre::Result<Self> {
-        Self::open(storage_module_info, config, None, Some(split), Some(index))
+        Self::open(storage_module_info, config, Some(split), Some(index))
     }
 
     /// Both the span built at open and the loaded file must cover the partition.
@@ -2393,7 +2364,6 @@ impl StorageModule {
     fn open(
         storage_module_info: &StorageModuleInfo,
         config: &Config,
-        approved_epoch_height: Option<u64>,
         #[cfg(feature = "bench")] split: Option<Arc<SplitBacking>>,
         #[cfg(feature = "bench")] index: Option<BenchIndex>,
     ) -> eyre::Result<Self> {
@@ -2501,6 +2471,26 @@ impl StorageModule {
                 config,
                 storage_module_info.partition_assignment,
             )?;
+            // Open never changes what a drive holds: the storage module
+            // service applies every transition. An assignment must be the one
+            // the file records.
+            if let (Some(params), Some(pa)) =
+                (&existing_params, storage_module_info.partition_assignment)
+            {
+                ensure!(
+                    (params.partition_hash, params.ledger, params.slot)
+                        == (Some(pa.partition_hash), pa.ledger_id, pa.slot_index),
+                    "storage module {}: packing params at {} record partition {:?} ledger {:?} slot {:?}, not the assignment to open with ({} ledger {:?} slot {:?}); open does not change what a drive holds",
+                    storage_module_info.id,
+                    params_path.display(),
+                    params.partition_hash,
+                    params.ledger,
+                    params.slot,
+                    pa.partition_hash,
+                    pa.ledger_id,
+                    pa.slot_index
+                );
+            }
             // A bench split writes its own labels before the first open.
             #[cfg(feature = "bench")]
             let check_labels = split.is_none();
@@ -2691,10 +2681,6 @@ impl StorageModule {
         // intact module. `finish_pending_resets` clears the flag again.
         for index in &reset_dbs {
             index.set_reset_in_progress()?;
-            #[cfg(test)]
-            if FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.replace(false)) {
-                eyre::bail!("injected failure after the open reset marker");
-            }
             index.set_chunk_crc_complete(false)?;
         }
 
@@ -2719,29 +2705,10 @@ impl StorageModule {
             params.partition_hash = hash;
             params.ledger = ledger;
             params.slot = slot;
-            // Only an assignment the startup verdict handed to this open was
-            // approved at that epoch. A parked open (no assignment) that
-            // rebinds disagreeing submodule files to the first file's slot was
-            // not, so it claims no height.
-            let approved = approved_epoch_height
-                .filter(|_| storage_module_info.partition_assignment.is_some());
-            match approved {
-                // The startup verdict accepted this assignment at that epoch,
-                // so it is the height that installed it. Recording it keeps
-                // the older-epoch guard and a later release working; clearing
-                // it would erase a trusted height the file already had.
-                Some(height) => {
-                    params.last_updated_height = Some(height);
-                    if params.is_v2() {
-                        params.assigned_height = Some(height);
-                    }
-                }
-                // No approving epoch: claim no trusted height.
-                None => {
-                    params.last_updated_height = Some(0);
-                    params.assigned_height = None;
-                }
-            }
+            // Only a parked open rebinds (disagreeing submodule files, to the
+            // first file's slot). No epoch approved it: claim no trusted height.
+            params.last_updated_height = Some(0);
+            params.assigned_height = None;
             params.write_to_disk(&path)?;
         }
         // The service judges this drive from this in-memory copy. Open read
@@ -6926,10 +6893,6 @@ impl StorageModule {
             let mut file = get_atomic_file(&path)?;
             file.write_all(serde_json::to_string(&kept)?.as_bytes())?;
             file.commit()?;
-            #[cfg(test)]
-            if FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS.with(|flag| flag.replace(false)) {
-                eyre::bail!("injected failure after the open keep-entropy intervals");
-            }
             // The whole submodule, `Entropy` included: every coverage row names
             // the old slot. Offset (checksum) rows are not touched.
             submodule
@@ -15252,49 +15215,16 @@ mod tests {
 
         storage.abandon_on_drop_for_test();
         drop(storage);
+        // Startup opens parked; the service's verdict then repeats the exit.
         let mut info = crc_hold_info(tmp.path());
-        info.partition_assignment = Some(next);
+        info.partition_assignment = None;
         let storage = StorageModule::new(&info, &config)?;
+        storage.reset_keep_entropy_with_assignment(next, 8)?;
         assert_slot_exited(&storage, &entropy, &metas, data_root, next)?;
         assert_eq!(
             storage.get_intervals(ChunkType::Uninitialized),
             vec![partition_chunk_offset_ii!(0, 0)]
         );
-        drop(storage);
-        drop(tmp);
-        Ok(())
-    }
-
-    /// Open with the same partition leaving a ledger slot keeps the entropy
-    /// (it used to wipe the whole partition) and drops the old slot's data
-    /// and rows. A file that records no partition gaining one still wipes.
-    #[test]
-    fn open_slot_exit_keeps_entropy_and_a_new_partition_still_wipes() -> eyre::Result<()> {
-        let (tmp, config, storage) = open_assigned_module("keep_entropy_open", 30)?;
-        let (entropy, metas, data_root) = seed_slot_exit(&storage)?;
-        let next = publish_slot_one(&storage);
-        drop(storage);
-        let mut info = crc_hold_info(tmp.path());
-        info.partition_assignment = Some(next);
-        let storage = StorageModule::new(&info, &config)?;
-        assert_slot_exited(&storage, &entropy, &metas, data_root, next)?;
-        drop(storage);
-
-        let (tmp, config, storage) = open_assigned_module("keep_entropy_open_new", 30)?;
-        let _ = seed_slot_exit(&storage)?;
-        drop(storage);
-        forget_recorded_partition(&tmp.path().join("hdd0"))?;
-        let mut info = crc_hold_info(tmp.path());
-        info.partition_assignment = Some(next);
-        let storage = StorageModule::new(&info, &config)?;
-        for raw in 0..=3_u32 {
-            assert_eq!(
-                live_label(&storage, raw),
-                Some(ChunkType::Uninitialized),
-                "{raw}"
-            );
-        }
-        assert_eq!(tx_rows_in(&storage, 0, 3)?, 0);
         drop(storage);
         drop(tmp);
         Ok(())
@@ -15432,140 +15362,6 @@ mod tests {
         Ok(())
     }
 
-    /// The second file write fails, which stops the node: `hdd0` names slot 1,
-    /// `hdd1` slot 0, as a crash at that write leaves them. Rows for the old
-    /// slot under `hdd0` (whose file names slot 1) must not survive an open,
-    /// whichever slot the open asks for: every submodule leaves its recorded
-    /// slot.
-    #[test]
-    fn slot_exit_with_disagreeing_files_settles_one_slot_on_open() -> eyre::Result<()> {
-        for (case, wanted) in [("new", 1_usize), ("old", 0_usize)] {
-            let tmp = TempDirBuilder::new()
-                .prefix(&format!("keep_entropy_two_park_{case}"))
-                .build();
-            let config = testing_config(tmp.path(), 32, 4);
-            let hash = H256::repeat_byte(0x5B);
-            let root = H256::repeat_byte(0x46);
-            let storage = two_submodules(tmp.path(), &config, Some(submit_slot(&config, hash, 0)))?;
-            seed_two_submodules(&storage, root)?;
-            storage.fail_sync_after(SyncFailurePoint::AssignmentFileWrite, 1);
-            let err = storage
-                .reset_keep_entropy_with_assignment(submit_slot(&config, hash, 1), 7)
-                .expect_err("the second file write fails");
-            assert!(
-                format!("{err:#}").contains("AssignmentFileWrite"),
-                "{err:#}"
-            );
-            assert_eq!(recorded_slot(tmp.path(), "hdd0")?, Some(1));
-            assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(0));
-            // Old-slot rows under `hdd0`, whose file names slot 1.
-            let offset = PartitionChunkOffset::from(0);
-            assert!(storage.write_chunk(offset, vec![0xD1; 32], ChunkType::Data));
-            storage.force_sync_pending_chunks()?;
-            let (_, submodule) = storage.get_submodule_for_offset(offset)?;
-            submodule.db.update(|tx| {
-                tx.add_tx_leaf_binding(
-                    root,
-                    &TxLeafBinding {
-                        data_root: root,
-                        prefix_hash: H256::zero(),
-                    },
-                )?;
-                tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))
-            })?;
-            assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
-            assert_eq!(tx_rows_in(&storage, 0, 1)?, 1);
-            drop(storage);
-
-            let want = submit_slot(&config, hash, wanted);
-            let opened = two_submodules(tmp.path(), &config, Some(want))?;
-            for raw in [0_u32, 2] {
-                assert_eq!(
-                    live_label(&opened, raw),
-                    Some(ChunkType::Uninitialized),
-                    "{case} {raw}"
-                );
-                let nth = usize::from(raw >= 2);
-                let file = read_intervals_file(&submodule_interval_path(&opened, nth))?;
-                assert_eq!(
-                    file.get_at_point(PartitionChunkOffset::from(raw)).copied(),
-                    Some(ChunkType::Uninitialized),
-                    "{case} {raw}"
-                );
-                assert!(
-                    offset_meta_at(&opened, raw)?.is_none(),
-                    "{case}: offset row at {raw}"
-                );
-                assert!(
-                    data_path_at(&opened, raw)?.is_none(),
-                    "{case}: proof row at {raw}"
-                );
-            }
-            for raw in [1_u32, 3] {
-                assert_eq!(
-                    live_label(&opened, raw),
-                    Some(ChunkType::Entropy),
-                    "{case} {raw}"
-                );
-            }
-            assert_eq!(tx_rows_in(&opened, 0, 1)?, 0, "{case}: coverage in hdd0");
-            assert_eq!(tx_rows_in(&opened, 2, 3)?, 0, "{case}: coverage in hdd1");
-            assert!(
-                opened.collect_data_root_infos(root)?.0.is_empty(),
-                "{case}: infos"
-            );
-            assert!(
-                opened.pending_body_migrations()?.is_empty(),
-                "{case}: body jobs"
-            );
-            assert_eq!(recorded_slot(tmp.path(), "hdd0")?, Some(wanted), "{case}");
-            assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(wanted), "{case}");
-            assert_eq!(opened.partition_assignment(), Some(want));
-            drop(opened);
-            drop(tmp);
-        }
-        Ok(())
-    }
-
-    /// A file that records no partition (a parked open writes one for a new
-    /// submodule directory) is not a disagreeing file. An open with the
-    /// assignment keeps a sibling's data when that sibling's file names the
-    /// wanted slot; only the no-hash submodule gains the partition.
-    #[test]
-    fn open_keeps_a_sibling_on_the_wanted_slot_beside_a_no_hash_file() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new()
-            .prefix("keep_entropy_nohash_open")
-            .build();
-        let config = testing_config(tmp.path(), 32, 4);
-        let hash = H256::repeat_byte(0x5C);
-        let slot = submit_slot(&config, hash, 0);
-        let root = H256::repeat_byte(0x47);
-        let storage = two_submodules(tmp.path(), &config, Some(slot))?;
-        seed_two_submodules(&storage, root)?;
-        drop(storage);
-        forget_recorded_partition(&tmp.path().join("hdd1"))?;
-
-        let opened = two_submodules(tmp.path(), &config, Some(slot))?;
-        assert_eq!(
-            live_label(&opened, 0),
-            Some(ChunkType::Data),
-            "hdd0 data relabelled"
-        );
-        assert_eq!(file_label(&opened, 0)?, Some(ChunkType::Data));
-        assert_eq!(tx_rows_in(&opened, 0, 1)?, 1, "hdd0 coverage dropped");
-        assert!(!opened.collect_data_root_infos(root)?.0.is_empty());
-        assert_eq!(
-            live_label(&opened, 2),
-            Some(ChunkType::Uninitialized),
-            "hdd1 gains the partition"
-        );
-        assert_eq!(recorded_slot(tmp.path(), "hdd0")?, Some(0));
-        assert_eq!(recorded_slot(tmp.path(), "hdd1")?, Some(0));
-        drop(opened);
-        drop(tmp);
-        Ok(())
-    }
-
     /// A parked open never takes its slot from a file that records no
     /// partition, whichever submodule comes first: the held partition's data
     /// and files stay as they were.
@@ -15634,9 +15430,11 @@ mod tests {
         assert_eq!(recorded.slot, Some(1));
         storage.abandon_on_drop_for_test();
         drop(storage);
+        // Startup opens parked; the service's verdict then repeats the exit.
         let mut info = crc_hold_info(tmp.path());
-        info.partition_assignment = Some(next);
+        info.partition_assignment = None;
         let storage = StorageModule::new(&info, &config)?;
+        storage.reset_keep_entropy_with_assignment(next, 8)?;
         assert_slot_exited(&storage, &entropy, &metas, data_root, next)?;
         drop(storage);
         drop(tmp);
@@ -23056,9 +22854,10 @@ mod tests {
             drop(reopened);
 
             let exited = StorageModule::new(
-                &module_info(&sub, Some(leave_ledger(&config, hash))),
+                &module_info(&sub, Some(submit_slot(&config, hash, 0))),
                 &config,
             )?;
+            exited.reset_keep_entropy_with_assignment(leave_ledger(&config, hash), 0)?;
             assert_eq!(
                 exited.get_chunk_type(&PartitionChunkOffset::from(0)),
                 Some(ChunkType::Entropy),
@@ -23090,7 +22889,7 @@ mod tests {
         let (_tmp, config, sub) = seed_assigned_entropy("refuse_chain", hash)?;
         let other = config_with_chain_id(&config, config.consensus.chain_id + 1);
         let err = StorageModule::new(
-            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
             &other,
         )
         .expect_err("stored chain id does not match this open");
@@ -23135,9 +22934,10 @@ mod tests {
         drop(reopened);
 
         let exited = StorageModule::new(
-            &module_info(&sub, Some(leave_ledger(&config, hash))),
+            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
             &config,
         )?;
+        exited.reset_keep_entropy_with_assignment(leave_ledger(&config, hash), 0)?;
         assert_eq!(
             exited.get_chunk_type(&PartitionChunkOffset::from(0)),
             Some(ChunkType::Entropy),
@@ -23151,110 +22951,37 @@ mod tests {
         Ok(())
     }
 
-    /// Arms a failure after the open reset marker and clears it on drop.
-    struct OpenResetMarkerFail;
-
-    impl OpenResetMarkerFail {
-        fn arm() -> Self {
-            FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.set(true));
-            Self
-        }
-    }
-
-    impl Drop for OpenResetMarkerFail {
-        fn drop(&mut self) {
-            FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.set(false));
-        }
-    }
-
-    /// Startup applies a same-partition slot change at open, approved by the
-    /// drive verdict at epoch 2000. The file records 2000 as its trusted
-    /// assigned height, not "no height", so the verdict still guards the
-    /// drive: an older epoch (1500) asking for the old slot waits, and a later
-    /// epoch (3000) that drops the partition releases it. A plain `new` open
-    /// still claims no height.
+    /// Open never changes what a drive holds: an assignment the file does not
+    /// record (another slot, capacity, or a partition on a file that records
+    /// none) is refused, and the file stays byte-identical. The storage
+    /// module service applies such transitions.
     #[test]
-    fn approved_open_slot_change_records_the_approving_epoch() -> eyre::Result<()> {
-        use crate::drive_verdict::{
-            ChainIdentity, DriveAction, DriveFile, DriveVerdict, VerdictInputs, WaitReason, decide,
-        };
-
-        let hash = H256::repeat_byte(0x65);
-        let (_tmp, config, sub) = seed_assigned_entropy("approved_open_height", hash)?;
-        let path = sub.join(PACKING_PARAMS_FILE_NAME);
-        let genesis = H256::repeat_byte(0x9E);
-        PackingParams::from_toml(&path)?
-            .stamped(config.consensus.chain_id, genesis, 1000)
-            .write_to_disk(&path)?;
-        let publish = PartitionAssignment {
-            ledger_id: Some(DataLedger::Publish.into()),
-            ..submit_slot(&config, hash, 0)
-        };
-
-        let module = StorageModule::new_approved(&module_info(&sub, Some(publish)), &config, 2000)?;
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset::from(0)),
-            Some(ChunkType::Entropy),
-            "the slot change keeps the entropy"
-        );
-        let recorded = PackingParams::from_toml(&path)?;
-        assert_eq!(recorded.ledger, Some(DataLedger::Publish.into()));
-        assert_eq!(recorded.trusted_assigned_height(), Some(2000));
-        assert_eq!(recorded.last_updated_height, Some(2000));
-        assert_eq!(
-            module
-                .recorded_params()
-                .and_then(|p| p.trusted_assigned_height()),
-            Some(2000)
-        );
-        drop(module);
-
-        let identity = ChainIdentity {
-            chain_id: config.consensus.chain_id,
-            genesis_hash: genesis,
-            miner: config.node_config.miner_address(),
-        };
-        let drives = [(sub, DriveFile::Recorded(recorded))];
-        let judge = |assignments: &[PartitionAssignment], epoch_height| {
-            decide(&VerdictInputs {
-                drives: &drives,
-                assignments,
-                epoch_height,
-                in_sync: true,
-                identity: &identity,
-            })
-        };
-        let older = judge(&[submit_slot(&config, hash, 0)], 1500)?;
-        assert_eq!(
-            older[0].verdict,
-            DriveVerdict::Wait(WaitReason::RecordedNewerThanEpoch),
-            "an epoch older than the approved slot change does not move the drive back"
-        );
-        assert_eq!(older[0].action, DriveAction::Idle);
-        let dropped = judge(&[], 3000)?;
-        assert_eq!(dropped[0].verdict, DriveVerdict::Released);
-        assert_eq!(dropped[0].action, DriveAction::Clear);
-        Ok(())
-    }
-
-    /// Without an approving epoch, an open slot change claims no trusted
-    /// height (the file may be ahead of no known epoch).
-    #[test]
-    fn unapproved_open_slot_change_claims_no_height() -> eyre::Result<()> {
+    fn open_refuses_an_assignment_the_file_does_not_record() -> eyre::Result<()> {
         let hash = H256::repeat_byte(0x66);
-        let (_tmp, config, sub) = seed_assigned_entropy("unapproved_open_height", hash)?;
+        let (_tmp, config, sub) = seed_assigned_entropy("open_refuses_change", hash)?;
         let path = sub.join(PACKING_PARAMS_FILE_NAME);
-        PackingParams::from_toml(&path)?
-            .stamped(config.consensus.chain_id, H256::repeat_byte(0x9E), 1000)
-            .write_to_disk(&path)?;
-        drop(StorageModule::new(
-            &module_info(&sub, Some(leave_ledger(&config, hash))),
+        let before = fs::read(&path)?;
+        for other in [leave_ledger(&config, hash), submit_slot(&config, hash, 1)] {
+            let err = StorageModule::new(&module_info(&sub, Some(other)), &config)
+                .expect_err("open does not apply a transition");
+            assert!(
+                err.to_string()
+                    .contains("open does not change what a drive holds"),
+                "{err}"
+            );
+            assert_eq!(fs::read(&path)?, before, "a refused open rewrote the file");
+        }
+        forget_recorded_partition(&sub)?;
+        let err = StorageModule::new(
+            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
             &config,
-        )?);
-        let recorded = PackingParams::from_toml(&path)?;
-        assert_eq!(recorded.ledger, None);
-        assert_eq!(recorded.trusted_assigned_height(), None);
-        assert_eq!(recorded.last_updated_height, Some(0));
+        )
+        .expect_err("a file that records no partition is not given one at open");
+        assert!(
+            err.to_string()
+                .contains("open does not change what a drive holds"),
+            "{err}"
+        );
         Ok(())
     }
 
@@ -23267,10 +22994,7 @@ mod tests {
         let hash = H256::repeat_byte(0x64);
         let (_tmp, config, sub) = seed_assigned_entropy("open_readback_fails", hash)?;
         FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.set(true));
-        let result = StorageModule::new(
-            &module_info(&sub, Some(leave_ledger(&config, hash))),
-            &config,
-        );
+        let result = StorageModule::new(&module_info(&sub, None), &config);
         FAIL_OPEN_PARAMS_READBACK.with(|flag| flag.set(false));
         let err = result.expect_err("a read-back failure fails the open");
         let text = format!("{err:#}");
@@ -23280,10 +23004,7 @@ mod tests {
             "{text}"
         );
         // A later open with a readable file works.
-        StorageModule::new(
-            &module_info(&sub, Some(leave_ledger(&config, hash))),
-            &config,
-        )?;
+        StorageModule::new(&module_info(&sub, None), &config)?;
         Ok(())
     }
 
@@ -23321,209 +23042,6 @@ mod tests {
         params.ledger = None;
         params.slot = None;
         params.write_to_disk(&path)
-    }
-
-    /// A crash after the open wipe marker (a file that records no partition
-    /// gaining one), and before `crc_complete` is cleared, must leave the flag
-    /// set. The next open finishes the wipe. A same-hash ledger exit writes
-    /// no marker: it keeps the entropy and still clears the flag.
-    #[test]
-    fn crash_after_open_reset_marker_keeps_crc_complete() -> eyre::Result<()> {
-        let hash = H256::repeat_byte(0x63);
-        let (_tmp, config, sub) = seed_assigned_entropy("open_marker_crc", hash)?;
-        forget_recorded_partition(&sub)?;
-        {
-            let _fail = OpenResetMarkerFail::arm();
-            let err = StorageModule::new(
-                &module_info(&sub, Some(leave_ledger(&config, hash))),
-                &config,
-            )
-            .expect_err("the open stops after the marker");
-            assert!(
-                err.to_string()
-                    .contains("injected failure after the open reset marker"),
-                "{err}"
-            );
-        }
-        assert_eq!(
-            PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
-            None,
-            "the interrupted wipe published the packing file"
-        );
-        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Entropy));
-        {
-            let index = open_submodule_index(&sub, &config.node_config.database)?;
-            let marker = index.reset_in_progress()?;
-            let crc = index.chunk_crc_complete()?;
-            assert!(
-                marker && crc,
-                "a crash after the marker must keep crc_complete set; marker={marker} crc={crc}"
-            );
-            let rows = index.view(|tx| {
-                tx.tx_intervals_in_range(
-                    PartitionChunkOffset::from(0),
-                    PartitionChunkOffset::from(0),
-                )
-            })?;
-            assert!(!rows.is_empty(), "the interrupted wipe cleared the index");
-        }
-
-        let recovered = StorageModule::new(
-            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
-            &config,
-        )?;
-        assert_eq!(
-            recovered.get_chunk_type(&PartitionChunkOffset::from(0)),
-            Some(ChunkType::Uninitialized),
-            "the next open must finish a wipe whose marker is durable"
-        );
-        let (_, submodule) = recovered.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        assert!(!submodule.db.reset_in_progress()?);
-        assert!(!submodule.db.chunk_crc_complete()?);
-        assert_eq!(live_tx_rows(&recovered)?, 0);
-        drop(recovered);
-
-        let (_kept, config, sub) = seed_assigned_entropy("open_marker_done", hash)?;
-        let exited = StorageModule::new(
-            &module_info(&sub, Some(leave_ledger(&config, hash))),
-            &config,
-        )?;
-        assert_eq!(
-            exited.get_chunk_type(&PartitionChunkOffset::from(0)),
-            Some(ChunkType::Entropy),
-            "a same-hash ledger exit keeps the entropy"
-        );
-        assert_eq!(live_tx_rows(&exited)?, 0, "the old slot's tx row stayed");
-        let (_, submodule) = exited.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        assert!(!submodule.db.reset_in_progress()?);
-        assert!(
-            !submodule.db.chunk_crc_complete()?,
-            "a finished ledger exit must clear crc_complete"
-        );
-        Ok(())
-    }
-
-    /// Same hash, new slot. A packing refusal and a coverage refusal both
-    /// return before the file is replaced. A matching open publishes the
-    /// slot and wipes the labels and index rows of the ledger it left.
-    /// The chunk file is not the proof of a wipe: the label and the row are.
-    #[test]
-    fn refused_open_keeps_the_same_hash_slot() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new()
-            .prefix("slot_refuse")
-            .with_tracing()
-            .build();
-        let config = testing_config(tmp.path(), 32, 4);
-        let hash = H256::repeat_byte(0x51);
-        let sub = tmp.path().join("chunks");
-        let storage = StorageModule::new(
-            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
-            &config,
-        )?;
-        drop(storage);
-        let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
-        let mut params = PackingParams::from_toml(&params_path)?;
-        assert_eq!(params.slot, Some(0));
-        assert_eq!(params.last_updated_height, None);
-        let recorded = params
-            .entropy_packing_iterations
-            .expect("open records iterations");
-        params.entropy_packing_iterations = Some(recorded + 1);
-        params.write_to_disk(&params_path)?;
-        let before = fs::read(&params_path)?;
-
-        let err = StorageModule::new(
-            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 1))),
-            &config,
-        )
-        .expect_err("iterations do not match this module");
-        assert!(err.to_string().contains("packing identity"), "{err}");
-        assert_eq!(
-            fs::read(&params_path)?,
-            before,
-            "a refused open must leave the packing file bytes"
-        );
-        let loaded = PackingParams::from_toml(&params_path)?;
-        assert_eq!(loaded.ledger, Some(DataLedger::Submit.into()));
-        assert_eq!(loaded.slot, Some(0));
-        assert_eq!(loaded.last_updated_height, None);
-
-        params.entropy_packing_iterations = Some(recorded);
-        params.write_to_disk(&params_path)?;
-        let before = fs::read(&params_path)?;
-        let mut node = config.node_config.clone();
-        let irys_types::ConsensusOptions::Custom(consensus) = &mut node.consensus else {
-            panic!("test config uses a custom consensus");
-        };
-        consensus.num_chunks_in_partition = 8;
-        let short = Config::new(node, config.peer_id());
-        let err = StorageModule::new(
-            &one_span(3, sub.clone(), Some(submit_slot(&short, hash, 1))),
-            &short,
-        )
-        .expect_err("the span does not cover the partition");
-        assert!(err.to_string().contains("Invalid storage module"), "{err}");
-        assert_eq!(
-            fs::read(&params_path)?,
-            before,
-            "a coverage refusal must leave the packing file bytes"
-        );
-
-        let bytes = vec![0xE1_u8; 32];
-        let offset = PartitionChunkOffset::from(0);
-        let seeded = StorageModule::new(
-            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
-            &config,
-        )?;
-        assert!(seeded.write_chunk(offset, bytes, ChunkType::Data));
-        seeded.force_sync_pending_chunks()?;
-        assert_eq!(seeded.get_chunk_type(&offset), Some(ChunkType::Data));
-        let root = H256::repeat_byte(0x44);
-        let (_, submodule) = seeded.get_submodule_for_offset(offset)?;
-        submodule.db.update(|tx| {
-            tx.add_tx_leaf_binding(
-                root,
-                &TxLeafBinding {
-                    data_root: root,
-                    prefix_hash: H256::zero(),
-                },
-            )?;
-            tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))
-        })?;
-        assert_eq!(live_tx_rows(&seeded)?, 1, "tx row was not stored");
-        drop(seeded);
-
-        let opened = StorageModule::new(
-            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 1))),
-            &config,
-        )?;
-        assert_eq!(
-            opened.get_chunk_type(&offset),
-            Some(ChunkType::Uninitialized),
-            "a same-hash slot change must wipe the live label"
-        );
-        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Uninitialized));
-        assert_eq!(
-            live_tx_rows(&opened)?,
-            0,
-            "a same-hash slot change must wipe the index row"
-        );
-        assert!(
-            !opened
-                .get_submodule_for_offset(offset)?
-                .1
-                .db
-                .reset_in_progress()?,
-            "a slot change left the reset marker set"
-        );
-        drop(opened);
-        let loaded = PackingParams::from_toml(&params_path)?;
-        assert_eq!(loaded.ledger, Some(DataLedger::Submit.into()));
-        assert_eq!(loaded.slot, Some(1));
-        assert_eq!(loaded.last_updated_height, Some(0));
-        assert_eq!(loaded.partition_hash, Some(hash));
-        assert_eq!(loaded.entropy_packing_iterations, Some(recorded));
-        Ok(())
     }
 
     fn assignment(
@@ -23682,9 +23200,11 @@ mod tests {
 
             let sub = tmp.path().join("slot");
             seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                &config,
+            // Open never changes what a drive holds; the runtime exit does.
+            let opened = StorageModule::new(&one_span(3, &sub, None), &config)?;
+            opened.reset_keep_entropy_with_assignment(
+                assignment(&config, hash, submit, Some(1)),
+                0,
             )?;
             assert_wiped(&opened, &sub, "same hash, new slot")?;
             let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
@@ -23695,19 +23215,20 @@ mod tests {
 
             let sub = tmp.path().join("publish");
             seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, publish, Some(0)))),
-                &config,
+            // Open never changes what a drive holds; the runtime exit does.
+            let opened = StorageModule::new(&one_span(3, &sub, None), &config)?;
+            opened.reset_keep_entropy_with_assignment(
+                assignment(&config, hash, publish, Some(0)),
+                0,
             )?;
             assert_wiped(&opened, &sub, "submit to publish")?;
             drop(opened);
 
             let sub = tmp.path().join("expiry");
             seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, None, None))),
-                &config,
-            )?;
+            // Open never changes what a drive holds; the runtime exit does.
+            let opened = StorageModule::new(&one_span(3, &sub, None), &config)?;
+            opened.reset_keep_entropy_with_assignment(assignment(&config, hash, None, None), 0)?;
             assert_wiped(&opened, &sub, "ledger to capacity")?;
             let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
             assert_eq!(loaded.ledger, None);
@@ -23727,111 +23248,15 @@ mod tests {
 
             let sub = tmp.path().join("gain");
             seed_labeled_data(&config, &sub, assignment(&config, hash, None, None))?;
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
-                &config,
-            )?;
+            // Capacity gaining a ledger is a store at runtime; open keeps it.
+            let opened = StorageModule::new(&one_span(3, &sub, None), &config)?;
+            opened.assign_partition(assignment(&config, hash, submit, Some(0)), 0)?;
             assert_kept(&opened, &sub, "capacity to ledger")?;
             let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
             assert_eq!(loaded.ledger, submit);
             assert_eq!(loaded.slot, Some(0));
             drop(opened);
         }
-        Ok(())
-    }
-
-    /// Arms a failure after the open keep-entropy interval rewrite and clears
-    /// it on drop.
-    struct OpenKeepEntropyFail;
-
-    impl OpenKeepEntropyFail {
-        fn arm() -> Self {
-            FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS.with(|flag| flag.set(true));
-            Self
-        }
-    }
-
-    impl Drop for OpenKeepEntropyFail {
-        fn drop(&mut self) {
-            FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS.with(|flag| flag.set(false));
-        }
-    }
-
-    /// A crash during a same-hash slot change at open, after the interval file
-    /// is rewritten and before the old tx rows go and the file names the new
-    /// slot, leaves the old slot recorded and no marker. The next open repeats
-    /// the slot exit: the entropy stays, the old data is uninitialized and no
-    /// row of the old slot is left.
-    #[test]
-    fn crash_during_slot_change_open_repeats_on_the_next_open() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new().prefix("slot_keep_crash").build();
-        let config = testing_config(tmp.path(), 32, 4);
-        let hash = H256::repeat_byte(0x72);
-        let sub = tmp.path().join("sub");
-        let submit = Some(u32::from(DataLedger::Submit));
-        seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-        {
-            let storage = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
-                &config,
-            )?;
-            for raw in 1..=2_u32 {
-                assert!(storage.write_chunk(
-                    PartitionChunkOffset::from(raw),
-                    vec![0xE2_u8; 32],
-                    ChunkType::Entropy
-                ));
-            }
-            storage.force_sync_pending_chunks()?;
-            let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-            submodule.db.set_chunk_crc_complete(true)?;
-        }
-        {
-            let _fail = OpenKeepEntropyFail::arm();
-            let err = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                &config,
-            )
-            .expect_err("the open stops after the interval rewrite");
-            assert!(
-                err.to_string()
-                    .contains("injected failure after the open keep-entropy intervals"),
-                "{err}"
-            );
-        }
-        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
-        assert_eq!(
-            loaded.slot,
-            Some(0),
-            "the file named the new slot too early"
-        );
-        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Uninitialized));
-        assert_eq!(interval_label(&sub, 1)?, Some(ChunkType::Entropy));
-        {
-            let index = open_submodule_index(&sub, &config.node_config.database)?;
-            assert!(!index.reset_in_progress()?, "a slot exit writes no marker");
-            assert!(!index.chunk_crc_complete()?, "crc_complete was kept");
-            let rows = index.view(|tx| {
-                tx.tx_intervals_in_range(
-                    PartitionChunkOffset::from(0),
-                    PartitionChunkOffset::from(0),
-                )
-            })?;
-            assert!(!rows.is_empty(), "the crash came before the row drop");
-        }
-
-        let opened = StorageModule::new(
-            &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-            &config,
-        )?;
-        assert_wiped(&opened, &sub, "the next open repeats the slot exit")?;
-        for raw in 1..=2_u32 {
-            let offset = PartitionChunkOffset::from(raw);
-            assert_eq!(opened.get_chunk_type(&offset), Some(ChunkType::Entropy));
-            assert_eq!(opened.read_chunk_internal(offset)?, vec![0xE2_u8; 32]);
-        }
-        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
-        assert_eq!(loaded.slot, Some(1));
         Ok(())
     }
 
@@ -23861,9 +23286,11 @@ mod tests {
 
             let sub = tmp.path().join("slot");
             seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                &config,
+            // Open never changes what a drive holds; the runtime exit does.
+            let opened = StorageModule::new(&one_span(3, &sub, None), &config)?;
+            opened.reset_keep_entropy_with_assignment(
+                assignment(&config, hash, submit, Some(1)),
+                0,
             )?;
             assert_wiped(&opened, &sub, "same-hash slot change")?;
             assert!(
@@ -23991,80 +23418,6 @@ mod tests {
                 &config,
             )?;
             assert_kept(&opened, &sub, "the original slot after a refused open")?;
-        }
-        Ok(())
-    }
-
-    /// A crash after the open wipe marker leaves the old bytes. A later
-    /// open that packing refuses does not finish that wipe. The next
-    /// accepted open does.
-    #[test]
-    fn refused_open_does_not_finish_a_wipe_marker() -> eyre::Result<()> {
-        {
-            let engine = "RocksDB";
-            let tmp = TempDirBuilder::new()
-                .prefix(&format!("slot_marker_refuse_{engine:?}"))
-                .build();
-            let config = testing_config(tmp.path(), 32, 4);
-            let hash = H256::repeat_byte(0x75);
-            let submit = Some(u32::from(DataLedger::Submit));
-            let sub = tmp.path().join("sub");
-            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-            let bytes_before = chunk_file_prefix(&sub, 32)?;
-            // A slot change keeps the entropy and writes no marker. A file
-            // that records no partition gaining one wipes behind it.
-            forget_recorded_partition(&sub)?;
-            {
-                let _fail = OpenResetMarkerFail::arm();
-                let err = StorageModule::new(
-                    &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                    &config,
-                )
-                .expect_err("the open stops after the marker");
-                assert!(
-                    err.to_string()
-                        .contains("injected failure after the open reset marker"),
-                    "{engine:?}: {err}"
-                );
-            }
-            let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
-            let mut params = PackingParams::from_toml(&params_path)?;
-            let recorded = params
-                .entropy_packing_iterations
-                .expect("open records iterations");
-            params.entropy_packing_iterations = Some(recorded + 1);
-            params.write_to_disk(&params_path)?;
-            let err = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                &config,
-            )
-            .expect_err("a refused open must not finish the wipe");
-            assert!(
-                err.to_string().contains("packing identity"),
-                "{engine:?}: {err}"
-            );
-            assert_eq!(
-                interval_label(&sub, 0)?,
-                Some(ChunkType::Data),
-                "{engine:?}: the refused open finished the wipe"
-            );
-            assert_eq!(chunk_file_prefix(&sub, 32)?, bytes_before);
-            {
-                let index = open_submodule_index(&sub, &config.node_config.database)?;
-                assert!(
-                    index.reset_in_progress()?,
-                    "{engine:?}: the refused open cleared the crash marker"
-                );
-                let loaded = PackingParams::from_toml(&params_path)?;
-                assert_eq!(loaded.partition_hash, None);
-            }
-            params.entropy_packing_iterations = Some(recorded);
-            params.write_to_disk(&params_path)?;
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                &config,
-            )?;
-            assert_wiped(&opened, &sub, "the accepted open finishes the crash wipe")?;
         }
         Ok(())
     }
@@ -26131,44 +25484,6 @@ mod tests {
         assert_eq!(recorded, on_disk()?);
         assert_eq!(recorded.partition_hash, None);
         assert_eq!(recorded.trusted_assigned_height(), Some(11));
-        Ok(())
-    }
-
-    #[test]
-    fn open_rebind_does_not_record_a_trusted_height() -> eyre::Result<()> {
-        let tmp = TempDirBuilder::new().prefix("pp_rebind_height").build();
-        let config = testing_config(tmp.path(), 32, 4);
-        let hash = H256::repeat_byte(0x62);
-        let sub = tmp.path().join("chunks");
-        let storage = StorageModule::new(
-            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
-            &config,
-        )?;
-        drop(storage);
-        let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
-        let mut params = PackingParams::from_toml(&params_path)?.stamped(
-            config.consensus.chain_id,
-            H256::repeat_byte(0x78),
-            500,
-        );
-        params.ledger = Some(1);
-        params.slot = Some(0);
-        params.write_to_disk(&params_path)?;
-        assert_eq!(params.trusted_assigned_height(), Some(500));
-
-        let capacity = PartitionAssignment {
-            partition_hash: hash,
-            miner_address: config.node_config.miner_address(),
-            ledger_id: None,
-            slot_index: None,
-        };
-        let storage = StorageModule::new(&one_span(3, sub, Some(capacity)), &config)?;
-        let loaded = PackingParams::from_toml(&params_path)?;
-        assert_eq!(loaded.ledger, None, "the rebind ran");
-        assert_eq!(loaded.assigned_height, None);
-        assert_eq!(loaded.trusted_assigned_height(), None);
-        assert_eq!(loaded.last_updated_height, Some(0));
-        assert_eq!(storage.recorded_params(), Some(loaded));
         Ok(())
     }
 }

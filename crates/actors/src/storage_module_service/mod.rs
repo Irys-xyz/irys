@@ -1575,7 +1575,20 @@ mod assignment_reset_tests {
         let (_tmp, config, path, held) = close_for_reopen(harness);
         assert_eq!(held.ledger_id, Some(DataLedger::Publish.into()));
         let capacity = capacity_assignment(hash, miner);
-        let reopened = reopen_module(&config, &path, capacity);
+        // Startup opens parked; the service's verdict then repeats the exit.
+        let reopened = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), path)],
+            },
+            &config,
+        )
+        .expect("reopen parked");
+        reopened.set_chain_identity(GENESIS);
+        reopened
+            .reset_keep_entropy_with_assignment(capacity, 5)
+            .expect("the exit repeats");
         assert_eq!(
             reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
             Some(ChunkType::Uninitialized)
@@ -3110,6 +3123,67 @@ mod assignment_reset_tests {
         assert!(
             harness.inner.pending_assignment.is_none(),
             "nothing is retried"
+        );
+    }
+
+    /// Startup opens every drive parked and the service applies the startup
+    /// verdict, so a slot change at epoch 2000 is stored by the runtime path
+    /// and records 2000 as the trusted assigned height. An older epoch (1500)
+    /// asking for the old slot then waits, and a later epoch (3000) that
+    /// drops the partition releases the drive.
+    #[tokio::test]
+    async fn startup_slot_change_records_the_epoch_height() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(Some(DataLedger::Submit.into()));
+        write_span(&harness.module, 1, 9, ChunkType::Entropy);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        assert!(
+            harness.module.park_assignment().is_some(),
+            "startup opens parked"
+        );
+
+        apply_update(&mut harness, publish_slot_update(hash, miner, 0), 2000).await;
+        let recorded = harness.module.recorded_params().expect("recorded");
+        assert_eq!(recorded.ledger, Some(DataLedger::Publish.into()));
+        assert_eq!(recorded.trusted_assigned_height(), Some(2000));
+        assert_eq!(
+            harness.module.get_intervals(ChunkType::Entropy),
+            vec![irys_types::partition_chunk_offset_ii!(1, 9)],
+            "the slot change keeps the entropy"
+        );
+
+        let old_slot = Arc::new(vec![PartitionAssignment {
+            partition_hash: hash,
+            miner_address: miner,
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+        }]);
+        apply_update(&mut harness, old_slot, 1500).await;
+        assert_eq!(
+            harness.inner.last_decisions.get(&0).map(|(v, _)| v.clone()),
+            Some(DriveVerdict::Wait(
+                irys_domain::drive_verdict::WaitReason::RecordedNewerThanEpoch
+            )),
+            "an older epoch does not move the drive back"
+        );
+        let recorded = harness.module.recorded_params().expect("recorded");
+        assert_eq!(recorded.ledger, Some(DataLedger::Publish.into()));
+        assert_eq!(recorded.trusted_assigned_height(), Some(2000));
+
+        apply_update(&mut harness, explicit_unassign(), 3000).await;
+        assert_eq!(
+            harness.inner.last_decisions.get(&0).map(|(v, _)| v.clone()),
+            Some(DriveVerdict::Released)
+        );
+        assert!(harness.module.partition_assignment().is_none());
+        assert_eq!(
+            harness
+                .module
+                .recorded_params()
+                .and_then(|p| p.partition_hash),
+            None,
+            "the released drive records no partition"
         );
     }
 

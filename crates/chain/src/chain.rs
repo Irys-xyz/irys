@@ -25,7 +25,6 @@ use irys_actors::{
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
-    packing_service::PackingRequest,
     partition_mining_service::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
@@ -42,10 +41,9 @@ use irys_database::db::{IrysDatabaseExt as _, RethDbWrapper};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider, ChunkType,
-    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
-    StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard,
-    reth_provider,
+    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider, EpochReplayData,
+    ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList, StorageModule,
+    StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard, reth_provider,
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GossipDataHandler,
@@ -66,9 +64,9 @@ use irys_types::ToBase58 as _;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
-    IrysPeerId, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
-    PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun,
+    IrysPeerId, NodeConfig, NodeMode, OracleConfig, PeerNetworkSender, PeerNetworkServiceMessage,
+    RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle,
+    Traced, U256, VdfFreeRun,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
@@ -1990,22 +1988,18 @@ impl IrysNode {
                 ledger.total_chunks
             );
         }
-        let (storage_module_infos, chain_genesis_hash) = Self::drive_verdicts_at_startup(
+        let (storage_module_infos, chain_genesis_hash) = Self::drives_at_startup(
             &config,
             &storage_submodules_config.submodule_paths,
-            &epoch_snapshot,
             &block_index_guard,
         )?;
         let logical_chunks = epoch_snapshot.partition_chunks();
 
-        // The verdict judged every drive against this epoch: a slot change
-        // that open applies records it as the drive's assigned height.
         let storage_modules = Self::init_storage_modules(
             &config,
             storage_module_infos,
             Arc::clone(irys_db.consensus()),
             logical_chunks,
-            epoch_snapshot.epoch_height,
         )
         .await?;
         for module in storage_modules.read().unwrap().iter() {
@@ -2694,50 +2688,8 @@ impl IrysNode {
             handles.push(handle);
         }
 
-        // request packing for uninitialized ranges of assigned storage modules
-        for sm in storage_modules_guard
-            .read()
-            .iter()
-            .filter(|sm| sm.partition_assignment().is_some())
-        {
-            let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
-            let sender = service_senders.packing_sender();
-            let sm = sm.clone();
-
-            debug!(
-                "SM {} has {} Uninitialized intervals",
-                &sm.id,
-                &uninitialized.len()
-            );
-            // spawn a thread per SM (as packing queues are per-partition)
-            // this is to prevent packing requests getting dropped
-            // note: once we support submodules, this will probably need to change
-            runtime_handle.spawn(async move {
-                for interval in uninitialized {
-                    let req = match PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
-                        Ok(req) => req,
-                        Err(e) => {
-                            tracing::warn!(
-                                storage_module.id = %sm.id,
-                                packing.interval = ?interval,
-                                "Skipping repacking request: {e:?}"
-                            );
-                            continue;
-                        }
-                    };
-                    if let Err(e) = sender.send(req).await {
-                        tracing::event!(
-                            target: "irys::packing",
-                            tracing::Level::ERROR,
-                            storage_module.id = %sm.id,
-                            packing.interval = ?interval,
-                            "Packing channel closed - {e}; failed to enqueue repacking request"
-                        );
-                        return; // assume this is unrecoverable
-                    }
-                }
-            });
-        }
+        // Modules open parked. The storage module service packs each
+        // module's Uninitialized spans when it applies the startup verdict.
         (controllers, handles)
     }
 
@@ -2893,16 +2845,17 @@ impl IrysNode {
         )
     }
 
-    /// Decides what every configured drive holds before any is opened, logs
-    /// the verdicts, and returns the modules to open (every configured drive)
-    /// and the genesis hash later writes stamp. A drive whose packing params
-    /// cannot be read or parsed, or that is foreign (newer version, other
-    /// chain, other miner), fails startup with an error naming it: no drive
-    /// is skipped. Nothing is written here. Startup is never in sync.
-    fn drive_verdicts_at_startup(
+    /// Reads every configured drive's packing params before any is opened
+    /// and returns one parked module per drive (no assignment: open never
+    /// changes what a drive holds) and the genesis hash later writes stamp.
+    /// A drive whose packing params cannot be read or parsed, or that is
+    /// foreign (newer version, other chain, other miner), fails startup with
+    /// an error naming it: no drive is skipped. The storage module service
+    /// applies the startup verdict from the first assignment update. Nothing
+    /// is written here.
+    fn drives_at_startup(
         config: &Config,
         paths: &[std::path::PathBuf],
-        epoch_snapshot: &irys_domain::EpochSnapshot,
         block_index_guard: &BlockIndexReadGuard,
     ) -> eyre::Result<(Vec<StorageModuleInfo>, H256)> {
         use irys_domain::drive_verdict;
@@ -2912,29 +2865,21 @@ impl IrysNode {
             .get_item(0)
             .ok_or_eyre("block index has no genesis item")?
             .block_hash;
-        let miner = config.node_config.miner_address();
-        let assignments = epoch_snapshot.get_partition_assignments(miner);
         let identity = drive_verdict::ChainIdentity {
             chain_id: config.consensus.chain_id,
             genesis_hash,
-            miner,
+            miner: config.node_config.miner_address(),
         };
         let drives = drive_verdict::drive_verdict_inputs_from_disk(config, paths)?;
-        let inputs = drive_verdict::VerdictInputs {
-            drives: &drives,
-            assignments: &assignments,
-            epoch_height: epoch_snapshot.epoch_height,
-            in_sync: false,
-            identity: &identity,
-        };
-        let decisions = drive_verdict::decide(&inputs)?;
+        drive_verdict::refuse_foreign_drives(&drives, &identity)?;
         // Existing module paths retain their physical layout; logical bounds are
         // resolved separately and the finalized migration removes their suffix.
         let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
             .wrap_err("num_chunks_in_partition exceeds u32")?;
-        let infos = drive_verdict::storage_module_infos(&drives, &decisions, num_chunks);
-        drive_verdict::log_decisions(&inputs, &decisions, &infos);
-        Ok((infos, genesis_hash))
+        Ok((
+            drive_verdict::parked_storage_module_infos(paths, num_chunks),
+            genesis_hash,
+        ))
     }
 
     async fn init_storage_modules(
@@ -2942,14 +2887,12 @@ impl IrysNode {
         storage_module_infos: Vec<StorageModuleInfo>,
         consensus: Arc<irys_database::reth_db::DatabaseEnv>,
         partition_chunks: u64,
-        approved_epoch_height: u64,
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
         let storage_modules = crate::storage_module_init::open_storage_modules(
             config,
             storage_module_infos,
             consensus,
             partition_chunks,
-            Some(approved_epoch_height),
             #[cfg(test)]
             Duration::ZERO,
         )
