@@ -417,25 +417,21 @@ pub fn parked_storage_module_infos(paths: &[PathBuf], num_chunks: u32) -> Vec<St
 }
 
 /// For tests without a running node or service: one module per configured
-/// drive with the assignment the startup verdict gives it for `snapshot`'s
-/// assignments to this miner (`None` for a drive that waits, idles or is
-/// cleared). Open accepts such an assignment only for a fresh drive or one
-/// whose file already records it. Panics where startup would fail: an
-/// unreadable or foreign drive file.
+/// drive in `paths` with the assignment the startup verdict gives it for
+/// `snapshot`'s assignments to this miner (`None` for a drive that waits,
+/// idles or is cleared). Open accepts such an assignment only for a fresh
+/// drive or one whose file already records it. Panics where startup would
+/// fail: an unreadable or foreign drive file.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn startup_storage_module_infos(
     snapshot: &crate::EpochSnapshot,
+    paths: &[PathBuf],
     genesis_hash: H256,
 ) -> Vec<StorageModuleInfo> {
     let config = &snapshot.config;
-    let paths = snapshot
-        .storage_submodules_config
-        .as_ref()
-        .map(|submodules| submodules.submodule_paths.clone())
-        .unwrap_or_default();
     let identity = ChainIdentity::new(config, genesis_hash);
     let assignments = snapshot.get_partition_assignments(identity.miner);
-    let drives = drive_verdict_inputs_from_disk(config, &paths).expect("drive files are readable");
+    let drives = drive_verdict_inputs_from_disk(config, paths).expect("drive files are readable");
     refuse_foreign_drives(&drives, &identity).expect("no drive is foreign");
     let decisions = decide(&VerdictInputs {
         drives: &drives,
@@ -447,7 +443,7 @@ pub fn startup_storage_module_infos(
     .decisions;
     let num_chunks = u32::try_from(config.consensus.num_chunks_in_partition)
         .expect("num_chunks_in_partition fits u32");
-    let mut infos = parked_storage_module_infos(&paths, num_chunks);
+    let mut infos = parked_storage_module_infos(paths, num_chunks);
     for (info, decision) in infos.iter_mut().zip(&decisions) {
         if let DriveAction::Assign(assignment) = decision.action {
             info.partition_assignment = Some(assignment);

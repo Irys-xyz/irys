@@ -1826,7 +1826,6 @@ impl IrysNode {
             block_index_guard.clone(),
             replay_data,
             irys_db.clone(),
-            &storage_submodules_config,
             config.clone(),
         )?));
 
@@ -2402,19 +2401,13 @@ impl IrysNode {
         // epoch block: clear released drives, place partitions on empty or
         // released drives, and exit ledgers. Startup is never in sync, so no
         // file is stamped v2.
-        {
-            let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
-            let assignments =
-                epoch_snapshot.get_partition_assignments(config.node_config.miner_address());
-            service_senders.storage_modules.send_traced(
-                StorageModuleServiceMessage::PartitionAssignmentsUpdated {
-                    assignments: Arc::new(assignments),
-                    epoch_height: epoch_snapshot.epoch_height,
-                    update_height: epoch_snapshot.epoch_height,
-                    in_sync: false,
-                },
-            )?;
-        }
+        service_senders.storage_modules.send_traced(
+            StorageModuleServiceMessage::assignments_updated(
+                &block_tree_guard.read().canonical_epoch_snapshot(),
+                config.node_config.miner_address(),
+                false,
+            ),
+        )?;
 
         // Production chunk fetcher is the HTTP chunk fetcher
         let max_peer_response_bytes = config.node_config.max_peer_response_bytes;

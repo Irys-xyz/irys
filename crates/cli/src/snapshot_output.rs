@@ -2,7 +2,7 @@ use irys_chain::utils::load_config;
 use irys_types::{Config, H256, NodeConfig};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::{info, warn};
 
 use crate::db_utils::load_block_commitments;
@@ -445,32 +445,6 @@ impl fmt::Display for SnapshotComparisonOutput {
     }
 }
 
-fn count_pledge_commitments(commitments: &[irys_types::CommitmentTransaction]) -> usize {
-    commitments
-        .iter()
-        .filter(|c| {
-            matches!(
-                c.commitment_type(),
-                irys_types::CommitmentTypeV2::Pledge { .. }
-            )
-        })
-        .count()
-}
-
-/// Create placeholder submodule paths for partition assignment computation.
-/// These paths are never accessed on disk — `EpochSnapshot::new` only uses
-/// the path count to determine partition assignments and `is_using_hardcoded_paths`
-/// to derive partition hashes from the path index rather than the actual path value.
-/// This means the specific path strings are irrelevant; only the count matters.
-fn hardcoded_submodules(prefix: &str, count: usize) -> irys_config::StorageSubmodulesConfig {
-    irys_config::StorageSubmodulesConfig {
-        is_using_hardcoded_paths: true,
-        submodule_paths: (0..count)
-            .map(|i| PathBuf::from(format!("/tmp/{prefix}-{i}")))
-            .collect(),
-    }
-}
-
 pub(crate) fn cli_snapshot_output(
     block_title: &'static str,
     commitment_label: &'static str,
@@ -504,7 +478,6 @@ pub(crate) fn cli_config() -> eyre::Result<Config> {
 pub(crate) fn snapshot_from_genesis_dir(
     genesis_dir: &Path,
     config: &Config,
-    submodule_prefix: &str,
 ) -> eyre::Result<(
     irys_domain::EpochSnapshot,
     Vec<irys_types::CommitmentTransaction>,
@@ -520,13 +493,7 @@ pub(crate) fn snapshot_from_genesis_dir(
     let commitments = load_genesis_commitments_from_disk(genesis_dir)
         .map_err(|e| eyre::eyre!("loading genesis commitments from {:?}: {e}", genesis_dir))?;
 
-    let submodules = hardcoded_submodules(submodule_prefix, count_pledge_commitments(&commitments));
-    let snapshot = EpochSnapshot::new(
-        &submodules,
-        (*genesis_block).clone(),
-        commitments.clone(),
-        config,
-    );
+    let snapshot = EpochSnapshot::new((*genesis_block).clone(), commitments.clone(), config);
 
     Ok((snapshot, commitments))
 }
@@ -534,28 +501,13 @@ pub(crate) fn snapshot_from_genesis_dir(
 pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transaction::DbTx>(
     read_tx: &T,
     config: &Config,
-    submodule_prefix: &str,
 ) -> eyre::Result<(
     irys_domain::EpochSnapshot,
     Vec<irys_types::CommitmentTransaction>,
 )> {
-    use irys_database::tables::{IrysCommitments, MigratedBlockHashes};
-    use irys_database::{block_header_by_hash, block_index_latest_height, walk_all};
+    use irys_database::tables::MigratedBlockHashes;
+    use irys_database::{block_header_by_hash, block_index_latest_height};
     use irys_domain::EpochSnapshot;
-
-    // Count total pledge commitments upfront for submodule sizing. This uses DB
-    // key order (fine — we only need the count, not the ordering).
-    let total_pledge_count = {
-        let all: Vec<_> = walk_all::<IrysCommitments, _>(read_tx)?;
-        all.iter()
-            .filter(|(_, c)| {
-                matches!(
-                    c.0.commitment_type(),
-                    irys_types::CommitmentTypeV2::Pledge { .. }
-                )
-            })
-            .count()
-    };
 
     let latest_height =
         block_index_latest_height(read_tx)?.ok_or_else(|| eyre::eyre!("Block index is empty"))?;
@@ -585,13 +537,7 @@ pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transac
     // produce deterministic genesis hashes matching the original ledger order.
     let mut ordered_commitments = genesis_commitments.clone();
 
-    let submodules = hardcoded_submodules(submodule_prefix, total_pledge_count);
-    let mut snapshot = EpochSnapshot::new(
-        &submodules,
-        genesis_block.clone(),
-        genesis_commitments,
-        config,
-    );
+    let mut snapshot = EpochSnapshot::new(genesis_block.clone(), genesis_commitments, config);
 
     let mut prev_epoch_block = genesis_block;
     for i in 1..num_epoch_blocks {

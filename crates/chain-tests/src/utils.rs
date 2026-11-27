@@ -687,6 +687,18 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    /// The drive paths in this node's `.irys_submodules.toml`: the list
+    /// startup opens drives from.
+    pub fn submodule_paths(&self) -> Vec<std::path::PathBuf> {
+        use irys_config::submodules::{SUBMODULES_CONFIG_FILE_NAME, StorageSubmodulesConfig};
+        StorageSubmodulesConfig::from_toml(
+            self.cfg.base_directory.join(SUBMODULES_CONFIG_FILE_NAME),
+            NodeMode::Miner,
+        )
+        .expect("submodule config is readable")
+        .submodule_paths
+    }
+
     /// Jump virtual time forward. In Accelerated mode this advances the virtual
     /// clock instantly. In Real mode it is a no-op: real wall-clock time advances
     /// on its own as the producer sleeps between blocks. For pure time-passage

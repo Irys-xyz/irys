@@ -19,7 +19,6 @@ eyre.workspace = true
 libc = "0.2"
 metrics.workspace = true
 irys-types.workspace = true
-irys-config.workspace = true
 irys-database.workspace = true
 irys-packing.workspace = true
 irys-storage.workspace = true

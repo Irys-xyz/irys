@@ -18,7 +18,7 @@ use crate::{packing_service::PackingRequest, services::ServiceSenders};
 use index_heal::{HealOutcome, INDEX_HEAL_RETRY_INTERVAL, IndexHealCtx, heal_ledger_data_indexes};
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, DriveFault, Held, StorageModule,
+    BlockIndexReadGuard, BlockTreeReadGuard, DriveFault, EpochSnapshot, Held, StorageModule,
     drive_verdict::{
         self, ChainIdentity, DriveAction, DriveDecision, DriveFile, DriveVerdict, Verdict,
         VerdictInputs,
@@ -26,7 +26,8 @@ use irys_domain::{
     stop_node_for_drive_fault,
 };
 use irys_types::{
-    Config, H256, PartitionChunkRange, TokioServiceHandle, Traced, partition::PartitionAssignment,
+    Config, H256, IrysAddress, PartitionChunkRange, TokioServiceHandle, Traced,
+    partition::PartitionAssignment,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -45,19 +46,13 @@ pub enum StorageModuleServiceMessage {
     /// The canonical epoch snapshot changed (an epoch block, a reorg that
     /// orphaned the only epoch block, or startup). The service runs
     /// [`drive_verdict::decide`] over what its open modules record in memory
-    /// and applies the result.
+    /// and applies the result. Build it with
+    /// [`StorageModuleServiceMessage::assignments_updated`].
     PartitionAssignmentsUpdated {
         /// This miner's assignments, from the canonical epoch snapshot.
         assignments: Arc<Vec<PartitionAssignment>>,
-        /// The snapshot's epoch height. Verdicts are judged on it, never on
-        /// `update_height`.
+        /// The snapshot's epoch height. Verdicts are judged on it.
         epoch_height: u64,
-        /// Informational, for logs only: the height of the event that sent
-        /// this update. This is the epoch block height, except after a reorg
-        /// that orphans the only epoch block: then it is the orphaned epoch
-        /// height, and the assignments come from the new tip's epoch
-        /// snapshot. Nothing is decided or written from it.
-        update_height: u64,
         /// The node was in sync with the network head when the epoch was
         /// processed. Only then is the packing file of a drive that is ours
         /// stamped as v2 (a v1 file, another
@@ -71,6 +66,22 @@ pub enum StorageModuleServiceMessage {
         module_id: usize,
         range: PartitionChunkRange,
     },
+}
+
+impl StorageModuleServiceMessage {
+    /// The assignments update for `snapshot`: `miner`'s assignments at the
+    /// snapshot's epoch height.
+    pub fn assignments_updated(
+        snapshot: &EpochSnapshot,
+        miner: IrysAddress,
+        in_sync: bool,
+    ) -> Self {
+        Self::PartitionAssignmentsUpdated {
+            assignments: Arc::new(snapshot.get_partition_assignments(miner)),
+            epoch_height: snapshot.epoch_height,
+            in_sync,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -282,16 +293,10 @@ impl StorageModuleServiceInner {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments,
                 epoch_height,
-                update_height,
                 in_sync,
             } => {
-                self.handle_partition_assignments_update(
-                    assignments,
-                    epoch_height,
-                    update_height,
-                    in_sync,
-                )
-                .await?
+                self.handle_partition_assignments_update(assignments, epoch_height, in_sync)
+                    .await?
             }
             // `on_message` handles this. `apply_assignment` must not see it.
             StorageModuleServiceMessage::RepackUninitialized { .. } => {}
@@ -506,12 +511,11 @@ impl StorageModuleServiceInner {
 
     /// Runs the drive verdict over the open modules and applies it. Only what
     /// differs from a module's in-memory state is changed.
-    #[tracing::instrument(level = "trace", skip_all, err, fields(epoch.height = epoch_height, update.height = update_height))]
+    #[tracing::instrument(level = "trace", skip_all, err, fields(epoch.height = epoch_height))]
     async fn handle_partition_assignments_update(
         &mut self,
         assignments: Arc<Vec<PartitionAssignment>>,
         epoch_height: u64,
-        update_height: u64,
         in_sync: bool,
     ) -> eyre::Result<()> {
         let modules: BTreeMap<usize, Arc<StorageModule>> = {
@@ -531,7 +535,7 @@ impl StorageModuleServiceInner {
             identity: &identity,
         };
         let verdict = drive_verdict::decide(&inputs);
-        self.log_changed_decisions(&ids, &verdict, &inputs, update_height);
+        self.log_changed_decisions(&ids, &verdict, &inputs);
 
         for decision in &verdict.decisions {
             let module = &modules[&ids[decision.id]];
@@ -556,7 +560,6 @@ impl StorageModuleServiceInner {
         ids: &[usize],
         verdict: &Verdict,
         inputs: &VerdictInputs<'_>,
-        update_height: u64,
     ) {
         for decision in &verdict.decisions {
             let id = ids[decision.id];
@@ -578,7 +581,6 @@ impl StorageModuleServiceInner {
                 partition.ledger_id = ?target.and_then(|pa| pa.ledger_id),
                 partition.slot_index = ?target.and_then(|pa| pa.slot_index),
                 epoch.height = inputs.epoch_height,
-                update.height = update_height,
                 "drive verdict changed"
             );
             self.last_decisions.insert(id, now);
@@ -1882,7 +1884,7 @@ mod assignment_reset_tests {
         (assignment.partition_hash, assignment.miner_address)
     }
 
-    /// An epoch update at `height` (epoch and update height), not in sync.
+    /// An epoch update at epoch `height`, not in sync.
     fn update_msg(
         assignments: Arc<Vec<PartitionAssignment>>,
         height: u64,
@@ -1890,7 +1892,6 @@ mod assignment_reset_tests {
         StorageModuleServiceMessage::PartitionAssignmentsUpdated {
             assignments,
             epoch_height: height,
-            update_height: height,
             in_sync: false,
         }
     }
@@ -2713,10 +2714,9 @@ mod assignment_reset_tests {
 
     /// After a reorg that orphans the only epoch block, the block tree resends
     /// the new tip's assignments: `epoch_height` is that snapshot's epoch,
-    /// `update_height` the orphaned one. The drive was assigned at the
-    /// orphaned epoch, so the snapshot cannot prove a release: judged on
-    /// `epoch_height` it is parked and keeps its bytes. Judged on
-    /// `update_height` it would have been wiped. A later epoch that
+    /// older than the orphaned one. The drive was assigned at the orphaned
+    /// epoch, so the snapshot cannot prove a release: judged on
+    /// `epoch_height` it is parked and keeps its bytes. A later epoch that
     /// still does not assign it releases it.
     #[tokio::test]
     async fn orphaned_epoch_resend_uses_snapshot_height() {
@@ -2731,7 +2731,6 @@ mod assignment_reset_tests {
             .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: explicit_unassign(),
                 epoch_height: CANONICAL_EPOCH_HEIGHT,
-                update_height: ORPHANED_EPOCH_HEIGHT,
                 in_sync: true,
             })
             .await
@@ -2770,7 +2769,6 @@ mod assignment_reset_tests {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: Arc::new(vec![held]),
                 epoch_height: 5,
-                update_height: 5,
                 in_sync: true,
             },
         )
@@ -2938,7 +2936,6 @@ mod assignment_reset_tests {
             .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: publish_update(hash, miner),
                 epoch_height: 7,
-                update_height: 7,
                 in_sync: true,
             })
             .await
@@ -2976,7 +2973,6 @@ mod assignment_reset_tests {
             .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 assignments: capacity_update(hash, miner),
                 epoch_height: CANONICAL_EPOCH_HEIGHT,
-                update_height: ORPHANED_EPOCH_HEIGHT,
                 in_sync: true,
             })
             .await

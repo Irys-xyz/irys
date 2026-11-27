@@ -118,8 +118,11 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
     assert_eq!(at_ten.diff, expected);
     assert_eq!(at_ten.last_diff_timestamp, at_ten.timestamp);
     // Wait on actual disk truncation, not the earlier logical interval view.
-    let module_infos =
-        irys_domain::drive_verdict::startup_storage_module_infos(&epoch, irys_types::H256::zero());
+    let module_infos = irys_domain::drive_verdict::startup_storage_module_infos(
+        &epoch,
+        &node.submodule_paths(),
+        irys_types::H256::zero(),
+    );
     assert!(
         module_infos.iter().any(|m| !m.submodules.is_empty()),
         "no storage submodule to check truncation on"

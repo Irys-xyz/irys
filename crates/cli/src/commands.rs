@@ -369,8 +369,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
         }
         Commands::InspectGenesis { genesis_dir } => {
             let config = cli_config()?;
-            let (snapshot, commitments) =
-                snapshot_from_genesis_dir(&genesis_dir, &config, "inspect-sm")?;
+            let (snapshot, commitments) = snapshot_from_genesis_dir(&genesis_dir, &config)?;
 
             let output =
                 cli_snapshot_output("Genesis Block", "Commitments", &snapshot, &commitments);
@@ -399,8 +398,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
             let db_env = cli_init_irys_db(DatabaseEnvKind::RO)?;
             let read_tx = db_env.tx()?;
 
-            let (snapshot, all_commitments) =
-                replay_current_network_snapshot(&read_tx, &config, "dump-sm")?;
+            let (snapshot, all_commitments) = replay_current_network_snapshot(&read_tx, &config)?;
             let json = serde_json::to_string_pretty(&all_commitments)
                 .map_err(|e| eyre::eyre!("Failed to serialize commitments: {e}"))?;
             std::fs::write(&output, json)
@@ -429,9 +427,9 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
             let read_tx = db_env.tx()?;
 
             let (current_snapshot, current_commitments) =
-                replay_current_network_snapshot(&read_tx, &config, "compare-current-sm")?;
+                replay_current_network_snapshot(&read_tx, &config)?;
             let (target_snapshot, target_commitments) =
-                snapshot_from_genesis_dir(&genesis_dir, &config, "compare-target-sm")?;
+                snapshot_from_genesis_dir(&genesis_dir, &config)?;
 
             let output = cli_compare_output(
                 "Current Network",

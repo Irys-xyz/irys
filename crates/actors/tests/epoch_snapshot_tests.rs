@@ -37,18 +37,7 @@ async fn genesis_test() {
         .unwrap();
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config = StorageSubmodulesConfig::load(
-        config.node_config.base_directory.clone(),
-        config.node_config.node_mode,
-    )
-    .unwrap();
-
-    let epoch_snapshot = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block.clone(),
-        commitments,
-        &config,
-    );
+    let epoch_snapshot = EpochSnapshot::new(genesis_block.clone(), commitments, &config);
     let miner_address = config.node_config.miner_address();
 
     // Process genesis message directly instead of through actor system
@@ -201,18 +190,7 @@ async fn add_slots_test() {
         .unwrap();
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config = StorageSubmodulesConfig::load(
-        config.node_config.base_directory.clone(),
-        config.node_config.node_mode,
-    )
-    .unwrap();
-
-    let mut epoch_snapshot = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block.clone(),
-        commitments,
-        &config,
-    );
+    let mut epoch_snapshot = EpochSnapshot::new(genesis_block.clone(), commitments, &config);
 
     let mut mock_header = IrysBlockHeader::new_mock_header();
     mock_header.data_ledgers[DataLedger::Submit].total_chunks = 0;
@@ -315,18 +293,7 @@ async fn unique_addresses_per_slot_test() {
     commitments.append(&mut comm1);
     commitments.append(&mut comm2);
 
-    let storage_submodules_config = StorageSubmodulesConfig::load(
-        config.node_config.base_directory.clone(),
-        config.node_config.node_mode,
-    )
-    .unwrap();
-
-    let epoch_snapshot = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block.clone(),
-        commitments,
-        &config,
-    );
+    let epoch_snapshot = EpochSnapshot::new(genesis_block.clone(), commitments, &config);
 
     debug!("{:#?}", epoch_snapshot.ledgers);
 
@@ -459,18 +426,7 @@ async fn new_ledger_activation_slots_test(
         .unwrap();
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config = StorageSubmodulesConfig::load(
-        config.node_config.base_directory.clone(),
-        config.node_config.node_mode,
-    )
-    .unwrap();
-
-    let mut epoch_snapshot = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block.clone(),
-        commitments,
-        &config,
-    );
+    let mut epoch_snapshot = EpochSnapshot::new(genesis_block.clone(), commitments, &config);
 
     // Pre-activation the term ledgers do not exist at all.
     assert_eq!(epoch_snapshot.ledgers.active_ledgers().len(), 2);
@@ -658,14 +614,12 @@ async fn partition_expiration_and_repacking_test() {
     let storage_submodules_config =
         StorageSubmodulesConfig::load(base_path.clone(), config.node_config.node_mode).unwrap();
 
-    let mut epoch_snapshot = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block.clone(),
-        commitments,
-        &config,
+    let mut epoch_snapshot = EpochSnapshot::new(genesis_block.clone(), commitments, &config);
+    let storage_module_infos = irys_domain::drive_verdict::startup_storage_module_infos(
+        &epoch_snapshot,
+        &storage_submodules_config.submodule_paths,
+        H256::zero(),
     );
-    let storage_module_infos =
-        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_snapshot, H256::zero());
     let mut storage_modules: StorageModuleVec = Vec::new();
     // Create a list of storage modules wrapping the storage files
     for info in storage_module_infos {
@@ -945,16 +899,15 @@ async fn epoch_blocks_reinitialization_test() {
     )
     .unwrap();
 
-    let mut epoch_snapshot = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block.clone(),
-        commitments.clone(),
-        &config,
-    );
+    let mut epoch_snapshot =
+        EpochSnapshot::new(genesis_block.clone(), commitments.clone(), &config);
 
     // Get the genesis storage modules and their assigned partitions
-    let storage_module_infos =
-        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_snapshot, H256::zero());
+    let storage_module_infos = irys_domain::drive_verdict::startup_storage_module_infos(
+        &epoch_snapshot,
+        &storage_submodules_config.submodule_paths,
+        H256::zero(),
+    );
     debug!("{:#?}", storage_module_infos);
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
@@ -1064,22 +1017,23 @@ async fn epoch_blocks_reinitialization_test() {
     );
 
     // Get the genesis storage modules and their assigned partitions
-    let mut epoch_service = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block,
-        commitments,
-        &config,
+    let mut epoch_service = EpochSnapshot::new(genesis_block, commitments, &config);
+    let storage_module_infos = irys_domain::drive_verdict::startup_storage_module_infos(
+        &epoch_service,
+        &storage_submodules_config.submodule_paths,
+        H256::zero(),
     );
-    let storage_module_infos =
-        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_service, H256::zero());
     epoch_service
         .replay_epoch_data(epoch_block_data)
         .expect("to replay the epoch data");
 
     debug!("{:#?}", storage_module_infos);
 
-    let new_sm_infos =
-        irys_domain::drive_verdict::startup_storage_module_infos(&epoch_service, H256::zero());
+    let new_sm_infos = irys_domain::drive_verdict::startup_storage_module_infos(
+        &epoch_service,
+        &storage_submodules_config.submodule_paths,
+        H256::zero(),
+    );
 
     debug!("{:#?}", new_sm_infos);
 
@@ -1125,7 +1079,7 @@ async fn partitions_assignment_determinism_test() {
     consensus_config.hardforks.cascade = None;
     let mut config = NodeConfig::testing();
     config.storage.num_writes_before_sync = 1;
-    config.base_directory = base_path.clone();
+    config.base_directory = base_path;
     config.consensus = ConsensusOptions::Custom(consensus_config);
     let config = Config::new_with_random_peer_id(config);
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
@@ -1142,14 +1096,7 @@ async fn partitions_assignment_determinism_test() {
             .unwrap();
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
-
-    let mut epoch_snapshot = EpochSnapshot::new(
-        &storage_submodules_config,
-        genesis_block.clone(),
-        commitments,
-        &config,
-    );
+    let mut epoch_snapshot = EpochSnapshot::new(genesis_block.clone(), commitments, &config);
 
     epoch_snapshot.partition_assignments.print_assignments();
 

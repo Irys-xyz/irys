@@ -4,7 +4,6 @@ mod partition_resize;
 use super::{CommitmentState, PartitionAssignments, PledgeEntry, StakeEntry};
 use crate::EpochBlockData;
 use eyre::{Error, Result};
-use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{ExpiringPartitionInfo, Ledgers};
 use irys_types::Config;
 use irys_types::{
@@ -32,8 +31,6 @@ pub struct EpochSnapshot {
     pub all_active_partitions: Vec<PartitionHash>,
     /// List of partition hashes not yet assigned to a mining address
     pub unassigned_partitions: Vec<PartitionHash>,
-    /// Submodules config
-    pub storage_submodules_config: Option<StorageSubmodulesConfig>,
     /// Current partition & ledger parameters
     pub config: Config,
     /// Commitment state (all stakes and pledges) as computed at this epoch's start
@@ -57,7 +54,6 @@ impl Default for EpochSnapshot {
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            storage_submodules_config: None, // This is only ever valid for test scenarios where epochs don't matter
             config: config.clone(),
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),
@@ -121,7 +117,6 @@ pub enum EpochSnapshotError {
 impl EpochSnapshot {
     /// Create a new instance of the epoch service actor
     pub fn new(
-        storage_submodules_config: &StorageSubmodulesConfig,
         genesis_block: IrysBlockHeader,
         commitments: Vec<CommitmentTransaction>,
         config: &Config,
@@ -135,7 +130,6 @@ impl EpochSnapshot {
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            storage_submodules_config: Some(storage_submodules_config.clone()),
             config: config.clone(),
             commitment_state: Default::default(),
             epoch_block: genesis_block.clone(),
@@ -1577,7 +1571,6 @@ mod tests {
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            storage_submodules_config: None,
             config: config.clone(),
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),
@@ -1632,7 +1625,6 @@ mod tests {
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            storage_submodules_config: None,
             config: config.clone(),
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),

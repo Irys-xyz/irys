@@ -147,6 +147,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
                 .block_tree_guard
                 .read()
                 .canonical_epoch_snapshot(),
+            &peer1_node.submodule_paths(),
             H256::zero(),
         );
 
@@ -270,6 +271,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
             .block_tree_guard
             .read()
             .canonical_epoch_snapshot(),
+        &restarted_node.submodule_paths(),
         H256::zero(),
     );
 

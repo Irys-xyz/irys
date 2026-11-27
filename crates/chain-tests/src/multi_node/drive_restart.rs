@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use irys_chain::IrysNodeCtx;
-use irys_config::submodules::{SUBMODULES_CONFIG_FILE_NAME, StorageSubmodulesConfig};
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_domain::{ChunkType, PACKING_PARAMS_FILE_NAME};
 use irys_types::storage::Interval;
 use irys_types::{H256, NodeConfig, PartitionChunkOffset};
@@ -56,20 +56,11 @@ fn drive_states(
 
 /// Rewrites `.irys_submodules.toml` the way an operator edits it.
 fn write_submodule_paths(base: &Path, paths: &[PathBuf]) -> eyre::Result<()> {
-    let quoted: Vec<String> = paths
-        .iter()
-        .map(|path| format!("{:?}", path.display().to_string()))
-        .collect();
-    let file = base.join(SUBMODULES_CONFIG_FILE_NAME);
-    std::fs::write(
-        &file,
-        format!(
-            "is_using_hardcoded_paths = true\nsubmodule_paths = [{}]\n",
-            quoted.join(", ")
-        ),
-    )?;
-    let reread = StorageSubmodulesConfig::from_toml(&file, irys_types::NodeMode::Genesis)?;
-    eyre::ensure!(reread.submodule_paths == paths, "{reread:?}");
+    StorageSubmodulesConfig {
+        is_using_hardcoded_paths: true,
+        submodule_paths: paths.to_vec(),
+    }
+    .write_to(base)?;
     Ok(())
 }
 

@@ -256,6 +256,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
                 .block_tree_guard
                 .read()
                 .canonical_epoch_snapshot(),
+            &node.submodule_paths(),
             H256::zero(),
         );
 
@@ -336,6 +337,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .block_tree_guard
             .read()
             .canonical_epoch_snapshot(),
+        &restarted_node.submodule_paths(),
         H256::zero(),
     );
 
