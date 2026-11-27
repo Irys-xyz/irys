@@ -627,7 +627,7 @@ impl PartitionMiningServiceInner {
         })
     }
 
-    /// Derive one stored data offset before the mining loop.
+    /// Derive one stored data offset once the module is first assigned.
     ///
     /// A failure is logged and counted. The service still mines. An empty
     /// partition, or a capacity assignment with no ledger, is skipped.
@@ -1013,10 +1013,11 @@ impl PartitionMiningService {
 
     async fn start(mut self) {
         info!("Starting partition mining service");
-        // The startup derive maps partition offsets to ledger offsets, so it
-        // needs the tip's geometry, not the legacy default.
         self.state.refresh_mining_context();
-        self.state.check_startup_derive().await;
+        // The storage module service applies the startup verdict after this
+        // service starts, so the module is usually parked here. The startup
+        // derive runs once, at the first seed after the module is assigned.
+        let mut startup_derive_pending = true;
         loop {
             tokio::select! {
                 // Shutdown
@@ -1046,6 +1047,15 @@ impl PartitionMiningService {
                             // them: the drain keeps only the newest ranges
                             // and mines them first.
                             MiningBroadcastEvent::Seed(_) => {
+                                if startup_derive_pending
+                                    && self.state.storage_module.partition_assignment().is_some()
+                                {
+                                    startup_derive_pending = false;
+                                    // It maps partition offsets to ledger
+                                    // offsets, so it needs the tip's geometry.
+                                    self.state.refresh_mining_context();
+                                    self.state.check_startup_derive().await;
+                                }
                                 self.drain_and_mine(Arc::clone(&arc_evt));
                             }
                             other => self.apply_broadcast(other),
