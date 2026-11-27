@@ -2873,6 +2873,10 @@ mod assignment_reset_tests {
             vec![irys_types::partition_chunk_offset_ii!(0, 3)],
             "only the uninitialized span is packed, not the whole partition"
         );
+        assert!(
+            !harness.inner.pending_ranges.contains_key(&0),
+            "an accepted pack leaves no deferred retry"
+        );
     }
 
     /// A drive whose partition the chain released (v2 file, same chain) is
