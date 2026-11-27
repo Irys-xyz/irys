@@ -650,12 +650,20 @@ impl StorageModuleServiceInner {
         };
         let stamp_v2 = decision.stamp_v2;
         let drive = Arc::clone(module);
+        // A panic or a cancelled task left the drive partway through the
+        // transition. It is a drive fault like an I/O error: the message
+        // boundary stops the node before any lane flush can write the drive.
         let held =
             match tokio::task::spawn_blocking(move || drive.hold(next, epoch_height, stamp_v2))
                 .await
             {
                 Ok(held) => held?,
-                Err(join) => std::panic::resume_unwind(join.into_panic()),
+                Err(join) => {
+                    return Err(module.drive_fault(
+                        "apply the drive transition",
+                        eyre::eyre!("the blocking task did not finish: {join}"),
+                    ));
+                }
             };
         match held {
             Held::Kept => {}
