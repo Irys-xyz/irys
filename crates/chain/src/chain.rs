@@ -1508,6 +1508,10 @@ impl IrysNode {
                     let err = e.wrap_err("init_services failed");
                     let reason = format!("{err:?}");
                     error!(error = ?err, "Failed to initialize services");
+                    // Tasks init_services already spawned (the supply state
+                    // backfill) hold child tokens of this one. Stop them, as
+                    // the normal shutdown does, before reporting the error.
+                    shutdown_token.cancel();
                     let _ = irys_node_ctx_tx.send(Err(err));
                     return ShutdownReason::FatalError(reason);
                 }

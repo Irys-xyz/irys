@@ -1340,6 +1340,15 @@ fn validate_existing_packing_params(
     // process, and it must not follow a change to this directory.
     let params = PackingParams::from_toml(params_path)?;
 
+    // A file of a newer version is not this node's to rewrite: refuse it
+    // before any label, index row or file changes, on every submodule.
+    if let Some(version) = params.version.filter(|v| *v > PACKING_PARAMS_VERSION) {
+        eyre::bail!(
+            "packing params at {} record file version {version}, newer than this node supports ({PACKING_PARAMS_VERSION})",
+            params_path.display()
+        );
+    }
+
     ensure!(
         params.packing_address == config.node_config.miner_address(),
         "Active mining address: {} does not match partition packing address {}",
@@ -1443,8 +1452,22 @@ pub fn stop_node_for_drive_fault(message: &str) -> ! {
         panic!("{message}");
     }
     error!("{message}");
-    eprintln!("{message}");
+    write_fault_message(&mut std::io::stderr(), message);
     std::process::abort()
+}
+
+/// Checksum suspects, checksum repairs and packing retries, as one slot exit
+/// read them.
+type QueuedRepairs = (
+    BTreeSet<PartitionChunkOffset>,
+    BTreeSet<PartitionChunkOffset>,
+    Vec<Interval<PartitionChunkOffset>>,
+);
+
+/// Best effort: a failed write (a closed or full stderr) must not panic and
+/// unwind before the abort, which would run drop flushes on the faulted drive.
+fn write_fault_message(out: &mut impl std::io::Write, message: &str) {
+    let _ = writeln!(out, "{message}");
 }
 
 /// Make [`stop_node_for_drive_fault`] panic instead of aborting, so a test
@@ -2209,6 +2232,9 @@ thread_local! {
     /// and before its coverage drop and the packing params rebind.
     static FAIL_AFTER_OPEN_KEEP_ENTROPY_INTERVALS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Runs once in a slot exit before the relabel reads the queued repairs.
+    static BEFORE_KEEP_ENTROPY_RELABEL: std::cell::Cell<Option<fn(&StorageModule)>> =
+        const { std::cell::Cell::new(None) };
     /// Runs once in a slot exit after the relabel and before the store.
     static AFTER_KEEP_ENTROPY_RELABEL: std::cell::Cell<Option<fn(&StorageModule)>> =
         const { std::cell::Cell::new(None) };
@@ -3124,9 +3150,12 @@ impl StorageModule {
     /// The files are written one by one. An error is not recovered here: the
     /// assignment paths stop the node on it (see [`Self::expect_drive_io`]),
     /// which leaves the files exactly as a crash at that write would. Open
-    /// brings submodule files that disagree to one slot (see
+    /// brings same-partition submodule files that disagree to one slot (see
     /// `uninitialize_old_slot_at_open`), and a full wipe's marker is still
-    /// set, so the next open finishes it.
+    /// set, so the next open finishes it. A module with several submodules
+    /// whose store changed the partition and stopped between two files is
+    /// refused at open instead (its files name two partitions) and needs the
+    /// operator. A production drive has one submodule, so one atomic file.
     fn store_assignment(
         &self,
         assignment: &mut Option<PartitionAssignment>,
@@ -4523,18 +4552,15 @@ impl StorageModule {
         next: PartitionAssignment,
         update_height: u64,
     ) -> eyre::Result<Vec<Interval<PartitionChunkOffset>>> {
-        // What is queued now is relabelled by this exit and packed by its
-        // caller. An entry queued later (a checksum cut or a failed pack after
-        // the relabel, before the store) is not, so it stays queued.
-        let queued = {
-            let _sync = self.lock_sync();
-            (
-                recover_mutex(&self.crc_suspects).clone(),
-                recover_mutex(&self.crc_repairs).clone(),
-                recover_mutex(&self.packing_retries).clone(),
-            )
-        };
-        let spans = self.uninitialize_keeping_entropy()?;
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_KEEP_ENTROPY_RELABEL.with(std::cell::Cell::take) {
+            hook(self);
+        }
+        // `queued` is what the relabel read, in its own sync section: those
+        // offsets are now `Uninitialized` and packed by the caller. An entry
+        // queued outside it (drained and requeued by a checksum confirm, a
+        // cut or a failed pack after the relabel) is not, so it stays queued.
+        let (spans, queued) = self.uninitialize_keeping_entropy()?;
         #[cfg(test)]
         if let Some(hook) = AFTER_KEEP_ENTROPY_RELABEL.with(std::cell::Cell::take) {
             hook(self);
@@ -4581,7 +4607,13 @@ impl StorageModule {
     /// 5. `pending` is cleared again. A data write that resolved its offsets
     ///    from the old rows before step 4 cannot commit; one that starts
     ///    after finds no row.
-    fn uninitialize_keeping_entropy(&self) -> eyre::Result<Vec<Interval<PartitionChunkOffset>>> {
+    ///
+    /// Also returns the checksum suspects, repairs and packing retries this
+    /// call read in its sync section, for the caller to drop once the new
+    /// assignment is stored.
+    fn uninitialize_keeping_entropy(
+        &self,
+    ) -> eyre::Result<(Vec<Interval<PartitionChunkOffset>>, QueuedRepairs)> {
         #[cfg(test)]
         self.note_sync_lock_probe();
         let sync = self.lock_sync();
@@ -4592,9 +4624,14 @@ impl StorageModule {
         }
         // A registration computed for the old slot does not commit.
         let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
+        let queued: QueuedRepairs = (
+            recover_mutex(&self.crc_suspects).clone(),
+            recover_mutex(&self.crc_repairs).clone(),
+            recover_mutex(&self.packing_retries).clone(),
+        );
         let mut doubtful = self.snapshot_nondurable_offsets();
-        doubtful.extend(recover_mutex(&self.crc_suspects).iter().copied());
-        doubtful.extend(recover_mutex(&self.crc_repairs).iter().copied());
+        doubtful.extend(queued.0.iter().copied());
+        doubtful.extend(queued.1.iter().copied());
         // Checksum suspects, repairs and packing retries stay queued until
         // the caller has stored the new assignment: a failed exit must not
         // lose them.
@@ -4669,12 +4706,13 @@ impl StorageModule {
         // Before finality the physical suffix remains available for a reorg,
         // but a new packing job must use the current logical partition size.
         let last = PartitionChunkOffset::from(self.partition_chunks() as u32 - 1);
-        Ok(image
+        let spans = image
             .iter()
             .filter(|(_, kind)| **kind == ChunkType::Uninitialized)
             .filter(|(interval, _)| interval.start() <= last)
             .map(|(interval, _)| ii(interval.start(), interval.end().min(last)))
-            .collect())
+            .collect();
+        Ok((spans, queued))
     }
 
     /// Packing params for every submodule. The caller holds the assignment
@@ -8601,7 +8639,6 @@ impl StorageModule {
         _sync: &std::sync::MutexGuard<'_, ()>,
         spans: &[Interval<PartitionChunkOffset>],
     ) -> eyre::Result<()> {
-        let previous_generation = self.load_publish_generation();
         let previous_map = {
             let mut guard = self.intervals.write().unwrap();
             let previous = guard.clone();
@@ -8644,14 +8681,14 @@ impl StorageModule {
             },
             true,
         ) {
-            self.restore_rollback_intervals(previous_map, previous_generation);
+            self.restore_rollback_intervals(previous_map);
             self.republish_restored_intervals();
             return Err(err);
         }
         // `Ok` is also a snapshot that did not replace the file. Do not
         // clear proofs over the previous image.
         if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish) {
-            self.restore_rollback_intervals(previous_map, previous_generation);
+            self.restore_rollback_intervals(previous_map);
             self.republish_restored_intervals();
             eyre::bail!("rollback interval image was not published");
         }
@@ -8679,14 +8716,17 @@ impl StorageModule {
         }
     }
 
-    /// Put the pre-rollback map and publish generation back. `store` writes
-    /// the captured value. A decrement would move a generation this call did
-    /// not own.
-    fn restore_rollback_intervals(&self, previous_map: StorageIntervals, previous_generation: u64) {
+    /// Put the pre-rollback map back and bump the publish generation again,
+    /// in the same intervals-lock section. The generation never goes back:
+    /// putting the old value back would let a later publish reach the value
+    /// a writer copied from the failed image, and that writer could then
+    /// store that image over the later publish. A writer that copied before
+    /// the failed publish fails its check too; its dirty bits stay, so a
+    /// later flush writes the restored map.
+    fn restore_rollback_intervals(&self, previous_map: StorageIntervals) {
         let mut guard = self.intervals.write().unwrap();
         *guard = previous_map;
-        self.publish_generation
-            .store(previous_generation, Ordering::SeqCst);
+        self.publish_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Drops any queued (not-yet-synced) chunk writes whose partition offset
@@ -14712,8 +14752,8 @@ mod tests {
         assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Data));
         assert_eq!(
             storage.publish_generation.load(Ordering::SeqCst),
-            publish_before,
-            "{engine:?}: a failed replace left the publish generation bumped"
+            publish_before + 2,
+            "{engine:?}: a failed replace must move the generation on, never back"
         );
 
         storage.abandon_on_drop_for_test();
@@ -15767,6 +15807,126 @@ mod tests {
         drop(parked);
         drop(tmp);
         Ok(())
+    }
+
+    /// A failed rollback publish must not hand its generation value back: a
+    /// writer that copied the failed image at that generation would pass its
+    /// check after a later publish reached the same value, and store the
+    /// stale image over it.
+    #[test]
+    fn failed_publish_generation_is_never_reused() -> eyre::Result<()> {
+        let (tmp, _config, storage) = open_assigned_module("rollback_generation_monotonic", 30)?;
+        let (_bytes, data_root) = settle_proved_prefix(&storage)?;
+        let publish_before = storage.publish_generation.load(Ordering::SeqCst);
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalImageCommit);
+        let _ = storage
+            .rollback_unassigned_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(3),
+                &[data_root],
+            )
+            .expect_err("the interval replace was injected to fail");
+        // A writer that copied the failed image holds this generation.
+        let stale_publish = publish_before + 1;
+        let epoch = storage.load_interval_image_epoch();
+        let crc_epoch = storage.load_crc_cut_epoch();
+
+        storage.rollback_unassigned_range(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(3),
+            &[data_root],
+        )?;
+        assert!(
+            !storage.interval_image_acceptable(epoch, crc_epoch, stale_publish),
+            "a snapshot of the failed publish passes after a later publish"
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A submodule file of a newer version is refused at open, before any
+    /// label, index row or file changes, even when the assignment asks for
+    /// a slot exit.
+    #[test]
+    fn open_refuses_a_newer_packing_params_version() -> eyre::Result<()> {
+        let (tmp, config, storage) = open_assigned_module("keep_entropy_newer_version", 30)?;
+        let _ = seed_slot_exit(&storage)?;
+        let next = publish_slot_one(&storage);
+        drop(storage);
+        let params_path = tmp.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
+        let mut params = PackingParams::from_toml(&params_path)?;
+        params.version = Some(PACKING_PARAMS_VERSION + 1);
+        params.write_to_disk(&params_path)?;
+        let params_before = fs::read(&params_path)?;
+        let intervals_path = tmp.path().join("hdd0").join("intervals.json");
+        let intervals_before = fs::read(&intervals_path)?;
+
+        let mut info = crc_hold_info(tmp.path());
+        info.partition_assignment = Some(next);
+        let err = StorageModule::new(&info, &config).expect_err("a newer file is refused");
+        assert!(
+            err.to_string().contains("newer than this node supports"),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains(&params_path.display().to_string()),
+            "{err}"
+        );
+        assert_eq!(
+            fs::read(&params_path)?,
+            params_before,
+            "the file was rewritten"
+        );
+        assert_eq!(
+            fs::read(&intervals_path)?,
+            intervals_before,
+            "labels changed"
+        );
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A checksum suspect drained by a confirm before the exit's relabel was
+    /// not relabelled (it stays `Entropy`). Requeued after the relabel, it
+    /// must stay queued after the exit.
+    #[test]
+    fn slot_exit_keeps_a_suspect_requeued_around_the_relabel() -> eyre::Result<()> {
+        fn drain_suspects(storage: &StorageModule) {
+            let _ = std::mem::take(&mut *recover_mutex(&storage.crc_suspects));
+        }
+        fn requeue_suspect(storage: &StorageModule) {
+            recover_mutex(&storage.crc_suspects).insert(PartitionChunkOffset::from(1));
+        }
+        let (tmp, _config, storage) = open_assigned_module("keep_entropy_suspect", 30)?;
+        let _ = seed_slot_exit(&storage)?;
+        recover_mutex(&storage.crc_suspects).insert(PartitionChunkOffset::from(1));
+        BEFORE_KEEP_ENTROPY_RELABEL.with(|hook| hook.set(Some(drain_suspects)));
+        AFTER_KEEP_ENTROPY_RELABEL.with(|hook| hook.set(Some(requeue_suspect)));
+        storage.reset_keep_entropy_with_assignment(publish_slot_one(&storage), 7)?;
+        assert_eq!(live_label(&storage, 1), Some(ChunkType::Entropy));
+        assert!(
+            recover_mutex(&storage.crc_suspects).contains(&PartitionChunkOffset::from(1)),
+            "the requeued suspect was dropped"
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A failed stderr write before the drive-fault abort does not panic.
+    #[test]
+    fn fault_message_ignores_a_failed_write() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        write_fault_message(&mut Broken, "storage module 0: drive fault");
     }
 
     /// A completion that copied the map before rollback must not write that

@@ -167,22 +167,47 @@ fn placement_key(a: &PartitionAssignment) -> (u32, H256) {
 }
 
 /// First holder (in id order) of each assigned hash.
+///
+/// A drive that could take the assignment at this epoch is preferred over one
+/// that must wait because it leaves its recorded ledger slot with a record
+/// newer than the epoch: otherwise the first drive in config order would
+/// wait and leave the partition unserved, and reversing the order would serve
+/// it. Config order only breaks ties.
 fn first_holders(inputs: &VerdictInputs<'_>) -> HashMap<H256, usize> {
-    let assigned: HashSet<H256> = inputs
+    let by_hash: HashMap<H256, PartitionAssignment> = inputs
         .assignments
         .iter()
-        .map(|a| a.partition_hash)
+        .map(|a| (a.partition_hash, *a))
         .collect();
-    let mut m = HashMap::new();
+    let mut eligible = HashMap::new();
+    let mut first = HashMap::new();
     for (i, (_, f)) in inputs.drives.iter().enumerate() {
         if let DriveFile::Recorded(p) = f
             && let Some(h) = p.partition_hash
-            && assigned.contains(&h)
+            && let Some(new) = by_hash.get(&h)
         {
-            m.entry(h).or_insert(i);
+            first.entry(h).or_insert(i);
+            if !waits_on_a_newer_record(inputs, p, new) {
+                eligible.entry(h).or_insert(i);
+            }
         }
     }
-    m
+    first.extend(eligible);
+    first
+}
+
+/// The drive records `new`'s partition on another ledger slot, installed
+/// after the epoch judged here: it waits for a later epoch.
+fn waits_on_a_newer_record(
+    inputs: &VerdictInputs<'_>,
+    p: &PackingParams,
+    new: &PartitionAssignment,
+) -> bool {
+    let leaving = p.ledger.is_some() && (p.ledger, p.slot) != (new.ledger_id, new.slot_index);
+    let recorded_newer = p
+        .trusted_assigned_height()
+        .is_some_and(|h| h > inputs.epoch_height);
+    leaving && recorded_newer
 }
 
 /// Assignments no drive holds, in placement order.
@@ -293,8 +318,7 @@ fn classify(
         if holders.get(&hash) != Some(&id) {
             return Classified::wait(WaitReason::DuplicateHolder(hash));
         }
-        let leaving = p.ledger.is_some() && (p.ledger, p.slot) != (new.ledger_id, new.slot_index);
-        if leaving && recorded_newer {
+        if waits_on_a_newer_record(inputs, p, &new) {
             return Classified::wait(WaitReason::RecordedNewerThanEpoch);
         }
         // A v1 file, a file of another genesis, or a v2 file with no trusted
@@ -360,17 +384,17 @@ pub fn drive_verdict_inputs_from_disk(
                 .base_directory
                 .join(path)
                 .join(PACKING_PARAMS_FILE_NAME);
-            let found = match file.try_exists() {
-                Ok(false) => DriveFile::Missing,
-                Ok(true) => {
-                    DriveFile::Recorded(PackingParams::from_toml(&file).map_err(|err| {
-                        eyre::eyre!(
-                            "drive {}: packing params at {} cannot be read: {err:#}",
-                            path.display(),
-                            file.display()
-                        )
-                    })?)
-                }
+            // The entry itself, not its target: a dangling symlink is a
+            // record that cannot be read, not a fresh drive.
+            let found = match std::fs::symlink_metadata(&file) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => DriveFile::Missing,
+                Ok(_) => DriveFile::Recorded(PackingParams::from_toml(&file).map_err(|err| {
+                    eyre::eyre!(
+                        "drive {}: packing params at {} cannot be read: {err:#}",
+                        path.display(),
+                        file.display()
+                    )
+                })?),
                 Err(err) => eyre::bail!(
                     "drive {}: packing params at {} cannot be checked: {err}",
                     path.display(),
@@ -1034,6 +1058,58 @@ mod tests {
             .expect_err("an unreadable file stops the node");
         let err = format!("{err:#}");
         assert!(err.contains("drive unreadable"), "{err}");
+    }
+
+    /// Two drives record the same assigned partition. The one that must wait
+    /// (it leaves its recorded slot with a record newer than the epoch) does
+    /// not shadow the one that can take the assignment, in either order.
+    #[test]
+    fn eligible_duplicate_holder_wins_whatever_the_order() {
+        let newer = rec(v2(1, Some(DataLedger::Publish), Some(1), 150));
+        let current = rec(v2(1, Some(DataLedger::Publish), Some(0), 100));
+        let assigned = [pa(1, Some(DataLedger::Publish), Some(0))];
+        for (files, holder) in [
+            ([newer.clone(), current.clone()], 1_usize),
+            ([current, newer], 0_usize),
+        ] {
+            let drives: Vec<_> = files
+                .into_iter()
+                .enumerate()
+                .map(|(i, f)| drive(i, f))
+                .collect();
+            let (d, u) = run(&drives, &assigned, false);
+            assert_eq!(d[holder].verdict, DriveVerdict::Ours, "{d:?}");
+            assert_eq!(assigned_hash(&d[holder]), Some(h(1)));
+            assert_eq!(
+                d[1 - holder].verdict,
+                DriveVerdict::Wait(WaitReason::DuplicateHolder(h(1))),
+                "{d:?}"
+            );
+            assert!(u.is_empty(), "the partition is served");
+        }
+    }
+
+    /// A packing params entry that is a dangling symlink is not a fresh drive:
+    /// it is an error naming the drive.
+    #[test]
+    fn inputs_from_disk_fails_on_a_dangling_symlink() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("drive_inputs_symlink")
+            .build();
+        let mut node_config = irys_types::NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let linked = PathBuf::from("linked");
+        std::fs::create_dir_all(tmp.path().join(&linked)).unwrap();
+        std::os::unix::fs::symlink(
+            tmp.path().join("unmounted").join(PACKING_PARAMS_FILE_NAME),
+            tmp.path().join(&linked).join(PACKING_PARAMS_FILE_NAME),
+        )
+        .unwrap();
+        let err = drive_verdict_inputs_from_disk(&config, &[linked])
+            .expect_err("a dangling record is not a fresh drive");
+        let err = format!("{err:#}");
+        assert!(err.contains("drive linked"), "{err}");
     }
 
     /// Every drive is opened and ids are path indexes. Open never replaces a

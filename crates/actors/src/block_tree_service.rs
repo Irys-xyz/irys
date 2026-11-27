@@ -4222,7 +4222,11 @@ mod tests {
             old_tip.block_hash,
             "the lighter fork does not move the tip"
         );
-        drain_assignment_update_heights(&mut h);
+        assert_eq!(
+            drain_assignment_update_heights(&mut h),
+            vec![],
+            "a noncanonical epoch block sends no assignments"
+        );
 
         h.inner
             .on_block_validation_finished(second_epoch.block_hash, ValidationResult::Valid)
@@ -4278,7 +4282,11 @@ mod tests {
             tip.block_hash,
             "a cumulative difficulty tie keeps the tip"
         );
-        drain_assignment_update_heights(&mut h);
+        assert_eq!(
+            drain_assignment_update_heights(&mut h),
+            vec![],
+            "a tied epoch block that is not the tip sends no assignments"
+        );
 
         h.inner
             .on_block_validation_finished(second_epoch.block_hash, ValidationResult::Valid)
