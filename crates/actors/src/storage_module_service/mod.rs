@@ -685,21 +685,32 @@ impl StorageModuleServiceInner {
         };
         let stamp_v2 = decision.stamp_v2;
         let drive = Arc::clone(module);
-        // A panic or a cancelled task left the drive partway through the
-        // transition. It is a drive fault like an I/O error: the message
-        // boundary stops the node before any lane flush can write the drive.
-        let held =
-            match tokio::task::spawn_blocking(move || drive.hold(next, epoch_height, stamp_v2))
-                .await
-            {
-                Ok(held) => held?,
-                Err(join) => {
-                    return Err(module.drive_fault(
-                        "apply the drive transition",
-                        eyre::eyre!("the blocking task did not finish: {join}"),
-                    ));
-                }
-            };
+        // A panic inside the transition leaves the drive partway through it.
+        // Abort inside the blocking task, before the unwind releases the
+        // module's locks, so no lane flush can write the drive in between.
+        // A cancelled task is a drive fault the message boundary stops on.
+        let held = match tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drive.hold(next, epoch_height, stamp_v2)
+            }))
+            .unwrap_or_else(|_| {
+                stop_node_for_drive_fault(&format!(
+                    "storage module {} ({}): the drive transition panicked; stopping the node",
+                    drive.id,
+                    drive.display_paths()
+                ))
+            })
+        })
+        .await
+        {
+            Ok(held) => held?,
+            Err(join) => {
+                return Err(module.drive_fault(
+                    "apply the drive transition",
+                    eyre::eyre!("the blocking task did not finish: {join}"),
+                ));
+            }
+        };
         match held {
             Held::Kept => {}
             Held::Adopted => self.enqueue_uninitialized(module),

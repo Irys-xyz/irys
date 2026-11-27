@@ -75,7 +75,7 @@ impl StorageSubmodulesConfig {
     /// itself; a relative one names the directory under the node's base
     /// directory that open has always used. Every consumer then sees the same
     /// stable path.
-    fn resolved(mut self, instance_dir: &Path) -> eyre::Result<Self> {
+    pub fn resolved(mut self, instance_dir: &Path) -> eyre::Result<Self> {
         let base = std::path::absolute(instance_dir).map_err(|err| {
             eyre::eyre!(
                 "cannot resolve base directory {}: {err}",

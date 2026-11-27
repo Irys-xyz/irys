@@ -695,6 +695,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             self.cfg.base_directory.join(SUBMODULES_CONFIG_FILE_NAME),
             NodeMode::Miner,
         )
+        .and_then(|config| config.resolved(&self.cfg.base_directory))
         .expect("submodule config is readable")
         .submodule_paths
     }
